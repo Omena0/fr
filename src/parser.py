@@ -1,0 +1,1430 @@
+from utils import InputStream, strip_all, split
+from builtin_funcs import funcs
+from typing import Any, cast
+import ast
+import sys
+import threading
+
+AstType = list[dict[str, Any]]
+VarType = dict[str, dict[str, Any]]
+
+# Base types
+types = ['bool', 'int', 'float', 'string', 'str', 'set', 'list', 'dict']
+
+# Const: Value will not change and cannot be changed
+# If the parser cannot eval the value then an exception is thrown.
+modifiers = ['const']
+
+current_func = '<module>'
+
+# Track loop depth for break/continue validation
+loop_depth = 0
+
+vars:VarType = {}
+
+# Save the initial builtin function NAMES to restore on each parse
+# This prevents user-defined functions from contaminating subsequent parses
+builtin_func_names = set(funcs.keys())
+
+class SkipNode: ...
+
+def is_literal(value):
+    if not isinstance(value, dict):
+        value = parse_literal(value)
+
+    # Variable references are not literals (even if their value is known)
+    if isinstance(value, str):
+        return False
+
+    if not isinstance(value, dict):
+        return True
+
+    if 'const' in value.get('mods', []):
+        return True
+
+    return False
+
+def get_type(value:Any) -> str:
+    return type(value).__name__
+
+def parse_fstring(content: str) -> dict[str, Any]:
+    """Parse an f-string and return a string concatenation expression.
+    
+    Example: f"Hello {name}, you are {age} years old"
+    Becomes: "Hello " + str(name) + ", you are " + str(age) + " years old"
+    """
+    parts = []
+    current = ""
+    i = 0
+    
+    while i < len(content):
+        if content[i] == '{':
+            # Save the current literal part if any
+            if current:
+                parts.append({
+                    "type": "string",
+                    "value": current
+                })
+                current = ""
+            
+            # Find the matching closing brace
+            depth = 1
+            j = i + 1
+            expr_str = ""
+            while j < len(content) and depth > 0:
+                if content[j] == '{':
+                    depth += 1
+                elif content[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                expr_str += content[j]
+                j += 1
+            
+            if depth != 0:
+                raise SyntaxError(f"Unclosed brace in f-string")
+            
+            # Parse the expression inside the braces
+            expr_result = parse_expr(expr_str.strip())
+            
+            # Wrap the expression in str() conversion
+            str_call = {
+                "type": "call",
+                "name": "str",
+                "args": [expr_result]
+            }
+            parts.append(str_call)
+            
+            i = j + 1
+        else:
+            current += content[i]
+            i += 1
+    
+    # Add any remaining literal part
+    if current:
+        parts.append({
+            "type": "string",
+            "value": current
+        })
+    
+    # If only one part, return it directly
+    if len(parts) == 0:
+        return {
+            "type": "string",
+            "value": ""
+        }
+    elif len(parts) == 1:
+        return parts[0]
+    
+    # Build a chain of concatenations
+    result = parts[0]
+    for part in parts[1:]:
+        result = {
+            "type": "binop",
+            "op": "+",
+            "left": result,
+            "right": part
+        }
+    
+    return result
+
+def _extract_value(elem: Any) -> Any:
+    """Extract the actual value from a parsed element (dict with 'value' key or raw value)."""
+    if isinstance(elem, dict) and 'value' in elem:
+        return elem['value']
+    return elem
+
+def _parse_list_elements(list_content: str) -> list[Any]:
+    """Parse comma-separated list elements, respecting nesting depth."""
+    elements = []
+    depth = 0
+    current = ""
+    
+    for char in list_content:
+        if char in '([{':
+            depth += 1
+            current += char
+        elif char in ')]}':
+            depth -= 1
+            current += char
+        elif char == ',' and depth == 0:
+            if current.strip():
+                elem = parse_literal(current.strip())
+                elements.append(_extract_value(elem))
+            current = ""
+        else:
+            current += char
+    
+    # Handle last element
+    if current.strip():
+        elem = parse_literal(current.strip())
+        elements.append(_extract_value(elem))
+    
+    return elements
+
+def _has_operators_outside_context(text: str) -> bool:
+    """Check if text has operators outside of strings/parentheses (i.e., is an expression)."""
+    in_string = False
+    escape_next = False
+    paren_depth = 0
+    
+    for i, c in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+            
+        if c == '\\':
+            escape_next = True
+            continue
+            
+        if c == '"':
+            in_string = not in_string
+        elif not in_string:
+            if c == '(':
+                paren_depth += 1
+            elif c == ')':
+                paren_depth -= 1
+            elif paren_depth == 0 and c in {'+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|'}:
+                return True
+    
+    return False
+
+def parse_literal(text: str) -> dict[str, str|Any] | Any:
+    """Parse a literal value (string, number, bool, list) or return text if it's a variable/expression."""
+    text = str(text).strip()
+
+    # List literal: [1, 2, 3]
+    if text.startswith('[') and text.endswith(']'):
+        list_content = text[1:-1].strip()
+        if not list_content:
+            return {"type": "list", "value": []}
+        
+        elements = _parse_list_elements(list_content)
+        return {"type": "list", "value": elements}
+
+    # Check if this is an expression with operators
+    if _has_operators_outside_context(text):
+        return parse_expr(text)
+
+    # F-String: f"Hello {name}"
+    if text.startswith('f"') and text.endswith('"'):
+        return parse_fstring(text[2:-1])
+    
+    # String literal: "hello"
+    if text.startswith('"') and text.endswith('"'):
+        return {"type": "string", "value": text[1:-1]}
+
+    # Integer: 123
+    if text.isdigit() or (text.startswith('-') and text[1:].isdigit()):
+        return {"type": "int", "value": int(text)}
+
+    # Float: 123.456
+    if '.' in text:
+        try:
+            return {"type": "float", "value": float(text)}
+        except ValueError:
+            pass  # Not a valid float, continue to other checks
+
+    # Boolean: true/false
+    if text in {'true', 'false'}:
+        return {"type": "bool", "value": text}
+
+    # Function call: func(args)
+    if text.endswith(')') and '(' in text:
+        potential_name = text.split('(')[0]
+        if potential_name in funcs:
+            func_stream = InputStream(text)
+            name = func_stream.consume_word()
+            return parse_func_call(func_stream, name)
+
+    # Variable name or unparseable text
+    return text
+
+def _try_parse_as_function_call(value_str: str, parent_stream: InputStream | None) -> dict | None:
+    """Try to parse a string as a function call. Returns dict node or None if not a function call."""
+    func_stream = InputStream(value_str, parent_stream=parent_stream, offset_in_parent=0) if parent_stream else InputStream(value_str)
+    if parent_stream:
+        func_stream.file_path = parent_stream.get_root_stream().file_path
+    
+    name = func_stream.consume_word()
+    if func_stream.peek_char(1) != '(':
+        return None
+    
+    if name not in funcs:
+        error_msg = (parent_stream.format_error(f'Function {name}() is not defined.') 
+                    if parent_stream 
+                    else func_stream.format_error(f'Function {name}() is not defined.'))
+        raise SyntaxError(error_msg)
+    
+    return parse_func_call(func_stream, name)
+
+def parse_as_type(value: Any, target_type: str, can_be_func: bool = True, parent_stream: InputStream | None = None):
+    """Convert a value to the specified type, handling expressions, function calls, and type casting."""
+    # If value is already a dict (expression node), return it as-is
+    if isinstance(value, dict):
+        return value
+    
+    # Check if it's a variable reference
+    if value and isinstance(value, str) and value in vars:
+        return vars[value]
+
+    # Try to parse as function call
+    if can_be_func and isinstance(value, str):
+        func_result = _try_parse_as_function_call(value.strip(), parent_stream)
+        if func_result is not None:
+            return func_result
+
+    # Try to cast to the requested type
+    try:
+        if target_type == 'string':
+            # Strip quotes if present
+            if isinstance(value, str) and value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            return str(value)
+        elif target_type == 'int':
+            return int(value)
+        elif target_type == 'float':
+            return float(value)
+        elif target_type == 'bool':
+            return bool(value)
+        else:
+            # Unknown type, return as-is
+            return value
+    except (ValueError, TypeError) as e:
+        value_type_name = value.__class__.__name__
+        raise SyntaxError(f'Could not cast {value_type_name} -> {target_type}. [{value}]') from e
+
+def _split_args(args_text: str) -> list[str]:
+    """Split comma-separated arguments, respecting parentheses and string literals."""
+    if not args_text.strip():
+        return []
+    
+    # Use the split function from utils which handles strings and parentheses
+    args = split(args_text, ',')
+    
+    # Strip whitespace from each argument
+    return [arg.strip() for arg in args if arg.strip()]
+
+def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int) -> tuple[str, str | None]:
+    """Parse a single argument which may have a type annotation.
+    
+    Returns (name, type) where type is None if untyped.
+    """
+    parts = arg.split()
+    
+    if len(parts) == 1:
+        # Untyped argument: "x"
+        return (parts[0], None)
+    elif len(parts) == 2 and parts[0] in types:
+        # Typed argument: "int x"
+        return (parts[1], parts[0])
+    else:
+        # Invalid format
+        if check_comma and len(parts) >= 2:
+            # Has space but not a valid type, probably missing comma
+            orig = stream.orig_line(line)
+            char = orig.find(arg) + len(parts[0]) + 1
+            raise SyntaxError(f'?{line},{char}:Expected ",".')
+        else:
+            raise SyntaxError(f'Invalid argument "{arg}".')
+
+def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool = False) -> list[tuple[str, str | None]]:
+    """Parse function arguments. 
+    
+    Args:
+        stream: Input stream positioned before '('
+        check_comma: Whether to validate comma separation
+        parse_types: If True, parse type annotations; if False, return raw values
+    
+    Returns:
+        List of tuples: (name, type) where type is None if untyped or parse_types=False
+    """
+    stream.strip()
+    if not stream.consume('('):
+        raise SyntaxError(stream.format_error(f'Expected "(" but got "{stream.peek(10)}"'))
+
+    line = stream.line
+    
+    # Read until matching closing parenthesis
+    args_text = ''
+    depth = 1
+    new_arg = True
+    
+    while depth > 0 and stream.text:
+        chr = stream.seek(1)
+        
+        if chr == '(':
+            depth += 1
+        elif chr == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        elif chr == ',':
+            new_arg = True
+        else:
+            new_arg = False
+        
+        if chr == '\n' and not new_arg:
+            stream.seek_back_line()
+            raise SyntaxError(stream.format_error('Expected ")"'))
+        
+        if depth > 0:  # Don't include the final ')'
+            args_text += chr
+
+    if depth != 0:
+        raise SyntaxError(stream.format_error('Expected ")"'))
+
+    stream.strip()
+
+    if not args_text.strip():
+        return []
+
+    args = _split_args(args_text)
+
+    # Parse arguments based on parse_types flag
+    if not parse_types:
+        return [(arg, None) for arg in args]
+    
+    return [_parse_typed_arg(arg, check_comma, stream, line) for arg in args]
+
+def _normalize_operators(text: str) -> str:
+    """Normalize custom operators to Python equivalents."""
+    # Replace bitwise operators with logical operators
+    # Note: This changes semantics but matches the language's intent
+    return (text
+            .replace('&', ' and ')
+            .replace('|', ' or ')
+            .replace('\n', ' '))
+
+def parse_expr(text: str):
+    """Parse an expression using Python's AST parser and optionally evaluate constants."""
+    from runtime import eval_expr
+    import runtime as runtime_module
+
+    # Save and restore parse-time mode
+    old_runtime = runtime_module.runtime
+    runtime_module.runtime = False
+    
+    try:
+        text = _normalize_operators(text)
+        expr = ast.parse(text, mode='eval').body
+
+        def _ast_to_dict(node):
+            """Convert AST node to dictionary representation."""
+            if not node._fields:
+                return str(get_type(node))
+
+            result = {}
+            for field in node._fields:
+                # Skip "ctx" field as it's not needed for execution
+                if field == 'ctx':
+                    continue
+
+                value = getattr(node, field)
+                
+                # Recursively convert AST nodes
+                if hasattr(value, '_fields'):
+                    value = _ast_to_dict(value)
+                elif isinstance(value, list):
+                    value = [_ast_to_dict(item) for item in value]
+                
+                if value is not None:
+                    result[field] = value
+
+            return result
+
+        expr_dict = _ast_to_dict(expr)
+
+        # Try to evaluate constant expressions at parse time
+        try:
+            # Don't evaluate struct constructors at parse time
+            if 'func' in expr_dict:
+                func_name = expr_dict['func'].get('id') if isinstance(expr_dict['func'], dict) else None
+                if func_name:
+                    # Check if it's a direct struct constructor
+                    if func_name in vars and vars[func_name].get('type') == 'struct_def':
+                        return expr_dict
+                    # Check if it's a function that returns a struct type
+                    if func_name in funcs:
+                        return_type = funcs[func_name].get('return_type')
+                        if return_type and return_type in vars and vars[return_type].get('type') == 'struct_def':
+                            return expr_dict
+            
+            evaluated = eval_expr(expr_dict)
+            # Only use evaluated result if it's a proper constant (not a variable name)
+            # and the expression doesn't contain operators (already constant)
+            # Don't evaluate if it's just a variable reference ('id' key indicates a Name node)
+            if (evaluated is not None 
+                and not isinstance(evaluated, str) 
+                and 'op' not in expr_dict 
+                and 'ops' not in expr_dict
+                and 'id' not in expr_dict):  # Variable reference - keep as expr_dict
+                return evaluated
+        except Exception:
+            pass  # Can't evaluate at parse time, return the expression dict
+
+        return expr_dict
+    finally:
+        runtime_module.runtime = old_runtime
+
+def parse_scope(stream: InputStream, level: int = 0) -> AstType:
+    """Parse a code block enclosed in braces { }."""
+    stream.strip()
+    if not stream.consume('{'):
+        raise SyntaxError(stream.format_error('Expected "{".'))
+
+    ast = parse(stream, level=level+1)
+
+    stream.strip()
+    if not stream.consume('}'):
+        raise SyntaxError(stream.format_error('Expected "}".'))
+
+    return ast
+
+def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str, str|Any] | type[SkipNode]:
+    global current_func
+    current_func = name
+
+    args = parse_args(stream, parse_types=True)
+    for arg_name, arg_type in args:
+        vars[arg_name] = {
+            "type": arg_type if arg_type else "none",
+            "value": None
+        }
+
+    scope = parse_scope(stream)
+    stream.strip()
+
+
+    funcs[name] = {
+        "type": "func",
+        "args": args,
+        "func": scope,
+        "mods": mods,
+        "return_type": type
+    }
+
+    if 'const' in mods:
+        return SkipNode
+
+    return {
+        "type": "function",
+        "name": name,
+        "return": type,
+        "args": args,
+        "scope": scope,
+        "mods": mods
+    }
+
+def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list = []) -> dict[str, Any] | type[SkipNode]:
+    """Parse a variable declaration or assignment.
+    
+    Args:
+        stream: Input stream positioned after variable name
+        var_type: Type annotation (None for reassignments)
+        name: Variable name
+        mods: List of modifiers like 'const'
+    
+    Returns:
+        Variable AST node or SkipNode if const
+    """
+    stream.strip()
+
+    if not stream.consume('='):
+        raise SyntaxError(stream.format_error('Expected "=".'))
+
+    # Parse the value expression
+    value_text = stream.consume_until('\n').strip()
+    value = parse_expr(value_text)
+
+    # Resolve type for reassignments
+    if var_type is None:
+        if name in vars:
+            var_type = vars[name].get('type', 'any')
+        else:
+            var_type = 'any'  # Dynamic typing for new variables
+
+    # Type check/cast for non-dict values (var_type is guaranteed to be str here)
+    if not isinstance(value, dict):
+        value = parse_as_type(value, var_type, parent_stream=stream)
+
+    # Build the variable info dict
+    var_info = {
+        "type": var_type,
+        "value": value,
+        "mods": mods
+    }
+    
+    # Store in global vars table
+    vars[name] = var_info
+    
+    # Const variables are compile-time only
+    if 'const' in mods:
+        return SkipNode
+
+    # Return AST node for runtime
+    return {
+        "type": "var",
+        "name": name,
+        "value_type": var_type,
+        "value": value,
+        "mods": mods
+    }
+
+def _is_runtime_expression(value: dict) -> bool:
+    """Check if a dict represents an expression that must be evaluated at runtime."""
+    # Subscript expressions (indexing): arr[i]
+    if 'slice' in value:
+        return True
+    
+    # Field access: obj.field
+    if 'attr' in value:
+        return True
+    
+    # F-strings or other complex expressions
+    if 'values' in value and 'value' not in value:
+        return True
+    
+    # Function calls that can't be evaluated at compile time
+    if value.get('type') == 'call':
+        func_name = value.get('name', '')
+        return not funcs.get(func_name, {}).get('can_eval', False)
+    
+    return False
+
+def cast_value(value: Any, required_type: str):
+    """Cast a value to the required type, handling variables, expressions, and function calls."""
+    # Handle string values (might be variables or expressions)
+    if isinstance(value, str):
+        # Variable reference
+        if value in vars:
+            var_info = vars[value]
+            # Can't substitute non-literal variables
+            if not is_literal(value):
+                return parse_expr(value)
+            return var_info
+
+        # Function call
+        if '(' in value:
+            func_stream = InputStream(value)
+            func_name = func_stream.consume_word()
+            try:
+                return parse_func_call(func_stream, func_name)
+            except SyntaxError:
+                # Can't parse as function call, treat as expression
+                return parse_expr(value)
+
+        # General expression
+        return parse_expr(value)
+
+    # Handle dict values (AST nodes)
+    if not isinstance(value, dict):
+        # Primitive value, try to cast
+        actual_type = get_type(value)
+        if actual_type != required_type:
+            new_value = parse_as_type(value, required_type, can_be_func=False)
+            if new_value is None:
+                raise SyntaxError(f'Cannot cast {actual_type} -> {required_type}')
+            return {"type": required_type, "value": new_value}
+        return value
+
+    # Runtime expressions must be kept as-is
+    if _is_runtime_expression(value):
+        return value
+    
+    # Accept any type if required type is 'any'
+    if required_type == 'any':
+        return value
+    
+    # Extract type and value from dict
+    value_type = value.get('type')
+    actual_value = value.get('value')
+    
+    # If no value key, return as-is (complex expression)
+    if 'value' not in value:
+        return value
+    
+    # Type matches, return as-is
+    if value_type == required_type:
+        return value
+    
+    # Try to cast
+    new_value = parse_as_type(actual_value, required_type, can_be_func=False)
+    if new_value is None:
+        raise SyntaxError(f'Cannot cast {value_type} -> {required_type}')
+    
+    return {"type": required_type, "value": new_value}
+
+def cast_args(args: list, func: dict) -> list:
+    """Cast function arguments to match the function's expected types."""
+    func_args = func.get('args', [])
+    
+    # Handle both dict and list formats for function args
+    if isinstance(func_args, dict):
+        arg_types = list(func_args.values())
+    elif isinstance(func_args, list):
+        # List of tuples: [(name, type), ...]
+        arg_types = [arg_type for _, arg_type in func_args]
+    else:
+        return args
+
+    # Cast each argument to its required type
+    for i, arg in enumerate(args):
+        if i >= len(arg_types):
+            continue  # No type requirement for this arg
+        
+        required_type = arg_types[i]
+        if required_type is None:
+            continue  # No type requirement
+        
+        casted = cast_value(arg, required_type)
+        if casted != arg:
+            args[i] = casted
+
+    return args
+
+def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
+    """Check if a function call can be evaluated at parse time."""
+    func_mods = func.get('mods', [])
+    is_const = isinstance(func_mods, list) and 'const' in func_mods
+    
+    # Const functions are always evaluated at parse time
+    if is_const:
+        return True
+    
+    # Don't evaluate functions that return struct types at parse time
+    # (C VM needs runtime calls for struct constructors)
+    return_type = func.get('return_type', 'none')
+    if isinstance(return_type, str) and return_type in vars and vars[return_type].get('type') == 'struct_def':
+        return False
+    
+    # Function must allow evaluation and all args must be literals
+    return (func.get('can_eval', True) and 
+            all(is_literal(arg) for arg in arg_values))
+
+def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
+    """Evaluate a function call at parse time (compile time)."""
+    func_type = func['type']
+    
+    # Extract actual values from argument nodes
+    func_args = []
+    for arg in arg_values:
+        if isinstance(arg, dict):
+            func_args.append(arg.get('value', arg))
+        else:
+            func_args.append(arg)
+    
+    # Evaluate builtin function
+    if func_type == 'builtin':
+        func_callable = func.get('func')
+        if not callable(func_callable):
+            raise SyntaxError(f"Function {name} is not callable")
+        return func_callable(*func_args)
+    
+    # Evaluate user-defined const function
+    from runtime import run_scope
+    import runtime
+    
+    # Set up function arguments in vars
+    func_arg_names = func.get('args', [])
+    if isinstance(func_arg_names, list):
+        for (arg_name, _), arg_value in zip(func_arg_names, func_args):
+            if isinstance(arg_name, str):
+                vars[arg_name] = {
+                    "type": get_type(arg_value),
+                    "value": arg_value
+                }
+    
+    # Execute function body
+    runtime.vars = vars
+    runtime.runtime = False
+    
+    func_body = func.get('func')
+    if not isinstance(func_body, list):
+        raise SyntaxError(f"Function {name} has invalid body")
+    
+    return run_scope(cast(AstType, func_body))
+
+def parse_func_call(stream: InputStream, name: str) -> dict:
+    """Parse a function call and optionally evaluate it at compile time."""
+    if name not in funcs:
+        raise SyntaxError(stream.format_error(f'Function "{name}" is not defined.'))
+
+    # Parse arguments
+    args = parse_args(stream, check_comma=False)
+    arg_values = [arg_name for arg_name, _ in args]
+    arg_values = list(map(parse_literal, arg_values))
+
+    func = funcs[name]
+
+    # Type-cast arguments to match function signature
+    arg_values = cast_args(arg_values, func)
+
+    # Try to evaluate at parse time if possible
+    if _can_eval_at_parse_time(func, arg_values):
+        value = _eval_func_at_parse_time(name, func, arg_values)
+        return {
+            "type": get_type(value),
+            "value": value
+        }
+
+    # Return runtime function call node
+    return {
+        "type": "call",
+        "name": name,
+        "args": arg_values,
+        "return_type": str(func.get('return_type', 'none'))
+    }
+
+def _try_unroll_for_loop(loop_node: dict, max_iterations: int = 10) -> dict | None:
+    """Try to unroll a for loop if bounds are constant and iteration count is small.
+    Returns a scope node containing unrolled statements, or None if can't unroll."""
+    
+    # Extract loop components
+    var_name = loop_node.get('var')
+    start_node = loop_node.get('start')
+    end_node = loop_node.get('end')
+    step_node = loop_node.get('step', 1)
+    scope = loop_node.get('scope', [])
+    
+    # Try to evaluate bounds as constants
+    start_val = _eval_const_node(start_node)
+    end_val = _eval_const_node(end_node)
+    step_val = _eval_const_node(step_node)
+    
+    if start_val is None or end_val is None or step_val is None:
+        return None  # Can't evaluate bounds
+    
+    # Check if iteration count is reasonable
+    if step_val == 0:
+        return None  # Infinite loop
+    
+    iterations = abs((end_val - start_val) // step_val)
+    if iterations <= 0 or iterations > max_iterations:
+        return None  # Too many iterations or invalid range
+    
+    # Unroll the loop into a sequence of statements
+    unrolled_stmts = []
+    
+    for i in range(start_val, end_val, step_val):
+        # Add loop variable assignment
+        var_stmt = {
+            "type": "var",
+            "name": var_name,
+            "value_type": "int",
+            "value": i,
+            "mods": []
+        }
+        unrolled_stmts.append(var_stmt)
+        
+        # Add each statement from the loop body
+        # (they can reference the loop variable)
+        for stmt in scope:
+            unrolled_stmts.append(stmt)
+    
+    # Return a special "unrolled" marker node that will be flattened into the parent scope
+    return {
+        "type": "unrolled_loop",
+        "statements": unrolled_stmts
+    }
+
+def _eval_const_node(node: Any) -> Any:
+    """Evaluate a node to a constant value if possible."""
+    if node is None:
+        return None
+    if not isinstance(node, dict):
+        return node
+    
+    # Direct value
+    if 'value' in node and not ('left' in node or 'op' in node):
+        return node['value']
+    
+    # Simple operations
+    if 'left' in node and 'op' in node and 'right' in node:
+        left = _eval_const_node(node['left'])
+        right = _eval_const_node(node['right'])
+        
+        if left is not None and right is not None:
+            op = node['op']
+            try:
+                if op == 'Add':
+                    return left + right
+                elif op == 'Sub':
+                    return left - right
+                elif op == 'Mult':
+                    return left * right
+                elif op == 'Div':
+                    return left // right if isinstance(left, int) else left / right
+            except:
+                return None
+    
+    return None
+
+def parse_switch_body(stream:InputStream, level:int) -> AstType:
+    """Parse statements in a switch case/default body until we hit case/default/}"""
+    body = []
+    while True:
+        stream.strip()
+        
+        # Peek ahead to see if we're at the end of this case body
+        next_word = stream.peek_word()
+        # Check if next_word STARTS with case or default (since peek_word includes :)
+        if next_word.startswith('case') or next_word.startswith('default'):
+            break
+        if stream.peek(1) == '}':
+            break
+        
+        # Check if there's any text left
+        if not stream.text:
+            break
+        
+        stmt = parse_any(stream, level)
+        if stmt is not None and stmt is not SkipNode:
+            body.append(stmt)
+    
+    return body
+
+def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[SkipNode]:
+    global loop_depth
+    stream.strip()
+
+    mods = []
+    # Either a variable or a function def
+    if level == 0:
+        # Check for struct definition first
+        if stream.peek_word() == 'struct':
+            stream.consume('struct')
+            stream.strip()
+            
+            # Get struct name
+            struct_name = stream.consume_word()
+            
+            # Expect opening brace
+            stream.strip()
+            if not stream.consume('{'):
+                raise SyntaxError(stream.format_error('Expected "{" after struct name'))
+            
+            # Parse struct fields
+            fields = []
+            while True:
+                stream.strip()
+                
+                # Check for closing brace
+                if stream.peek(1) == '}':
+                    stream.consume('}')
+                    break
+                
+                # Parse field type and name
+                field_type = stream.consume_word()
+                if field_type not in types and field_type not in vars:
+                    # It might be another struct type - that's ok
+                    pass
+                
+                stream.strip()
+                field_name = stream.consume_word()
+                
+                fields.append({
+                    'name': field_name,
+                    'type': field_type
+                })
+            
+            # Register the struct as a type
+            if struct_name not in types:
+                types.append(struct_name)
+            
+            # Store struct definition in vars so it can be used
+            vars[struct_name] = {
+                'type': 'struct_def',
+                'fields': fields
+            }
+            
+            return {
+                'type': 'struct_def',
+                'name': struct_name,
+                'fields': fields
+            }
+        
+        # Get type and name
+        type = stream.consume_word()
+
+        if type in modifiers:
+            mods.append(type)
+            type = stream.consume_word()
+
+        name = stream.consume_word()
+
+        if not (type and name):
+            # Check if this is a function with missing name: "void () {"
+            if type and not name and stream.peek(1) == '(':
+                raise SyntaxError('Expected function name')
+            return
+
+        # Is func
+        if stream.peek(1) == '(':
+            return parse_func(stream, name, type, mods)
+
+        # Is var
+        elif stream.peek(1) == '=':
+            return parse_var(stream, type, name, mods)
+
+        elif type == '//':
+            stream.consume_until('\n')
+            return parse_any(stream, level)
+
+        else:
+            raise SyntaxError(f'Invalid syntax: {stream.orig_line(stream.line-1)}')
+
+    # Something else
+    else:
+        word = stream.consume_word()
+
+        # Ignore if empty
+        if not word.strip():
+            return
+
+        # Field assignment: obj.field = value (word is "obj.field")
+        if '.' in word and stream.peek(1) == '=':
+            parts = word.split('.', 1)
+            if len(parts) == 2:
+                target, field = parts
+                stream.consume('=')
+                stream.strip()
+                value = stream.consume_until('\n').strip()
+                return {
+                    "type": "field_assign",
+                    "target": target,
+                    "field": field,
+                    "value": parse_expr(value)
+                }
+
+        # Func call
+        if word in funcs and stream.peek_char(1) == '(':
+            return parse_func_call(stream, word)
+
+        # List/array indexing assignment: arr[0] = value
+        elif stream.peek(1) == '[':
+            stream.consume('[')
+            index_expr = stream.consume_until(']')
+            stream.consume(']')  # Consume the closing bracket
+            stream.strip()
+            if not stream.consume('='):
+                raise SyntaxError(stream.format_error('Expected "=" after index'))
+            value = stream.consume_until('\n').strip()
+            return {
+                "type": "index_assign",
+                "target": word,
+                "index": parse_expr(index_expr),
+                "value": parse_expr(value)
+            }
+
+        # Variable reassignment (no type keyword)
+        elif stream.peek_char(1) == '=':
+            # Reassignment without type def
+            return parse_var(stream, None, word, [])
+
+        # Variable def
+        elif word in types:
+            name = stream.consume_word()
+
+            return parse_var(stream, word, name)
+
+        # If/elif/else statement
+        elif word == 'if':
+            args = parse_args(stream, check_comma=False)
+            # Extract first argument value (ignore type)
+            arg_value = args[0][0] if args else ""
+            args = parse_expr(arg_value)
+            scope = parse_scope(stream, level+1)
+
+            node = {
+                "type": "if",
+                "condition": args,
+                "scope": scope,
+                "elifs": [],
+                "else": {}
+            }
+
+            # Check if there are any elifs or an else.
+            while True:
+                stream.strip()
+                word = stream.peek_word()
+                if word == 'elif':
+                    stream.consume('elif')
+                    args = parse_args(stream)
+                    # Extract argument values (ignore types) and join them
+                    arg_values = [arg_name for arg_name, _ in args]
+                    args = parse_expr(''.join(arg_values))
+                    scope = parse_scope(stream, level+1)
+                    node['elifs'].append(
+                        {
+                            "type": "elif",
+                            "condition": args,
+                            "scope": scope
+                        }
+                    )
+
+                elif word == 'else':
+                    if node['else']:
+                        raise SyntaxError('The "else" clause has already been defined here.')
+
+                    stream.consume('else')
+                    scope = parse_scope(stream, level+1)
+                    node['else'] = scope
+
+                else:
+                    break
+
+            return node
+
+        # Syntax check :) (There shouldn't be elifs or elses, the if case handles them)
+        elif word in {"elif", "else"}:
+            raise SyntaxError(f'?{stream.line},{stream.char}:Unexpected "{word}": {stream.orig_line()}')
+
+        # Switch/Match statement
+        elif word == 'switch':
+            args = parse_args(stream, check_comma=False)
+            if len(args) != 1:
+                raise SyntaxError(stream.format_error(f'switch requires exactly 1 argument, got {len(args)}'))
+            
+            # Parse the expression to switch on
+            switch_expr = parse_expr(args[0][0])
+            
+            # Expect opening brace
+            stream.strip()
+            if not stream.consume('{'):
+                raise SyntaxError(stream.format_error('Expected "{" after switch condition'))
+            
+            cases = []
+            default_case = None
+            
+            # Parse cases
+            while True:
+                stream.strip()
+                
+                # Check for closing brace
+                if stream.peek(1) == '}':
+                    stream.consume('}')
+                    break
+                
+                word = stream.peek_word()
+                
+                if word == 'case':
+                    stream.consume('case')
+                    stream.strip()
+                    
+                    # Parse case values (can be multiple: case 1, 2, 3:)
+                    case_values = []
+                    while True:
+                        # Read until : or ,
+                        value_text = ''
+                        depth = 0
+                        while stream.text:
+                            ch = stream.peek(1)
+                            if ch in '{[(':
+                                depth += 1
+                            elif ch in '}])':
+                                depth -= 1
+                            
+                            if depth == 0 and ch in ',:':
+                                break
+                            
+                            value_text += ch
+                            stream._advance(1)
+                        
+                        value_text = value_text.strip()
+                        if value_text:
+                            case_values.append(parse_literal(value_text))
+                        
+                        stream.strip()
+                        if stream.peek(1) == ',':
+                            stream.consume(',')
+                            stream.strip()
+                        elif stream.peek(1) == ':':
+                            stream.consume(':')
+                            break
+                        else:
+                            raise SyntaxError(stream.format_error('Expected ":" or "," in case statement'))
+                    
+                    # Parse case body using custom parsing that stops at case/default/}
+                    case_body = parse_switch_body(stream, level+1)
+                    
+                    cases.append({
+                        'values': case_values,
+                        'body': case_body
+                    })
+                
+                elif word.startswith('default'):
+                    stream.consume('default')
+                    stream.strip()
+                    if not stream.consume(':'):
+                        raise SyntaxError(stream.format_error('Expected ":" after default'))
+                    
+                    # Parse default body using custom parsing that stops at case/default/}
+                    default_case = parse_switch_body(stream, level+1)
+                
+                else:
+                    raise SyntaxError(stream.format_error(f'Expected "case" or "default" in switch statement, got "{word}"'))
+            
+            return {
+                'type': 'switch',
+                'expr': switch_expr,
+                'cases': cases,
+                'default': default_case
+            }
+
+        # Assert
+        elif word == 'assert':
+            args = parse_args(stream, False)
+            if len(args) < 1 or len(args) > 2:
+                raise SyntaxError(f'assert requires 1 or 2 arguments, got {len(args)}')
+            # Extract argument values (ignore types)
+            condition = parse_expr(args[0][0])
+            message = parse_expr(args[1][0]) if len(args) == 2 else None
+
+            return {
+                "type": "assert",
+                "condition": condition,
+                "message": message
+            }
+
+        # For
+        elif word == 'for':
+            loop_depth += 1
+            
+            args = parse_args(stream)
+            if len(args) == 0 or len(args) > 2:
+                raise SyntaxError(f'Invalid syntax: {stream.orig_line()}. Expected 1 or 2 arguments but got {len(args)}')
+            
+            # Check if this is a range-based for loop: for (i in 0..10) or for (item in list)
+            if len(args) == 1:
+                arg_text = args[0][0]
+                
+                # Check for 'in' keyword
+                if ' in ' in arg_text:
+                    parts = arg_text.split(' in ', 1)
+                    if len(parts) != 2:
+                        raise SyntaxError(stream.format_error('Invalid for loop syntax'))
+                    
+                    varname = parts[0].strip()
+                    iterable_expr = parts[1].strip()
+                    
+                    # Check if it's a range expression (start..end) or (start..end..step)
+                    if '..' in iterable_expr:
+                        range_parts = iterable_expr.split('..')
+                        if len(range_parts) < 2 or len(range_parts) > 3:
+                            raise SyntaxError(stream.format_error('Invalid range syntax'))
+                        
+                        start_expr = range_parts[0].strip()
+                        end_expr = range_parts[1].strip()
+                        step_expr = range_parts[2].strip() if len(range_parts) == 3 else None
+                        
+                        scope = parse_scope(stream, level+1)
+                        loop_depth -= 1
+                        
+                        result = {
+                            "type": "for",
+                            "var": varname,
+                            "start": parse_expr(start_expr) if start_expr else 0,
+                            "end": parse_expr(end_expr),
+                            "scope": scope
+                        }
+                        
+                        # Add step if provided
+                        if step_expr:
+                            result["step"] = parse_expr(step_expr)
+                        
+                        # Try to unroll loop if bounds are constant (with -O flag)
+                        if '-O' in sys.argv or '--optimize' in sys.argv:
+                            unrolled = _try_unroll_for_loop(result, max_iterations=10)
+                            if unrolled is not None:
+                                return unrolled
+                        
+                        return result
+                    else:
+                        # It's iterating over a list/iterable
+                        scope = parse_scope(stream, level+1)
+                        loop_depth -= 1
+                        
+                        return {
+                            "type": "for_in",
+                            "var": varname,
+                            "iterable": parse_literal(iterable_expr),
+                            "scope": scope
+                        }
+                else:
+                    raise SyntaxError(stream.format_error('Invalid for loop syntax. Expected "for (var in iterable)" or "for (var, count)"'))
+            else:
+                # Old syntax: for (var, count)
+                varname = args[0][0]
+                end = args[1][0]
+
+                scope = parse_scope(stream, level+1)
+                
+                loop_depth -= 1
+
+                return {
+                    "type": "for",
+                    "var": varname,
+                    "start": 0,
+                    "end": parse_expr(end),
+                    "scope": scope
+                }
+
+        # While loop
+        elif word == 'while':
+            loop_depth += 1
+            
+            args = parse_args(stream, False)
+            # Extract first argument value (ignore type)
+            arg_value = args[0][0] if args else ""
+            args = parse_expr(arg_value)
+            scope = parse_scope(stream, level+1)
+            
+            loop_depth -= 1
+
+            return {
+                "type": word,
+                "condition": args,
+                "scope": scope
+            }
+
+        # Break statement
+        elif word == 'break':
+            if loop_depth == 0:
+                raise SyntaxError(stream.format_error('"break" outside loop'))
+            
+            # Check if there's a number after break
+            stream.strip()
+            level_str = ""
+            if stream.peek(1).isdigit():
+                level_str = stream.consume_word()
+            
+            break_level = int(level_str) if level_str else 1
+            
+            if break_level > loop_depth:
+                raise SyntaxError(stream.format_error(f'"break {break_level}" exceeds loop depth {loop_depth}'))
+            
+            return {
+                "type": "break",
+                "level": break_level
+            }
+
+        # Continue statement
+        elif word == 'continue':
+            if loop_depth == 0:
+                raise SyntaxError(stream.format_error('"continue" outside loop'))
+            
+            # Check if there's a number after continue
+            stream.strip()
+            level_str = ""
+            if stream.peek(1).isdigit():
+                level_str = stream.consume_word()
+            
+            continue_level = int(level_str) if level_str else 1
+            
+            if continue_level > loop_depth:
+                raise SyntaxError(stream.format_error(f'"continue {continue_level}" exceeds loop depth {loop_depth}'))
+            
+            return {
+                "type": "continue",
+                "level": continue_level
+            }
+
+        # Return
+        elif word == 'return':
+            rest = stream.consume_until('\n')
+            expr = parse_expr(rest)
+
+            return {
+                "type": "return",
+                "value": expr
+            }
+
+        # Support recursing down scopes
+        elif stream.peek_char(1) == '}':
+            return
+
+        else:
+            raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
+
+def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
+    global loop_depth, vars, types
+    
+    # Reset global state to prevent race conditions in parallel tests
+    if level == 0:  # Only reset at top level
+        loop_depth = 0
+        vars.clear()
+        # Don't clear types - it contains builtin type definitions
+        
+        # Reset funcs to only include builtin functions
+        user_func_names = [name for name in funcs.keys() if name not in builtin_func_names]
+        for name in user_func_names:
+            del funcs[name]
+
+    if not isinstance(text, InputStream):
+        text = '\n'.join([split(i, '//')[0] for i in text.split('\n')]).strip()
+        stream = InputStream(text)
+        stream.file_path = file
+    else:
+        stream = text
+
+    try:
+        ast:AstType = []
+
+        while stream.text:
+            node = parse_any(stream, level)
+            if node is None:
+                return ast
+
+            if node is SkipNode:
+                continue
+
+            # After filtering None and SkipNode, node must be dict[str, Any]
+            assert isinstance(node, dict), "Node should be a dict at this point"
+            
+            # Handle unrolled loops - flatten their statements into the parent scope
+            if node.get('type') == 'unrolled_loop':
+                ast.extend(node.get('statements', []))
+            else:
+                ast.append(node)
+
+        return ast
+
+    except SyntaxError as e:
+        if level != 0:
+            raise
+
+        char = None
+        if str(e).startswith('?'):
+            line_num, e = str(e).removeprefix('?').split(':',1)
+            if ',' in line_num:
+                line_num, char = line_num.split(',',1)
+                char = int(char)
+
+            line_num = int(line_num)
+            if line_num < 0:
+                line_num = stream.line + line_num
+        else:
+            line_num = stream.line
+
+        line = stream.orig_line(line_num-1)
+
+        if char is not None and char < 0:
+            char = len(line)+char
+
+        # Only print exception details if not in debug mode
+        # In debug mode, the exception will be raised and handled by the caller
+        if not debug:
+            print(f'Exception: Syntax Error')
+            print(f'  File "{file}" line {line_num} in {current_func}')
+            print(f'  {line}')
+            print(f'  {' '*(char or len(line)) + '^'}')
+            print(f'    {e}')
+
+        if debug:
+            raise
+
+        exit(1)
+
+debug = '-d' in sys.argv or '--debug' in sys.argv
+

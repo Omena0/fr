@@ -1,0 +1,6 @@
+include README.md
+include requirements.txt
+include LICENSE
+recursive-include src *.py
+recursive-include runtime *.c *.h Makefile
+recursive-include cases *.c

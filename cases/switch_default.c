@@ -1,0 +1,16 @@
+// !default value
+
+void main() {
+    int x = 99
+    
+    switch (x) {
+        case 1:
+            println("one")
+        case 2:
+            println("two")
+        case 3:
+            println("three")
+        default:
+            println("default value")
+    }
+}

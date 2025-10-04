@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyd
+*.egg-info
+.venv
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Runtime
+runtime/vm
+*.bc
+*.o

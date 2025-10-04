@@ -1,0 +1,3 @@
+// Expected '"'.
+
+str msg = "hello

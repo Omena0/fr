@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frscript"
+dynamic = ["version"]
+description = "Simple bytecode compiled C-style scripting language"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "PolyForm Noncommercial License 1.0.0"}
+authors = [
+    {name = "Omena0"}
+]
+keywords = ["compiler", "interpreter", "scripting", "bytecode", "language"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Interpreters",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "setuptools",
+    "zstd",
+]
+
+[project.urls]
+Homepage = "https://github.com/Omena0/fr"
+"Bug Reports" = "https://github.com/Omena0/fr/issues"
+Source = "https://github.com/Omena0/fr"
+
+[project.scripts]
+fr = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+src = ["*.c"]
