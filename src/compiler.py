@@ -375,8 +375,6 @@ class BytecodeCompiler:
                 if isinstance(left, dict):
                     if left.get('type') in ('string', 'str'):
                         is_string_op = True
-                    elif left.get('op') in ('+', 'Add'):  # Nested string concatenation
-                        is_string_op = True
                     elif left.get('type') == 'call' and left.get('name') == 'str':
                         is_string_op = True
                     elif is_function_call(left) and extract_func_name(left.get('func', '')) == 'str':
@@ -385,8 +383,6 @@ class BytecodeCompiler:
                 # Check if right is a string literal or string operation
                 if isinstance(right, dict):
                     if right.get('type') in ('string', 'str'):
-                        is_string_op = True
-                    elif right.get('op') in ('+', 'Add'):  # Nested string concatenation
                         is_string_op = True
                     elif right.get('type') == 'call' and right.get('name') == 'str':
                         is_string_op = True
@@ -470,6 +466,9 @@ class BytecodeCompiler:
                     'len': 'BUILTIN_LEN',
                     'sqrt': 'BUILTIN_SQRT',
                     'round': 'BUILTIN_ROUND',
+                    'floor': 'BUILTIN_FLOOR',
+                    'ceil': 'BUILTIN_CEIL',
+                    'PI': 'BUILTIN_PI',
                     'int': 'TO_INT',
                     'float': 'TO_FLOAT',
                     'bool': 'TO_BOOL',
