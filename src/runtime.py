@@ -494,6 +494,7 @@ def _execute_node_struct_def(node: dict):
 def _execute_node_var(node: dict):
     """Handle variable declaration node"""
     from parser import cast_value
+    import copy
     
     value = cast_value(node['value'], node['value_type'])
     
@@ -506,6 +507,10 @@ def _execute_node_var(node: dict):
             value = eval_expr_node(value)
         else:
             value = value['value']
+    
+    # Make a deep copy of mutable objects to avoid mutating the AST
+    if isinstance(value, (list, dict, set)):
+        value = copy.deepcopy(value)
 
     vars[node['name']] = {
         "type": node['value_type'],
