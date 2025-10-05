@@ -1,4 +1,4 @@
-// Simple HTTP server - demonstrates socket I/O
+// Simple HTTP server
 
 void main(str argv) {
     int sock = socket("inet", "stream")
@@ -18,12 +18,14 @@ void main(str argv) {
         str type = header[0]
         str path = "./static" + header[1] + ".html"
 
+        println(f"Serving {path}..")
+
+        // Response header
         str response = "HTTP/1.1 200 OK\r\n\r\n"
 
         if (not exists(path)) {
             response += "404 Not Found"
         } else {
-            // 1. Load the page content you want to show inside <code>
             int fd_page = fopen(path)
             str content = fread(fd_page, -1)
 
@@ -31,7 +33,7 @@ void main(str argv) {
         }
 
         // Send HTTP response
-        send(cs, response)
+        send(cs, response + "\r\n\r\n")
         sclose(cs)
     }
 

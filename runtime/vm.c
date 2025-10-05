@@ -2184,7 +2184,18 @@ L_NOT: // OP_NOT
 {
     {
         Value a = vm_pop(vm);
-        vm_push(vm, value_make_bool(!a.as.boolean));
+        bool result;
+        if (a.type == VAL_BOOL)
+            result = !a.as.boolean;
+        else if (a.type == VAL_INT)
+            result = !(a.as.int64);
+        else if (a.type == VAL_F64)
+            result = !(a.as.f64);
+        else
+            result = false; // Default for other types
+        
+        value_free(a);
+        vm_push(vm, value_make_bool(result));
         DISPATCH();
     }
 }
