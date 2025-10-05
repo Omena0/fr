@@ -448,6 +448,21 @@ class BytecodeCompiler:
                     'pow': 'POW',
                     'min': 'MIN',
                     'max': 'MAX',
+                    # File I/O
+                    'fopen': 'FILE_OPEN',
+                    'fread': 'FILE_READ',
+                    'fwrite': 'FILE_WRITE',
+                    'fclose': 'FILE_CLOSE',
+                    # Socket I/O
+                    'socket': 'SOCKET_CREATE',
+                    'connect': 'SOCKET_CONNECT',
+                    'bind': 'SOCKET_BIND',
+                    'listen': 'SOCKET_LISTEN',
+                    'accept': 'SOCKET_ACCEPT',
+                    'send': 'SOCKET_SEND',
+                    'recv': 'SOCKET_RECV',
+                    'sclose': 'SOCKET_CLOSE',
+                    'setsockopt': 'SOCKET_SETSOCKOPT',
                 }
 
                 if func_name in builtin_map:
