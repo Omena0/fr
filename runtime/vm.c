@@ -5,6 +5,7 @@
  * Optimized version with aggressive compiler hints
  */
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 500
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,39 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <libgen.h>
+#include <limits.h>
+
+// Helper function to unescape string literals from bytecode
+char* unescape_string(const char* str) {
+    if (!str) return strdup("");
+    
+    size_t len = strlen(str);
+    char* result = malloc(len + 1); // Worst case: same length
+    if (!result) return strdup("");
+    
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == '\\' && i + 1 < len) {
+            switch (str[i + 1]) {
+                case 'n':  result[j++] = '\n'; i++; break;
+                case 'r':  result[j++] = '\r'; i++; break;
+                case 't':  result[j++] = '\t'; i++; break;
+                case '0':  result[j++] = '\0'; i++; break;
+                case '\\': result[j++] = '\\'; i++; break;
+                case '"':  result[j++] = '"';  i++; break;
+                default:   result[j++] = str[i]; break; // Keep backslash if unknown
+            }
+        } else {
+            result[j++] = str[i];
+        }
+    }
+    result[j] = '\0';
+    return result;
+}
+
 // Branch prediction hints
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -221,6 +255,22 @@ typedef enum
     OP_FILE_READ,     // Read from file (fd, size -> string)
     OP_FILE_WRITE,    // Write to file (fd, data -> bytes_written)
     OP_FILE_CLOSE,    // Close file (fd -> void)
+    OP_FILE_EXISTS,   // Check if file/directory exists (path -> bool)
+    OP_FILE_ISFILE,   // Check if path is a file (path -> bool)
+    OP_FILE_ISDIR,    // Check if path is a directory (path -> bool)
+    OP_FILE_LISTDIR,  // List directory contents (path -> list)
+    OP_FILE_MKDIR,    // Create directory (path -> void)
+    OP_FILE_MAKEDIRS, // Create directory and parents (path -> void)
+    OP_FILE_REMOVE,   // Remove file (path -> void)
+    OP_FILE_RMDIR,    // Remove directory (path -> void)
+    OP_FILE_RENAME,   // Rename/move file (old_path, new_path -> void)
+    OP_FILE_GETSIZE,  // Get file size (path -> int)
+    OP_FILE_GETCWD,   // Get current working directory (-> string)
+    OP_FILE_CHDIR,    // Change working directory (path -> void)
+    OP_FILE_ABSPATH,  // Get absolute path (path -> string)
+    OP_FILE_BASENAME, // Get basename (path -> string)
+    OP_FILE_DIRNAME,  // Get directory name (path -> string)
+    OP_FILE_JOIN,     // Join paths (list -> string)
     
     // Socket I/O operations
     OP_SOCKET_CREATE,     // Create socket (family, type -> sock_id)
@@ -1228,7 +1278,8 @@ bool vm_load_bytecode(VM *vm,
                     val[strlen(val) - 1] = '\0';
                 }
                 inst.op = OP_CONST_STR;
-                inst.operand.str_val = strdup(val ? val : "");
+                // Unescape the string (handles \n, \r, \t, \\, \", etc.)
+                inst.operand.str_val = unescape_string(val ? val : "");
             }
             else if (strcmp(token, "CONST_BOOL") == 0)
             {
@@ -1435,6 +1486,38 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_FILE_WRITE;
             else if (strcmp(token, "FILE_CLOSE") == 0)
                 inst.op = OP_FILE_CLOSE;
+            else if (strcmp(token, "FILE_EXISTS") == 0)
+                inst.op = OP_FILE_EXISTS;
+            else if (strcmp(token, "FILE_ISFILE") == 0)
+                inst.op = OP_FILE_ISFILE;
+            else if (strcmp(token, "FILE_ISDIR") == 0)
+                inst.op = OP_FILE_ISDIR;
+            else if (strcmp(token, "FILE_LISTDIR") == 0)
+                inst.op = OP_FILE_LISTDIR;
+            else if (strcmp(token, "FILE_MKDIR") == 0)
+                inst.op = OP_FILE_MKDIR;
+            else if (strcmp(token, "FILE_MAKEDIRS") == 0)
+                inst.op = OP_FILE_MAKEDIRS;
+            else if (strcmp(token, "FILE_REMOVE") == 0)
+                inst.op = OP_FILE_REMOVE;
+            else if (strcmp(token, "FILE_RMDIR") == 0)
+                inst.op = OP_FILE_RMDIR;
+            else if (strcmp(token, "FILE_RENAME") == 0)
+                inst.op = OP_FILE_RENAME;
+            else if (strcmp(token, "FILE_GETSIZE") == 0)
+                inst.op = OP_FILE_GETSIZE;
+            else if (strcmp(token, "FILE_GETCWD") == 0)
+                inst.op = OP_FILE_GETCWD;
+            else if (strcmp(token, "FILE_CHDIR") == 0)
+                inst.op = OP_FILE_CHDIR;
+            else if (strcmp(token, "FILE_ABSPATH") == 0)
+                inst.op = OP_FILE_ABSPATH;
+            else if (strcmp(token, "FILE_BASENAME") == 0)
+                inst.op = OP_FILE_BASENAME;
+            else if (strcmp(token, "FILE_DIRNAME") == 0)
+                inst.op = OP_FILE_DIRNAME;
+            else if (strcmp(token, "FILE_JOIN") == 0)
+                inst.op = OP_FILE_JOIN;
             // Socket I/O operations
             else if (strcmp(token, "SOCKET_CREATE") == 0)
                 inst.op = OP_SOCKET_CREATE;
@@ -1858,6 +1941,22 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_FILE_READ] = &&L_FILE_READ,
         [OP_FILE_WRITE] = &&L_FILE_WRITE,
         [OP_FILE_CLOSE] = &&L_FILE_CLOSE,
+        [OP_FILE_EXISTS] = &&L_FILE_EXISTS,
+        [OP_FILE_ISFILE] = &&L_FILE_ISFILE,
+        [OP_FILE_ISDIR] = &&L_FILE_ISDIR,
+        [OP_FILE_LISTDIR] = &&L_FILE_LISTDIR,
+        [OP_FILE_MKDIR] = &&L_FILE_MKDIR,
+        [OP_FILE_MAKEDIRS] = &&L_FILE_MAKEDIRS,
+        [OP_FILE_REMOVE] = &&L_FILE_REMOVE,
+        [OP_FILE_RMDIR] = &&L_FILE_RMDIR,
+        [OP_FILE_RENAME] = &&L_FILE_RENAME,
+        [OP_FILE_GETSIZE] = &&L_FILE_GETSIZE,
+        [OP_FILE_GETCWD] = &&L_FILE_GETCWD,
+        [OP_FILE_CHDIR] = &&L_FILE_CHDIR,
+        [OP_FILE_ABSPATH] = &&L_FILE_ABSPATH,
+        [OP_FILE_BASENAME] = &&L_FILE_BASENAME,
+        [OP_FILE_DIRNAME] = &&L_FILE_DIRNAME,
+        [OP_FILE_JOIN] = &&L_FILE_JOIN,
         [OP_SOCKET_CREATE] = &&L_SOCKET_CREATE,
         [OP_SOCKET_CONNECT] = &&L_SOCKET_CONNECT,
         [OP_SOCKET_BIND] = &&L_SOCKET_BIND,
@@ -1937,7 +2036,6 @@ L_ADD_STR: // OP_ADD_STR
 {
     Value b = vm_pop(vm);
     Value a = vm_pop(vm);
-    // Always use value_add to handle overflow detection
     Value result = value_add(a, b);
     value_free(a);
     value_free(b);
@@ -3152,16 +3250,54 @@ L_STR_SPLIT: // OP_STR_SPLIT - Split string by delimiter (str, sep -> list)
     }
 
     List *result_list = list_new();
-    char *str_copy = strdup(str.as.str);
-    char *token = strtok(str_copy, sep.as.str);
-
-    while (token != NULL)
-    {
-        list_append(result_list, value_make_str(strdup(token)));
-        token = strtok(NULL, sep.as.str);
+    
+    // Handle empty string - should return list with one empty string
+    if (strlen(str.as.str) == 0) {
+        list_append(result_list, value_make_str(strdup("")));
+        value_free(str);
+        value_free(sep);
+        vm_push(vm, value_wrap_list(result_list));
+        DISPATCH();
+    }
+    
+    // Handle empty separator - split into individual characters
+    if (strlen(sep.as.str) == 0) {
+        for (size_t i = 0; str.as.str[i] != '\0'; i++) {
+            char char_str[2] = {str.as.str[i], '\0'};
+            list_append(result_list, value_make_str(strdup(char_str)));
+        }
+        value_free(str);
+        value_free(sep);
+        vm_push(vm, value_wrap_list(result_list));
+        DISPATCH();
+    }
+    
+    // Proper string splitting (not character-set splitting like strtok)
+    char *remaining = str.as.str;
+    size_t sep_len = strlen(sep.as.str);
+    
+    while (*remaining) {
+        char *found = strstr(remaining, sep.as.str);
+        if (found) {
+            // Found separator - extract substring before it
+            size_t len = found - remaining;
+            char *part = malloc(len + 1);
+            strncpy(part, remaining, len);
+            part[len] = '\0';
+            list_append(result_list, value_make_str(part));
+            remaining = found + sep_len;
+        } else {
+            // No more separators - add rest of string
+            list_append(result_list, value_make_str(strdup(remaining)));
+            break;
+        }
+    }
+    
+    // If string ends with separator, add empty string
+    if (remaining == str.as.str + strlen(str.as.str) && strlen(str.as.str) > 0) {
+        list_append(result_list, value_make_str(strdup("")));
     }
 
-    free(str_copy);
     value_free(str);
     value_free(sep);
     vm_push(vm, value_wrap_list(result_list));
@@ -3393,6 +3529,407 @@ L_FILE_CLOSE: // OP_FILE_CLOSE - Close file (fd -> void)
     close(fd);
     
     value_free(fd_val);
+    DISPATCH();
+}
+
+L_FILE_EXISTS: // OP_FILE_EXISTS - Check if file/directory exists (path -> bool)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: exists() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    struct stat st;
+    bool exists = (stat(path, &st) == 0);
+    
+    value_free(path_val);
+    vm_push(vm, value_make_bool(exists));
+    DISPATCH();
+}
+
+L_FILE_ISFILE: // OP_FILE_ISFILE - Check if path is a file (path -> bool)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: isfile() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    struct stat st;
+    bool is_file = (stat(path, &st) == 0 && S_ISREG(st.st_mode));
+    
+    value_free(path_val);
+    vm_push(vm, value_make_bool(is_file));
+    DISPATCH();
+}
+
+L_FILE_ISDIR: // OP_FILE_ISDIR - Check if path is a directory (path -> bool)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: isdir() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    struct stat st;
+    bool is_dir = (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+    
+    value_free(path_val);
+    vm_push(vm, value_make_bool(is_dir));
+    DISPATCH();
+}
+
+L_FILE_LISTDIR: // OP_FILE_LISTDIR - List directory contents (path -> list)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: listdir() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    DIR *dir = opendir(path);
+    
+    if (!dir)
+    {
+        value_free(path_val);
+        vm_push(vm, value_make_list()); // Return empty list on error
+        DISPATCH();
+    }
+    
+    List *list = malloc(sizeof(List));
+    list->capacity = 16;
+    list->length = 0;
+    list->items = malloc(sizeof(Value) * list->capacity);
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // Skip . and ..
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        
+        if (list->length >= list->capacity)
+        {
+            list->capacity *= 2;
+            list->items = realloc(list->items, sizeof(Value) * list->capacity);
+        }
+        
+        list->items[list->length++] = value_make_str(strdup(entry->d_name));
+    }
+    
+    closedir(dir);
+    value_free(path_val);
+    
+    Value result;
+    result.type = VAL_LIST;
+    result.as.list = list;
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_FILE_MKDIR: // OP_FILE_MKDIR - Create directory (path -> void)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: mkdir() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    mkdir(path, 0755);
+    
+    value_free(path_val);
+    DISPATCH();
+}
+
+L_FILE_MAKEDIRS: // OP_FILE_MAKEDIRS - Create directory and parents (path -> void)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: makedirs() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    char *path_copy = strdup(path);
+    char *p = path_copy;
+    
+    // Skip leading /
+    if (*p == '/') p++;
+    
+    while (*p)
+    {
+        if (*p == '/')
+        {
+            *p = '\0';
+            mkdir(path_copy, 0755);
+            *p = '/';
+        }
+        p++;
+    }
+    mkdir(path_copy, 0755);
+    
+    free(path_copy);
+    value_free(path_val);
+    DISPATCH();
+}
+
+L_FILE_REMOVE: // OP_FILE_REMOVE - Remove file (path -> void)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: remove() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    unlink(path);
+    
+    value_free(path_val);
+    DISPATCH();
+}
+
+L_FILE_RMDIR: // OP_FILE_RMDIR - Remove directory (path -> void)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: rmdir() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    rmdir(path);
+    
+    value_free(path_val);
+    DISPATCH();
+}
+
+L_FILE_RENAME: // OP_FILE_RENAME - Rename/move file (old_path, new_path -> void)
+{
+    Value new_path_val = vm_pop(vm);
+    Value old_path_val = vm_pop(vm);
+    
+    if (old_path_val.type != VAL_STR || new_path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: rename() expects (string, string)\n");
+        value_free(old_path_val);
+        value_free(new_path_val);
+        exit(1);
+    }
+    
+    const char *old_path = old_path_val.as.str;
+    const char *new_path = new_path_val.as.str;
+    rename(old_path, new_path);
+    
+    value_free(old_path_val);
+    value_free(new_path_val);
+    DISPATCH();
+}
+
+L_FILE_GETSIZE: // OP_FILE_GETSIZE - Get file size (path -> int)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: getsize() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    struct stat st;
+    int64_t size = 0;
+    
+    if (stat(path, &st) == 0)
+    {
+        size = st.st_size;
+    }
+    
+    value_free(path_val);
+    vm_push(vm, value_make_int_si(size));
+    DISPATCH();
+}
+
+L_FILE_GETCWD: // OP_FILE_GETCWD - Get current working directory (-> string)
+{
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL)
+    {
+        vm_push(vm, value_make_str(strdup(cwd)));
+    }
+    else
+    {
+        vm_push(vm, value_make_str(strdup("")));
+    }
+    DISPATCH();
+}
+
+L_FILE_CHDIR: // OP_FILE_CHDIR - Change working directory (path -> void)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: chdir() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    chdir(path);
+    
+    value_free(path_val);
+    DISPATCH();
+}
+
+L_FILE_ABSPATH: // OP_FILE_ABSPATH - Get absolute path (path -> string)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: abspath() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    char resolved[PATH_MAX];
+    
+    if (realpath(path, resolved) != NULL)
+    {
+        value_free(path_val);
+        vm_push(vm, value_make_str(strdup(resolved)));
+    }
+    else
+    {
+        // If realpath fails, return the original path
+        vm_push(vm, path_val);
+    }
+    DISPATCH();
+}
+
+L_FILE_BASENAME: // OP_FILE_BASENAME - Get basename (path -> string)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: basename() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    char *path_copy = strdup(path);
+    char *base = basename(path_copy);
+    char *result = strdup(base);
+    
+    free(path_copy);
+    value_free(path_val);
+    vm_push(vm, value_make_str(result));
+    DISPATCH();
+}
+
+L_FILE_DIRNAME: // OP_FILE_DIRNAME - Get directory name (path -> string)
+{
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: dirname() expects string\n");
+        value_free(path_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    char *path_copy = strdup(path);
+    char *dir = dirname(path_copy);
+    char *result = strdup(dir);
+    
+    free(path_copy);
+    value_free(path_val);
+    vm_push(vm, value_make_str(result));
+    DISPATCH();
+}
+
+L_FILE_JOIN: // OP_FILE_JOIN - Join paths (list -> string)
+{
+    Value list_val = vm_pop(vm);
+    
+    if (list_val.type != VAL_LIST)
+    {
+        fprintf(stderr, "Runtime error: pathjoin() expects list\n");
+        value_free(list_val);
+        exit(1);
+    }
+    
+    List *list = list_val.as.list;
+    if (list->length == 0)
+    {
+        value_free(list_val);
+        vm_push(vm, value_make_str(strdup("")));
+        DISPATCH();
+    }
+    
+    // Calculate total length needed
+    size_t total_len = 0;
+    for (int i = 0; i < list->length; i++)
+    {
+        if (list->items[i].type == VAL_STR)
+        {
+            total_len += strlen(list->items[i].as.str);
+        }
+    }
+    total_len += list->length; // For path separators and null terminator
+    
+    char *result = malloc(total_len);
+    result[0] = '\0';
+    
+    for (int i = 0; i < list->length; i++)
+    {
+        if (list->items[i].type == VAL_STR)
+        {
+            if (i > 0 && result[strlen(result) - 1] != '/')
+            {
+                strcat(result, "/");
+            }
+            strcat(result, list->items[i].as.str);
+        }
+    }
+    
+    value_free(list_val);
+    vm_push(vm, value_make_str(result));
     DISPATCH();
 }
 

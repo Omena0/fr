@@ -966,6 +966,17 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
         # Is var
         elif stream.peek(1) == '=':
             return parse_var(stream, type, name, mods)
+        
+        # Augmented assignment with type - this is an error
+        elif stream.peek_char(2) in ['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='] or stream.peek_char(3) in ['<<=', '>>=']:
+            # Strip to get to the operator
+            stream.strip()
+            aug_op = stream.peek(3) if stream.peek(3) in ['<<=', '>>='] else stream.peek(2)
+            raise SyntaxError(stream.format_error(
+                f'Cannot use augmented assignment operator "{aug_op}" with type declaration. '
+                f'Either declare the variable first with "{type} {name} = ...", or if it already exists, '
+                f'use "{name} {aug_op} ..." without the type.'
+            ))
 
         elif type == '//':
             stream.consume_until('\n')
@@ -1021,6 +1032,68 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
         elif stream.peek_char(1) == '=':
             # Reassignment without type def
             return parse_var(stream, None, word, [])
+        
+        # Augmented assignment for existing variables (no type keyword)
+        elif stream.peek_char(2) in ['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='] or stream.peek_char(3) in ['<<=', '>>=']:
+            # Strip whitespace to position at the operator
+            stream.strip()
+            
+            # Check for 3-character operators first
+            if stream.peek(3) in ['<<=', '>>=']:
+                aug_op = stream.peek(3)
+                stream.consume(aug_op)
+            else:
+                aug_op = stream.peek(2)
+                stream.consume(aug_op)
+            
+            stream.strip()
+            
+            # Read the value expression
+            value_text = stream.consume_until('\n').strip()
+            value_expr = parse_expr(value_text)
+            
+            # Map augmented operators to their binary equivalents
+            op_map = {
+                '+=': 'Add',
+                '-=': 'Sub',
+                '*=': 'Mult',
+                '/=': 'Div',
+                '%=': 'Mod',
+                '&=': 'BitAnd',
+                '|=': 'BitOr',
+                '^=': 'BitXor',
+                '<<=': 'LShift',
+                '>>=': 'RShift'
+            }
+            
+            # Convert to: name = name op value
+            binary_expr = {
+                'left': {'id': word},
+                'op': op_map[aug_op],
+                'right': value_expr
+            }
+            
+            # Get the variable type if it exists
+            var_type = None
+            if word in vars:
+                var_type = vars[word].get('type', 'any')
+            else:
+                raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
+            
+            # Update vars table
+            vars[word] = {
+                "type": var_type,
+                "value": binary_expr,
+                "mods": []
+            }
+            
+            return {
+                "type": "var",
+                "name": word,
+                "value_type": var_type,
+                "value": binary_expr,
+                "mods": []
+            }
 
         # Variable def
         elif word in types:
@@ -1349,17 +1422,11 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
 def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
     global loop_depth, vars, types
-    
-    # Reset global state to prevent race conditions in parallel tests
-    if level == 0:  # Only reset at top level
+
+    # Reset global state for top-level parse
+    if level == 0:
         loop_depth = 0
-        vars.clear()
-        # Don't clear types - it contains builtin type definitions
-        
-        # Reset funcs to only include builtin functions
-        user_func_names = [name for name in funcs.keys() if name not in builtin_func_names]
-        for name in user_func_names:
-            del funcs[name]
+        vars = {}
 
     if not isinstance(text, InputStream):
         text = '\n'.join([split(i, '//')[0] for i in text.split('\n')]).strip()
@@ -1367,6 +1434,7 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
         stream.file_path = file
     else:
         stream = text
+        # Comments are already removed at the top level, don't recreate stream
 
     try:
         ast:AstType = []
@@ -1395,8 +1463,20 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             raise
 
         char = None
-        if str(e).startswith('?'):
-            line_num, e = str(e).removeprefix('?').split(':',1)
+        error_text = str(e)
+        
+        # If error already has location prefix from format_error, extract just the message
+        # Format is either "Line X:Y: message" or "file:X:Y: message"
+        if ':' in error_text and '\n' not in error_text.split(':')[0]:
+            # Split and look for the pattern
+            first_line = error_text.split('\n')[0]
+            # Try to find where the actual message starts (after "Line X:Y:" or "file:X:Y:")
+            parts = first_line.split(': ', 1)
+            if len(parts) == 2:
+                error_text = parts[1]
+        
+        if error_text.startswith('?'):
+            line_num, error_text = error_text.removeprefix('?').split(':',1)
             if ',' in line_num:
                 line_num, char = line_num.split(',',1)
                 char = int(char)
@@ -1412,19 +1492,12 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
         if char is not None and char < 0:
             char = len(line)+char
 
-        # Only print exception details if not in debug mode
-        # In debug mode, the exception will be raised and handled by the caller
-        if not debug:
-            print(f'Exception: Syntax Error')
-            print(f'  File "{file}" line {line_num} in {current_func}')
-            print(f'  {line}')
-            print(f'  {' '*(char or len(line)) + '^'}')
-            print(f'    {e}')
-
-        if debug:
-            raise
-
-        exit(1)
+        # Format the error message with location info
+        location = f'{file}:{line_num}:{char or len(line)}' if file else f'Line {line_num}:{char or len(line)}'
+        error_msg = f'Syntax Error\n  File "{file}" line {line_num} in {current_func}\n      {line}\n      {' '*(char or len(line)) + '^'}\n    {location}: {error_text}'
+        
+        # Always raise the exception so it can be caught by test framework or CLI
+        raise SyntaxError(error_msg)
 
 debug = '-d' in sys.argv or '--debug' in sys.argv
 

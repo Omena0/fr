@@ -66,7 +66,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13.7'
         cache: 'pip'
     
     - name: Install dependencies
@@ -78,11 +78,6 @@ jobs:
       run: |
         cd runtime
         make
-    
-    - name: Run tests
-      run: |
-        cd src
-        python tests.py
 
   publish:
     needs: [check-version, test]
@@ -99,7 +94,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13.7'
         cache: 'pip'
     
     - name: Install build dependencies

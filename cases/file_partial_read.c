@@ -1,4 +1,4 @@
-// Test partial file reading
+// !Chunk 1:\n0123456789\nChunk 2:\nABCDEFGHIJ
 
 void main() {
     fd = fopen("/tmp/partial_test.txt", "w")
