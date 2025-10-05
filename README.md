@@ -3,7 +3,7 @@
 # Fr
 
 [![Build](https://github.com/Omena0/fr/actions/workflows/publish.yaml/badge.svg)](https://github.com/Omena0/fr/actions/workflows/publish.yaml)
-![Test](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
+![Tests](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
 ![AI Code](https://img.shields.io/badge/AI_code-50%25-red?logo=Github%20copilot)
 
