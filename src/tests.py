@@ -78,8 +78,8 @@ def run_c_runtime(ast):
 cases = {}
 
 for file in os.listdir('cases'):
-    # Only process .c files, skip .example files
-    if not file.endswith('.c') or file.endswith('.c.example'):
+    # Only process .fr files, skip .example files
+    if not file.endswith('.fr') or file.endswith('.fr.example'):
         continue
     content = open(f'cases/{file}').read()
     cases[file] = content.split('\n',1)
