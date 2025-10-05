@@ -1,0 +1,8 @@
+// !helloworld
+
+void main() {
+    str s1 = "hello"
+    str s2 = "world"
+    str result = s1 + s2
+    println(result)
+}

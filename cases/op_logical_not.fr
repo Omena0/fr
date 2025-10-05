@@ -1,0 +1,6 @@
+// !false
+
+void main() {
+    bool result = !1
+    println(str(result))
+}

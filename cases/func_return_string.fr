@@ -1,0 +1,10 @@
+// !hello
+
+str greet() {
+    return "hello"
+}
+
+void main() {
+    str result = greet()
+    println(result)
+}

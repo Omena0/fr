@@ -1,0 +1,7 @@
+// !10
+
+void main() {
+    int x = 5
+    x = x + 5
+    println(str(x))
+}

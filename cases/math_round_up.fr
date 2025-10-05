@@ -1,0 +1,6 @@
+// !4
+
+void main() {
+    int result = round(3.6)
+    println(str(result))
+}

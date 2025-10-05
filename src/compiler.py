@@ -128,9 +128,8 @@ class BytecodeCompiler:
             self.emit("LIST_NEW")
             # Append each element
             for elem in expr:
-                self.emit("DUP")  # Duplicate list reference
                 self.compile_expr(elem, expr_type)  # Push element
-                self.emit("LIST_APPEND")  # Append and push back list
+                self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
             return
 
         # Literal boolean (must be before int since bool is subclass of int in Python)
@@ -171,9 +170,8 @@ class BytecodeCompiler:
                 self.emit("LIST_NEW")
                 # Append each element
                 for elem in value:
-                    self.emit("DUP")  # Duplicate list reference
                     self.compile_expr(elem, expr_type)  # Push element
-                    self.emit("LIST_APPEND")  # Append and push back list
+                    self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
                 return
 
             if isinstance(value, int):
@@ -209,6 +207,24 @@ class BytecodeCompiler:
 
         # Complex expression
         if isinstance(expr, dict):
+            # Boolean operations (And, Or): {'op': 'And'/'Or', 'values': [...]}
+            # Must check before f-string since both have 'values' key
+            if 'op' in expr and expr['op'] in ('And', 'Or') and 'values' in expr:
+                op = expr['op']
+                values = expr['values']
+                
+                # Compile first value
+                self.compile_expr(values[0], expr_type)
+                
+                # For each subsequent value, compile and apply the operation
+                for value in values[1:]:
+                    self.compile_expr(value, expr_type)
+                    if op == 'And':
+                        self.emit("AND")
+                    elif op == 'Or':
+                        self.emit("OR")
+                return
+            
             # F-string (JoinedStr): {'values': [...]}
             if is_fstring(expr):
                 # Compile each part and concatenate
@@ -359,8 +375,6 @@ class BytecodeCompiler:
                 if isinstance(left, dict):
                     if left.get('type') in ('string', 'str'):
                         is_string_op = True
-                    elif left.get('op') in ('+', 'Add'):  # Nested string concatenation
-                        is_string_op = True
                     elif left.get('type') == 'call' and left.get('name') == 'str':
                         is_string_op = True
                     elif is_function_call(left) and extract_func_name(left.get('func', '')) == 'str':
@@ -369,8 +383,6 @@ class BytecodeCompiler:
                 # Check if right is a string literal or string operation
                 if isinstance(right, dict):
                     if right.get('type') in ('string', 'str'):
-                        is_string_op = True
-                    elif right.get('op') in ('+', 'Add'):  # Nested string concatenation
                         is_string_op = True
                     elif right.get('type') == 'call' and right.get('name') == 'str':
                         is_string_op = True
@@ -454,6 +466,9 @@ class BytecodeCompiler:
                     'len': 'BUILTIN_LEN',
                     'sqrt': 'BUILTIN_SQRT',
                     'round': 'BUILTIN_ROUND',
+                    'floor': 'BUILTIN_FLOOR',
+                    'ceil': 'BUILTIN_CEIL',
+                    'PI': 'BUILTIN_PI',
                     'int': 'TO_INT',
                     'float': 'TO_FLOAT',
                     'bool': 'TO_BOOL',

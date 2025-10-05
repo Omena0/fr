@@ -1,0 +1,6 @@
+// !true
+
+void main() {
+    bool result = 5 >= 5
+    println(str(result))
+}

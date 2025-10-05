@@ -391,10 +391,16 @@ def _normalize_operators(text: str) -> str:
     """Normalize custom operators to Python equivalents."""
     # Replace bitwise operators with logical operators
     # Note: This changes semantics but matches the language's intent
-    return (text
-            .replace('&', ' and ')
-            .replace('|', ' or ')
-            .replace('\n', ' '))
+    # First replace double operators, then single ones
+    result = text.replace('&&', ' and ').replace('||', ' or ')
+    # Replace negation operator with 'not'
+    # Handle cases like "!1" -> "not 1"
+    import re
+    result = re.sub(r'!(\w+|\()', r'not \1', result)
+    # Replace remaining single operators
+    result = result.replace('&', ' and ').replace('|', ' or ')
+    result = result.replace('\n', ' ')
+    return result
 
 def parse_expr(text: str):
     """Parse an expression using Python's AST parser and optionally evaluate constants."""

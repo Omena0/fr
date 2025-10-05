@@ -1,0 +1,6 @@
+// !3.0
+
+void main() {
+    float result = 5.5 - 2.5
+    println(str(result))
+}

@@ -1,0 +1,6 @@
+// !3
+
+void main() {
+    int result = floor(3.9)
+    println(str(result))
+}

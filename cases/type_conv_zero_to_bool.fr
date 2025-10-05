@@ -1,0 +1,7 @@
+// !false
+
+void main() {
+    int x = 0
+    bool value = bool(x)
+    println(str(value))
+}

@@ -1,0 +1,6 @@
+// !2
+
+void main() {
+    list parts = split("hello", "e")
+    println(str(len(parts)))
+}

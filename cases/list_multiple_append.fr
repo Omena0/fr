@@ -1,0 +1,9 @@
+// !5
+
+void main() {
+    list lst = [1, 2, 3]
+    lst = append(lst, 4)
+    lst = append(lst, 5)
+    int last = lst[-1]
+    println(str(last))
+}

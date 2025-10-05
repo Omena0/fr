@@ -1,0 +1,7 @@
+// !
+
+void main() {
+    for (i in 0..0) {
+        println(str(i))
+    }
+}

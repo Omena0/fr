@@ -1,0 +1,7 @@
+// !1
+
+void main() {
+    list lst = [10, 20, 30]
+    lst[0] = 1
+    println(str(lst[0]))
+}

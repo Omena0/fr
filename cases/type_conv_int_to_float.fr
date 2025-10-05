@@ -1,0 +1,7 @@
+// !5.0
+
+void main() {
+    int x = 5
+    float value = float(x)
+    println(str(value))
+}

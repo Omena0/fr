@@ -1,0 +1,7 @@
+// !3.14
+
+void main() {
+    str s = "3.14"
+    float value = float(s)
+    println(str(value))
+}
