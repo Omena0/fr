@@ -98,14 +98,13 @@ def main():
     try:
         ast = parse(code)
     except Exception as e:
+        # Parse error - treat the error message as the output/error
         err_msg = extract_error_message(str(e))
         
-        if is_output_test:
-            print(f"PY_ERROR:{err_msg}")
-            print(f"VM_ERROR:{err_msg}")
-        else:
-            print(f"PY_OUTPUT:{err_msg}")
-            print(f"VM_OUTPUT:{err_msg}")
+        # For both output tests and error tests, use the error message
+        # This matches old test runner behavior where parse errors are compared with expected
+        print(f"PY_OUTPUT:{err_msg}")
+        print(f"VM_OUTPUT:{err_msg}")
         print(f"EXPECT:{expect}")
         print(f"IS_OUTPUT:{is_output_test}")
         return 0

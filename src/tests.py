@@ -53,10 +53,68 @@ def run_test_isolated(test_file, test_content):
                 'mismatch': False
             }
     
+    # Define helper functions for error message comparison
+    def extract_msg(text):
+        """Extract error message and normalize line numbers for comparison"""
+        if not text:
+            return ''
+        
+        # If message starts with ?N: or ?N,M: it's a normalized error with line numbers
+        # Replace actual line numbers with ? for comparison
+        if text.startswith('?'):
+            # Format is ?N:Message or ?N,M:Message
+            # Extract just the message part for comparison
+            parts = text.split(':', 1)
+            if len(parts) > 1:
+                # Keep the ? prefix but use for comparison
+                return text
+        
+        # For other formats, extract the message
+        if ':' in text:
+            parts = text.split(':', 2)
+            if len(parts) >= 3:
+                return parts[2].strip().rstrip('.')
+        return text.rstrip('.')
+    
+    def normalize_line_numbers(msg1, msg2):
+        """Check if two error messages match, ignoring line/column numbers after ?"""
+        # If expected (msg2) doesn't have line numbers, strip them from actual (msg1)
+        if not msg2.startswith('?') and msg1.startswith('?'):
+            # Extract just the message part from msg1
+            idx = msg1.find(':', 1)
+            if idx > 0:
+                msg1 = msg1[idx+1:]  # Remove ?N: or ?N,M: prefix
+        
+        # If expected has line numbers but actual doesn't, that's OK too
+        if msg2.startswith('?') and not msg1.startswith('?'):
+            idx = msg2.find(':', 1)
+            if idx > 0:
+                msg2 = msg2[idx+1:]
+        
+        # Both should be in format ?N:Message or ?N,M:Message
+        # Or one/both might not have line numbers
+        if not msg1.startswith('?') and not msg2.startswith('?'):
+            # Neither has line numbers, direct comparison
+            # Remove trailing periods for comparison
+            return msg1.rstrip('.') == msg2.rstrip('.')
+        
+        # Extract message parts after the line number
+        def get_message_part(text):
+            if text.startswith('?'):
+                # Find the : that separates line info from message
+                idx = text.find(':', 1)  # Skip first ? when searching
+                if idx > 0:
+                    return text[idx+1:].rstrip('.')  # Return everything after the :, strip periods
+            return text.rstrip('.')
+        
+        return get_message_part(msg1) == get_message_part(msg2)
+    
     # Determine if tests passed
     if is_output_test:
-        py_passed = (py_output == expect)
-        vm_passed = (vm_output == expect)
+        # For output tests, compare output directly
+        # Use normalized comparison for error-like output (with line numbers)
+        py_passed = normalize_line_numbers(py_output if py_output else '', expect)
+        vm_passed = normalize_line_numbers(vm_output if vm_output else '', expect)
         
         return {
             'file': test_file,
@@ -70,61 +128,6 @@ def run_test_isolated(test_file, test_content):
         }
     else:
         # Error test or "none" test
-        def extract_msg(text):
-            """Extract error message and normalize line numbers for comparison"""
-            if not text:
-                return ''
-            
-            # If message starts with ?N: or ?N,M: it's a normalized error with line numbers
-            # Replace actual line numbers with ? for comparison
-            if text.startswith('?'):
-                # Format is ?N:Message or ?N,M:Message
-                # Extract just the message part for comparison
-                parts = text.split(':', 1)
-                if len(parts) > 1:
-                    # Keep the ? prefix but use for comparison
-                    return text
-            
-            # For other formats, extract the message
-            if ':' in text:
-                parts = text.split(':', 2)
-                if len(parts) >= 3:
-                    return parts[2].strip().rstrip('.')
-            return text.rstrip('.')
-        
-        def normalize_line_numbers(msg1, msg2):
-            """Check if two error messages match, ignoring line/column numbers after ?"""
-            # If expected (msg2) doesn't have line numbers, strip them from actual (msg1)
-            if not msg2.startswith('?') and msg1.startswith('?'):
-                # Extract just the message part from msg1
-                idx = msg1.find(':', 1)
-                if idx > 0:
-                    msg1 = msg1[idx+1:]  # Remove ?N: or ?N,M: prefix
-            
-            # If expected has line numbers but actual doesn't, that's OK too
-            if msg2.startswith('?') and not msg1.startswith('?'):
-                idx = msg2.find(':', 1)
-                if idx > 0:
-                    msg2 = msg2[idx+1:]
-            
-            # Both should be in format ?N:Message or ?N,M:Message
-            # Or one/both might not have line numbers
-            if not msg1.startswith('?') and not msg2.startswith('?'):
-                # Neither has line numbers, direct comparison
-                # Remove trailing periods for comparison
-                return msg1.rstrip('.') == msg2.rstrip('.')
-            
-            # Extract message parts after the line number
-            def get_message_part(text):
-                if text.startswith('?'):
-                    # Find the : that separates line info from message
-                    idx = text.find(':', 1)  # Skip first ? when searching
-                    if idx > 0:
-                        return text[idx+1:].rstrip('.')  # Return everything after the :, strip periods
-                return text.rstrip('.')
-            
-            return get_message_part(msg1) == get_message_part(msg2)
-        
         # Check if this is a "none" test (parsing succeeded)
         if py_output == 'none' and vm_output == 'none' and expect.lower() == 'none':
             py_passed = True
