@@ -10,35 +10,30 @@ void main(str argv) {
         int cs = accept(sock)
 
         // Read the entire HTTP request at once
-        str request = recv(cs, 4096) // You better send a short enough request
+        str request = recv(cs, 4096)
 
         // Extract just the first line (method + path)
         list lines = split(request, "\r\n")
         list header = split(lines[0], " ")
-        println(header)
         str type = header[0]
-        str path = "./static" + header[1] + '.html'
-        str proto = header[2]
+        str path = "./static" + header[1] + ".html"
 
         str response = "HTTP/1.1 200 OK\r\n\r\n"
 
-        println(path)
-
         if (not exists(path)) {
             response += "404 Not Found"
-        }
-        else {
-            int fd = fopen(path)
-            str content = fread(fd, -1)
+        } else {
+            // 1. Load the page content you want to show inside <code>
+            int fd_page = fopen(path)
+            str content = fread(fd_page, -1)
+
             response += content
         }
+
         // Send HTTP response
         send(cs, response)
-
         sclose(cs)
     }
 
     sclose(sock)
 }
-
-

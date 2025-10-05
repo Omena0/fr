@@ -299,7 +299,13 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         # Prepare arguments
         new_args = []
         for arg in args:
-            if 'value' not in arg:
+            # Check if this is a complex expression that needs evaluation
+            # (slice, attr, or other runtime expressions)
+            if 'slice' in arg or 'attr' in arg or ('value' in arg and isinstance(arg.get('value'), dict)):
+                # Evaluate the expression first
+                arg = eval_expr_node(arg)
+                arg = {"value": arg, "type": get_type(arg)}
+            elif 'value' not in arg:
                 arg = eval_expr_node(arg)
                 arg = {"value": arg, "type": get_type(arg)}
             new_args.append({"value": arg['value'], "type": get_type(arg['value'])})

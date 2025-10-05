@@ -335,7 +335,7 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
         stream: Input stream positioned before '('
         check_comma: Whether to validate comma separation
         parse_types: If True, parse type annotations; if False, return raw values
-    
+
     Returns:
         List of tuples: (name, type) where type is None if untyped or parse_types=False
     """

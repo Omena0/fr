@@ -224,11 +224,20 @@ def split(text: str, sep: str, maxsplit: int = -1) -> list[str]:
     splits = 0
     while i < len(text):
         if in_string:
-            if text[i] == quote_char:
+            # Handle escape sequences
+            if text[i] == '\\' and i + 1 < len(text):
+                current += text[i]  # Add backslash
+                i += 1
+                current += text[i]  # Add escaped character
+                i += 1
+            elif text[i] == quote_char:
                 in_string = False
                 quote_char = None
-            current += text[i]
-            i += 1
+                current += text[i]
+                i += 1
+            else:
+                current += text[i]
+                i += 1
         else:
             if text[i] in "\"'":
                 in_string = True
