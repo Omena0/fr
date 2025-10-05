@@ -20,9 +20,34 @@ from compiler import compile_ast_to_bytecode
 from runtime import run
 
 def extract_error_message(error_text):
-    """Extract just the error message from a full error string"""
+    """Extract and normalize error message to match expected format"""
     if not error_text:
         return ''
+    
+    # Parser errors have format: "...Line X:Y: Message" or "...Line X: Message"
+    # Expected format is: "?X:Message" or "?X,Y:Message"
+    if 'Line ' in error_text:
+        # Extract the line number and message
+        parts = error_text.split('Line ', 1)
+        if len(parts) > 1:
+            line_part = parts[1]
+            # Format is "X:Y: Message" or "X: Message"
+            if ':' in line_part:
+                line_info, rest = line_part.split(':', 1)
+                if ':' in rest:
+                    col_part, message = rest.split(':', 1)
+                    message = message.strip()
+                    # Check if col_part is a column number
+                    try:
+                        col = int(col_part.strip())
+                        return f"?{line_info},{col}:{message}"
+                    except ValueError:
+                        # col_part is part of message
+                        return f"?{line_info}:{col_part}:{message}".replace('::', ':').strip()
+                else:
+                    return f"?{line_info}:{rest.strip()}"
+    
+    # For other error formats, just clean up
     if ':' in error_text:
         parts = error_text.split(':', 2)
         if len(parts) >= 3:
@@ -40,7 +65,7 @@ def main():
         return 1
     
     expect_line = lines[0]
-    code = '\n' + lines[1]
+    code = lines[1]  # Don't prepend '\n' - it's already in lines[1]
     
     # Extract expectation
     expect = expect_line.replace('//', '').strip()

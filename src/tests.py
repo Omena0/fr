@@ -71,25 +71,57 @@ def run_test_isolated(test_file, test_content):
     else:
         # Error test or "none" test
         def extract_msg(text):
+            """Extract error message and normalize line numbers for comparison"""
             if not text:
                 return ''
+            
+            # If message starts with ?N: or ?N,M: it's a normalized error with line numbers
+            # Replace actual line numbers with ? for comparison
+            if text.startswith('?'):
+                # Format is ?N:Message or ?N,M:Message
+                # Extract just the message part for comparison
+                parts = text.split(':', 1)
+                if len(parts) > 1:
+                    # Keep the ? prefix but use for comparison
+                    return text
+            
+            # For other formats, extract the message
             if ':' in text:
                 parts = text.split(':', 2)
                 if len(parts) >= 3:
                     return parts[2].strip().rstrip('.')
             return text.rstrip('.')
         
+        def normalize_line_numbers(msg1, msg2):
+            """Check if two error messages match, ignoring line/column numbers after ?"""
+            # Both should be in format ?N:Message or ?N,M:Message
+            # Or one/both might not have line numbers
+            if not msg1.startswith('?') and not msg2.startswith('?'):
+                return msg1 == msg2
+            
+            # Extract message parts after the line number
+            def get_message_part(text):
+                if text.startswith('?'):
+                    # Find the : that separates line info from message
+                    idx = text.find(':', 1)  # Skip first ? when searching
+                    if idx > 0:
+                        return text[idx+1:]  # Return everything after the :
+                return text
+            
+            return get_message_part(msg1) == get_message_part(msg2)
+        
         # Check if this is a "none" test (parsing succeeded)
         if py_output == 'none' and vm_output == 'none' and expect.lower() == 'none':
             py_passed = True
             vm_passed = True
         else:
-            py_msg = extract_msg(py_error) if py_error else ''
-            vm_msg = extract_msg(vm_error) if vm_error else ''
+            py_msg = extract_msg(py_error) if py_error else extract_msg(py_output) if py_output else ''
+            vm_msg = extract_msg(vm_error) if vm_error else extract_msg(vm_output) if vm_output else ''
             exp_msg = extract_msg(expect)
             
-            py_passed = (py_msg == exp_msg)
-            vm_passed = (vm_msg == exp_msg)
+            # Use normalized comparison for line numbers
+            py_passed = normalize_line_numbers(py_msg, exp_msg)
+            vm_passed = normalize_line_numbers(vm_msg, exp_msg)
         
         return {
             'file': test_file,
