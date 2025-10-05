@@ -26,10 +26,10 @@ def _file_read(fd: int, size: int = -1):
         # Read all
         chunks = []
         while True:
-            chunk = _os.read(fd, 4096)
-            if not chunk:
+            if chunk := _os.read(fd, 4096):
+                chunks.append(chunk)
+            else:
                 break
-            chunks.append(chunk)
         return b''.join(chunks).decode('utf-8', errors='replace')
     return _os.read(fd, size).decode('utf-8', errors='replace')
 
@@ -121,32 +121,26 @@ def _socket_create(family: str = 'inet', type_: str = 'stream'):
     global _next_socket_id
 
     # Parse family
-    if family.lower() == 'inet':
+    if family.lower() == 'inet' or family.lower() not in ['inet6', 'unix']:
         fam = _socket.AF_INET
     elif family.lower() == 'inet6':
         fam = _socket.AF_INET6
-    elif family.lower() == 'unix':
-        fam = _socket.AF_UNIX
     else:
-        fam = _socket.AF_INET
-
+        fam = _socket.AF_UNIX
     # Parse type
-    if type_.lower() == 'stream':
+    if type_.lower() == 'stream' or type_.lower() not in ['dgram', 'raw']:
         typ = _socket.SOCK_STREAM
     elif type_.lower() == 'dgram':
         typ = _socket.SOCK_DGRAM
-    elif type_.lower() == 'raw':
-        typ = _socket.SOCK_RAW
     else:
-        typ = _socket.SOCK_STREAM
-
+        typ = _socket.SOCK_RAW
     sock = _socket.socket(fam, typ)
     sock_id = _next_socket_id
     _next_socket_id += 1
     _socket_map[sock_id] = sock
     return sock_id
 
-def _socket_connect(sock_id: int, host: str, port: int):
+def _socket_connect(sock_id: int, host: str, port):
     """Connect socket to address"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
@@ -154,7 +148,7 @@ def _socket_connect(sock_id: int, host: str, port: int):
     sock.connect((host, int(port)))
     return None
 
-def _socket_bind(sock_id: int, host: str, port: int):
+def _socket_bind(sock_id: int, host: str, port):
     """Bind socket to address"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
@@ -162,7 +156,7 @@ def _socket_bind(sock_id: int, host: str, port: int):
     sock.bind((host, int(port)))
     return None
 
-def _socket_listen(sock_id: int, backlog: int = 5):
+def _socket_listen(sock_id: int, backlog = 5):
     """Listen for connections"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
@@ -189,7 +183,7 @@ def _socket_send(sock_id: int, data: str):
     sock = _socket_map[sock_id]
     return sock.send(data.encode('utf-8'))
 
-def _socket_recv(sock_id: int, size: int = 4096):
+def _socket_recv(sock_id: int, size = 4096):
     """Receive data from socket"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
@@ -206,22 +200,22 @@ def _socket_close(sock_id: int):
     del _socket_map[sock_id]
     return None
 
-def _socket_setsockopt(sock_id: int, level: str, option: str, value: int):
+def _socket_setsockopt(sock_id: int, level: str, option: str, value):
     """Set socket option"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
 
     # Parse level
-    if level.upper() == 'SOL_SOCKET':
+    if level.upper() == 'SOL_SOCKET' or level.upper() not in [
+        'IPPROTO_TCP',
+        'IPPROTO_IP',
+    ]:
         lev = _socket.SOL_SOCKET
     elif level.upper() == 'IPPROTO_TCP':
         lev = _socket.IPPROTO_TCP
-    elif level.upper() == 'IPPROTO_IP':
-        lev = _socket.IPPROTO_IP
     else:
-        lev = _socket.SOL_SOCKET
-
+        lev = _socket.IPPROTO_IP
     # Parse option
     opt_map = {
         'SO_REUSEADDR': _socket.SO_REUSEADDR,

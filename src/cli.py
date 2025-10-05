@@ -23,12 +23,12 @@ def get_vm_path():
     vm_path = Path(__file__).parent.parent / 'runtime' / 'vm'
     if vm_path.exists():
         return str(vm_path)
-    
+
     # Try development location
     vm_path = Path(__file__).parent.parent.parent / 'runtime' / 'vm'
     if vm_path.exists():
         return str(vm_path)
-    
+
     return None
 
 def has_untyped_functions(ast):
@@ -48,10 +48,10 @@ def detect_file_type(filepath):
     """Detect if file is binary AST, bytecode, or JSON"""
     with open(filepath, 'rb') as f:
         header = f.read(8)
-    
+
     if header[:4] == b'L2AS':
         return 'binary_ast'
-    
+
     try:
         with open(filepath, 'r') as f:
             first_line = f.readline().strip()
@@ -59,14 +59,14 @@ def detect_file_type(filepath):
                 return 'bytecode'
     except:
         pass
-    
+
     try:
         with open(filepath, 'r') as f:
             json.load(f)
         return 'json'
     except:
         pass
-    
+
     return 'unknown'
 
 def parse_cmd(args):
@@ -74,10 +74,10 @@ def parse_cmd(args):
     if len(args) < 1:
         print("Usage: fr parse <source.fr> [--json]")
         sys.exit(1)
-    
+
     source_file = args[0]
     output_json = '--json' in args or '-j' in args
-    
+
     with open(source_file) as f:
         source = f.read()
 
@@ -86,7 +86,7 @@ def parse_cmd(args):
     except SyntaxError as e:
         print(f'Exception: {e}')
         sys.exit(1)
-    
+
     if output_json:
         output_file = 'out.json'
         with open(output_file, 'w') as f:
@@ -102,21 +102,21 @@ def compile_cmd(args=None):
     """Compile AST to bytecode"""
     if args is None:
         args = sys.argv[1:]
-    
+
     if len(args) < 1:
         print("Usage: fr compile <source.fr> [-o output.bc]")
         print("   or: fr compile <ast.bin|ast.json> [-o output.bc]")
         sys.exit(1)
-    
+
     input_file = args[0]
-    
+
     # Determine output file
     output_file = 'out.bc'
     if '-o' in args:
         idx = args.index('-o')
         if idx + 1 < len(args):
             output_file = args[idx + 1]
-    
+
     # Check if input is source code
     if input_file.endswith('.fr') or input_file.endswith('.c'):
         # Parse source first
@@ -131,7 +131,7 @@ def compile_cmd(args=None):
     else:
         # Load AST
         file_type = detect_file_type(input_file)
-        
+
         if file_type == 'json':
             with open(input_file, 'r') as f:
                 ast = json.load(f)
@@ -141,13 +141,13 @@ def compile_cmd(args=None):
         else:
             print(f"Error: Cannot compile {input_file} - unknown format")
             sys.exit(1)
-    
+
     try:
         bytecode = compile_ast_to_bytecode(ast)
-        
+
         with open(output_file, 'w') as f:
             f.write(bytecode)
-        
+
         print(f"Compiled to bytecode: {output_file}")
     except Exception as e:
         print(f"Compilation error: {e}")
@@ -157,24 +157,24 @@ def run_cmd(args=None):
     """Run a file"""
     if args is None:
         args = sys.argv[1:]
-    
+
     if len(args) < 1:
         print("Usage: fr run <file>")
         sys.exit(1)
-    
+
     input_file = args[0]
     file_type = detect_file_type(input_file)
-    
+
     if file_type == 'bytecode':
         # Run bytecode with C VM
         vm_path = get_vm_path()
         if not vm_path:
             print("Error: C VM not found. Please build it with: cd runtime && make")
             sys.exit(1)
-        
+
         result = subprocess.run([vm_path, input_file])
         sys.exit(result.returncode)
-    
+
     elif file_type == 'json':
         with open(input_file, 'r') as f:
             ast = json.load(f)
@@ -184,7 +184,7 @@ def run_cmd(args=None):
     else:
         print(f"Error: Cannot run {input_file} - unknown format")
         sys.exit(1)
-    
+
     # Run with Python runtime
     try:
         run(ast)
@@ -197,16 +197,16 @@ def encode_cmd(args):
     if len(args) < 1:
         print("Usage: fr encode <ast.json> [-o output.bin]")
         sys.exit(1)
-    
+
     input_file = args[0]
     output_file = args[2] if '-o' in args and len(args) > 2 else 'out.bin'
-    
+
     with open(input_file, 'r') as f:
         ast = json.load(f)
-    
+
     with open(output_file, 'wb') as f:
         f.write(encode_binary(ast))
-    
+
     print(f"Encoded to binary: {output_file}")
 
 def decode_cmd(args):
@@ -214,16 +214,16 @@ def decode_cmd(args):
     if len(args) < 1:
         print("Usage: fr decode <ast.bin> [-o output.json]")
         sys.exit(1)
-    
+
     input_file = args[0]
     output_file = args[2] if '-o' in args and len(args) > 2 else 'out.json'
-    
+
     with open(input_file, 'rb') as f:
         ast = decode_binary(f.read())
-    
+
     with open(output_file, 'w') as f:
         json.dump(ast, f, indent=2)
-    
+
     print(f"Decoded to JSON: {output_file}")
 
 def main():
@@ -244,10 +244,10 @@ def main():
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")
         sys.exit(1)
-    
+
     cmd = sys.argv[1]
     args = sys.argv[2:]
-    
+
     if cmd == 'parse':
         parse_cmd(args)
     elif cmd == 'compile':
@@ -262,49 +262,48 @@ def main():
         # Check for backend flags
         force_c_backend = '-c' in args or '--compile' in args
         force_py_backend = '-py' in args or '--python' in args
-        
+
         # Validate flags
         if force_c_backend and force_py_backend:
             print("Error: Cannot use both -c and -py flags", file=sys.stderr)
             sys.exit(1)
-        
+
         # Filter out flags to get program arguments
         program_args = [arg for arg in args if arg not in ['-c', '--compile', '-py', '--python', '-O', '--optimize']]
-        
+
         # Direct file execution
         file_type = detect_file_type(cmd)
-        
+
         if file_type == 'bytecode':
             run_cmd([cmd])
         else:
             # Parse and run source file
             with open(cmd) as f:
                 source = f.read()
-            
+
             # Parse with optimization flag (checks sys.argv internally)
             try:
                 ast = parse(source, file=cmd)
             except SyntaxError as e:
                 print(f'Exception: {e}')
                 sys.exit(1)
-            
+
             # Determine which backend to use
             if force_py_backend:
                 use_c_backend = False
             else:
                 use_c_backend = force_c_backend or not has_untyped_functions(ast)
-            
+
             if use_c_backend:
                 try:
                     bytecode = compile_ast_to_bytecode(ast)
-                    
+
                     import tempfile
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
                         f.write(bytecode)
                         temp_bc = f.name
-                    
-                    vm_path = get_vm_path()
-                    if vm_path:
+
+                    if vm_path := get_vm_path():
                         # Pass program arguments to the VM
                         result = subprocess.run([vm_path, temp_bc] + program_args)
                         os.unlink(temp_bc)
@@ -322,7 +321,10 @@ def main():
                         # Fall back to Python runtime for auto-detection
                         print(f"Warning: C compilation failed ({e}), using Python runtime")
                         use_c_backend = False
-            
+                except KeyboardInterrupt:
+                    print(end='\r')
+                    exit(0)
+
             if not use_c_backend:
                 try:
                     run(ast)

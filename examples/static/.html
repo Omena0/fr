@@ -3,63 +3,62 @@
     <head>
         <meta charset="utf-8">
         <meta name="description" content="Frscript HTTP Example">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {
                 background-color: #333333;
-                color: white;
                 font-family: 'Hack Nerd Font Mono', monospace;
+                text-align: center;
+                color: white;
             }
             h1 {
                 text-shadow: 6px 6px 8px black;
-                text-align: center;
                 font-size: 80px
             }
             h2 {
                 text-shadow: 4px 4px 6px black;
-                text-align: center;
                 font-size: 40px
             }
             p {
                 text-shadow: 3px 3px 5px black;
-                text-align: center;
                 font-size: 25px;
             }
             pre {
+                color: #fafafa;
                 display: block;
                 margin: 0 auto;
                 width: fit-content;
                 text-align: left;
-                background-color: #222;
+                background-color: #1e1e1e;
                 padding: 10px;
                 border-radius: 5px;
                 overflow-x: auto;
-                max-height: 60vh; /* limit to 60% of viewport height */
-                overflow-y: auto; /* vertical scroll inside pre only */
+                max-height: 60vh;
+                overflow-y: auto;
+                font-size: 14px;
             }
             .keyword {
-                color: #ff79c6;
-                font-weight: bold;
-            }
-            .function {
-                color: #50fa7b;
-            }
+                color: #569cd6;
+                }
             .type {
-                color: #8be9fd;
-            }
-            .string {
-                color: #f1fa8c;
+                color: #9cdcfe;
             }
             .number {
-                color: #bd93f9;
+                color: #b5cea8;
             }
-            .comment {
-                color: #6272a4;
-                font-style: italic;
+            .attribute {
+                color: #d7ba7d;
             }
-            .boolean {
-                color: #ffb86c;
-                font-weight: bold;
+            .tag {
+                color: #569cd6;
+            }
+            .operator {
+                color: #d4d4d4;
+            }
+            .string {
+                color: #ce9178;
+            }
+            .tag {
+                color: #808080;
             }
         </style>
         <title>Hello world!</title>
@@ -70,60 +69,54 @@
         <p>Page source code:<br>
             <code>
                 <pre>
-<span class="keyword">&lt;!DOCTYPE</span> <span class="type">html</span>&gt;
-<span class="keyword">&lt;html&gt;</span>
-    <span class="keyword">&lt;head&gt;</span>
-        <span class="keyword">&lt;meta</span> <span class="type">charset</span>=<span class="string">&quot;utf-8&quot;</span><span class="keyword">&gt;</span>
-        <span class="keyword">&lt;meta</span> <span class="type">name</span>=<span class="string">&quot;description&quot;</span> <span class="type">content</span>=<span class="string">&quot;Frscript HTTP Example&quot;</span><span class="keyword">&gt;</span>
-        <span class="keyword">&lt;meta</span> <span class="type">name</span>=<span class="string">&quot;viewport&quot;</span> <span class="type">content</span>=<span class="string">&quot;width=device-width, initial-scale=1&quot;</span><span class="keyword">&gt;</span>
-        <span class="keyword">&lt;style&gt;</span>
-            <span class="type">body</span> {
-                <span class="type">background-color</span>: <span class="string">#333333</span>;
-                <span class="type">color</span>: <span class="string">white</span>;
+<span class="keyword"><span class="tag">&lt;</span>!DOCTYPE</span> <span class="type">html</span><span class="tag">&gt;</span>
+<span class="keyword"><span class="tag">&lt;</span>html<span class="tag">&gt;</span></span>
+    <span class="keyword"><span class="tag">&lt;</span>head<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>meta</span> <span class="type">charset</span>=<span class="string">&quot;utf-8&quot;</span><span class="keyword"><span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>meta</span> <span class="type">name</span>=<span class="string">&quot;description&quot;</span> <span class="type">content</span>=<span class="string">&quot;Frscript HTTP Example&quot;</span><span class="keyword"><span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>style<span class="tag">&gt;</span></span>
+            <span class="attribute">body {</span>
+                <span class="type">background-color</span>: #333333;
+                <span class="type">color</span>: white;
                 <span class="type">font-family</span>: <span class="string">'Hack Nerd Font Mono', monospace</span>;
-            }
-            <span class="type">h1</span> {
-                <span class="type">text-shadow</span>: <span class="string">6px 6px 8px black</span>;
-                <span class="type">text-align</span>: <span class="string">center</span>;
+                <span class="type">text-align</span>: center;
+            <span class="attribute">}</span>
+            <span class="attribute">h1 {</span>
+                <span class="type">text-shadow</span>: <span class="number">6px 6px 8px</span> black;
                 <span class="type">font-size</span>: <span class="number">80px</span>;
-            }
-            <span class="type">h2</span> {
-                <span class="type">text-shadow</span>: <span class="string">4px 4px 6px black</span>;
-                <span class="type">text-align</span>: <span class="string">center</span>;
+            <span class="attribute">}</span>
+            <span class="attribute">h2 {</span>
+                <span class="type">text-shadow</span>: <span class="number">4px 4px 6px</span> black;
                 <span class="type">font-size</span>: <span class="number">40px</span>;
-            }
-            <span class="type">p</span> {
-                <span class="type">text-shadow</span>: <span class="string">3px 3px 5px black</span>;
-                <span class="type">text-align</span>: <span class="string">center</span>;
+            <span class="attribute">}</span>
+            <span class="attribute">p {</span>
+                <span class="type">text-shadow</span>: <span class="number">3px 3px 5px</span> black;
                 <span class="type">font-size</span>: <span class="number">25px</span>;
-            }
-            <span class="type">pre</span> {
-                <span class="type">display</span>: <span class="string">block</span>;
-                <span class="type">margin</span>: <span class="number">0</span> <span class="type">auto</span>;
-                <span class="type">width</span>: <span class="string">fit-content</span>;
-                <span class="type">text-align</span>: <span class="string">left</span>;
-                <span class="type">background-color</span>: <span class="string">#222</span>;
+            <span class="attribute">}</span>
+            <span class="attribute">pre {</span>
+                <span class="type">display</span>: block;
+                <span class="type">width</span>: fit-content;
+                <span class="type">text-align</span>: left;
+                <span class="type">background-color</span>: #1e1e1e;
                 <span class="type">padding</span>: <span class="number">10px</span>;
                 <span class="type">border-radius</span>: <span class="number">5px</span>;
-                <span class="type">overflow-x</span>: <span class="string">auto</span>;
                 <span class="type">max-height</span>: <span class="number">60vh</span>;
-                <span class="type">overflow-y</span>: <span class="string">auto</span>;
-            }
-        <span class="keyword">&lt;/style&gt;</span>
-        <span class="keyword">&lt;title&gt;</span>Hello world!<span class="keyword">&lt;/title&gt;</span>
-    <span class="keyword">&lt;/head&gt;</span>
-    <span class="keyword">&lt;body&gt;</span>
-        <span class="keyword">&lt;h1&gt;</span>Hello, World!<span class="keyword">&lt;/h1&gt;</span>
-        <span class="keyword">&lt;h2&gt;</span>This is web page is running on Frscript!<span class="keyword">&lt;/h2&gt;</span>
-        <span class="keyword">&lt;p&gt;</span>Page source code:<span class="keyword">&lt;br&gt;</span>
-            <span class="keyword">&lt;code&gt;</span>
-                <span class="keyword">&lt;pre&gt;</span>
-                    &lt;&lt;page_source&gt;&gt;
-                <span class="keyword">&lt;/pre&gt;</span>
-            <span class="keyword">&lt;/code&gt;</span>
-        <span class="keyword">&lt;/p&gt;</span>
-    <span class="keyword">&lt;/body&gt;</span>
-<span class="keyword">&lt;/html&gt;</span></pre>
+            <span class="attribute">}</span>
+        <span class="keyword"><span class="tag">&lt;</span>/style<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>title<span class="tag">&gt;</span></span>Hello world!<span class="keyword"><span class="tag">&lt;</span>/title<span class="tag">&gt;</span></span>
+    <span class="keyword"><span class="tag">&lt;</span>/head<span class="tag">&gt;</span></span>
+    <span class="keyword"><span class="tag">&lt;</span>body<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>h1<span class="tag">&gt;</span></span>Hello, World!<span class="keyword"><span class="tag">&lt;</span>/h1<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>h2<span class="tag">&gt;</span></span>This is web page is running on Frscript!<span class="keyword"><span class="tag">&lt;</span>/h2<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>p<span class="tag">&gt;</span></span>Page source code:<span class="keyword"><span class="tag">&lt;</span>br<span class="tag">&gt;</span></span>
+            <span class="keyword"><span class="tag">&lt;</span>code<span class="tag">&gt;</span></span>
+                <span class="keyword"><span class="tag">&lt;</span>pre<span class="tag">&gt;</span></span>
+                    <span class="tag">&lt;</span><span class="tag">&lt;</span> page_source <span class="tag">&gt;</span><span class="tag">&gt;</span>
+                <span class="keyword"><span class="tag">&lt;</span>/pre<span class="tag">&gt;</span></span>
+            <span class="keyword"><span class="tag">&lt;</span>/code<span class="tag">&gt;</span></span>
+        <span class="keyword"><span class="tag">&lt;</span>/p<span class="tag">&gt;</span></span>
+    <span class="keyword"><span class="tag">&lt;</span>/body<span class="tag">&gt;</span></span>
+<span class="keyword"><span class="tag">&lt;</span>/html<span class="tag">&gt;</span></span></pre>
             </code>
         </p>
     </body>

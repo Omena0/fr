@@ -441,6 +441,11 @@ class BytecodeCompiler:
                 for arg in args:
                     self.compile_expr(arg, expr_type)
 
+                # Add default arguments for certain functions
+                if func_name == 'fopen' and len(args) == 1:
+                    # fopen with 1 arg needs default mode 'r'
+                    self.emit('CONST_STR "r"')
+
                 # Check if builtin
                 builtin_map = {
                     'println': 'BUILTIN_PRINTLN',
