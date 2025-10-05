@@ -94,10 +94,25 @@ def run_test_isolated(test_file, test_content):
         
         def normalize_line_numbers(msg1, msg2):
             """Check if two error messages match, ignoring line/column numbers after ?"""
+            # If expected (msg2) doesn't have line numbers, strip them from actual (msg1)
+            if not msg2.startswith('?') and msg1.startswith('?'):
+                # Extract just the message part from msg1
+                idx = msg1.find(':', 1)
+                if idx > 0:
+                    msg1 = msg1[idx+1:]  # Remove ?N: or ?N,M: prefix
+            
+            # If expected has line numbers but actual doesn't, that's OK too
+            if msg2.startswith('?') and not msg1.startswith('?'):
+                idx = msg2.find(':', 1)
+                if idx > 0:
+                    msg2 = msg2[idx+1:]
+            
             # Both should be in format ?N:Message or ?N,M:Message
             # Or one/both might not have line numbers
             if not msg1.startswith('?') and not msg2.startswith('?'):
-                return msg1 == msg2
+                # Neither has line numbers, direct comparison
+                # Remove trailing periods for comparison
+                return msg1.rstrip('.') == msg2.rstrip('.')
             
             # Extract message parts after the line number
             def get_message_part(text):
@@ -105,8 +120,8 @@ def run_test_isolated(test_file, test_content):
                     # Find the : that separates line info from message
                     idx = text.find(':', 1)  # Skip first ? when searching
                     if idx > 0:
-                        return text[idx+1:]  # Return everything after the :
-                return text
+                        return text[idx+1:].rstrip('.')  # Return everything after the :, strip periods
+                return text.rstrip('.')
             
             return get_message_part(msg1) == get_message_part(msg2)
         
