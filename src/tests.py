@@ -118,6 +118,12 @@ def extract_message(s):
 
 def run_single_test(file, expect, case):
     """Run a single test case on both runtimes"""
+    # Clear global state between tests
+    import parser
+    parser.vars.clear()
+    parser.current_func = '<module>'
+    parser.loop_depth = 0
+    
     is_output_test = expect.startswith('!')
     if is_output_test:
         expect = expect[1:].strip()
