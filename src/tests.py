@@ -1,275 +1,187 @@
+#!/usr/bin/env python3
+"""
+Isolated test runner - runs each test in a separate subprocess for complete isolation.
+This prevents any state pollution between tests.
+"""
 import os
 import sys
+import glob
 import subprocess
-import tempfile
-from io import StringIO
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
-debug = '-d' in sys.argv
-
-# Enable debug mode BEFORE importing parser
-# This makes parse() raise exceptions instead of calling exit()
-if not debug:
-    sys.argv.append('-d')
-
-from parser import parse
-from runtime import run
-from compiler import compile_ast_to_bytecode
-
-def run_python_runtime(ast):
-    """Run AST with Python runtime and capture output"""
-    old_stdout = sys.stdout
-    string_io = StringIO()
-    sys.stdout = string_io
-    try:
-        run(ast)
-        output = string_io.getvalue().strip()
-        return output, None
-    except Exception as e:
-        return None, str(e)
-    finally:
-        sys.stdout = old_stdout
-
-def run_c_runtime(ast):
-    """Run AST with C VM runtime and capture output"""
-    bc_file = None
-    try:
-        # Compile AST to bytecode
-        bytecode = compile_ast_to_bytecode(ast)
-        
-        # Write bytecode to temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
-            bc_file = f.name
-            f.write(bytecode)
-        
-        # Run with C VM
-        vm_path = os.path.join(os.path.dirname(__file__), '../runtime/vm')
-        result = subprocess.run(
-            [vm_path, bc_file],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        # Clean up
-        os.unlink(bc_file)
-        bc_file = None
-        
-        if result.returncode != 0:
-            # VM error occurred
-            error_msg = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
-            return None, error_msg
-        
-        output = result.stdout.strip()
-        return output, None
-        
-    except subprocess.TimeoutExpired:
-        if bc_file:
-            os.unlink(bc_file)
-        return None, "Timeout: Test took too long"
-    except Exception as e:
-        if bc_file:
-            try:
-                os.unlink(bc_file)
-            except:
-                pass
-        return None, str(e)
-
-cases = {}
-
-for file in os.listdir('cases'):
-    # Only process .fr files, skip .example files
-    if not file.endswith('.fr') or file.endswith('.fr.example'):
-        continue
-    content = open(f'cases/{file}').read()
-    cases[file] = content.split('\n',1)
-
-def extract_message(s):
-    """Extract error message from error string"""
-    if s.startswith('?'):
-        parts = s.removeprefix('?').split(':', 1)
-        if len(parts) == 2:
-            return parts[1]
+def run_test_isolated(test_file, test_content):
+    """Run a single test in complete isolation via subprocess"""
+    repo_root = Path(__file__).parent.parent
+    helper_script = repo_root / 'src' / 'run_single_test.py'
     
-    # Handle new multi-line format: last line has "Location: message"
-    if 'Syntax Error' in s and '\n' in s:
-        lines = s.strip().split('\n')
-        # Last line should be "    Location: message"
-        last_line = lines[-1].strip()
-        if ': ' in last_line:
-            # Extract message after the location prefix
-            parts = last_line.split(': ', 1)
-            if len(parts) == 2:
-                return parts[1].strip()
+    # Run the helper script with test content via stdin
+    result = subprocess.run(
+        [sys.executable, str(helper_script)],
+        input=test_content,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=str(repo_root)
+    )
     
-    # Old format: "Line X:Y: message"
-    if s.startswith('Line '):
-        lines = s.split('\n')
-        first_line = lines[0]
-        parts = first_line.split(':', 2)
-        if len(parts) >= 3:
-            return parts[2].strip()
+    # Parse results
+    py_output = vm_output = expect = None
+    py_error = vm_error = None
+    is_output_test = False
     
-    # Handle "Runtime error:" prefix
-    if 'Runtime error:' in s:
-        return s.split('Runtime error:', 1)[1].strip()
+    for line in result.stdout.strip().split('\n'):
+        if line.startswith('PY_OUTPUT:'):
+            py_output = line[10:]
+        elif line.startswith('PY_ERROR:'):
+            py_error = line[9:]
+        elif line.startswith('VM_OUTPUT:'):
+            vm_output = line[10:]
+        elif line.startswith('VM_ERROR:'):
+            vm_error = line[9:]
+        elif line.startswith('EXPECT:'):
+            expect = line[7:]
+        elif line.startswith('IS_OUTPUT:'):
+            is_output_test = line[10:] == 'True'
+        elif line.startswith('ERROR:'):
+            # Test script error
+            return {
+                'file': test_file,
+                'py_passed': False,
+                'vm_passed': False,
+                'py_error': line[6:],
+                'vm_error': line[6:],
+                'mismatch': False
+            }
     
-    return s
-
-def run_single_test(file, expect, case):
-    """Run a single test case on both runtimes"""
-    # Clear global state between tests
-    import parser
-    parser.vars.clear()
-    parser.current_func = '<module>'
-    parser.loop_depth = 0
-    
-    is_output_test = expect.startswith('!')
+    # Determine if tests passed
     if is_output_test:
-        expect = expect[1:].strip()
-        expect = expect.replace('\\n', '\n')
+        py_passed = (py_output == expect)
+        vm_passed = (vm_output == expect)
+        
+        return {
+            'file': test_file,
+            'py_passed': py_passed,
+            'vm_passed': vm_passed,
+            'py_output': py_output,
+            'vm_output': vm_output,
+            'py_error': f'Output "{py_output}" != expected "{expect}"' if not py_passed else None,
+            'vm_error': f'Output "{vm_output}" != expected "{expect}"' if not vm_passed else None,
+            'mismatch': py_passed and not vm_passed and py_output != vm_output
+        }
     else:
-        expect = expect.rstrip('.')
+        # Error test
+        def extract_msg(text):
+            if not text:
+                return ''
+            if ':' in text:
+                parts = text.split(':', 2)
+                if len(parts) >= 3:
+                    return parts[2].strip().rstrip('.')
+            return text.rstrip('.')
+        
+        py_msg = extract_msg(py_error) if py_error else ''
+        vm_msg = extract_msg(vm_error) if vm_error else ''
+        exp_msg = extract_msg(expect)
+        
+        py_passed = (py_msg == exp_msg)
+        vm_passed = (vm_msg == exp_msg)
+        
+        return {
+            'file': test_file,
+            'py_passed': py_passed,
+            'vm_passed': vm_passed,
+            'py_error': f'Error "{py_msg}" != expected "{exp_msg}"' if not py_passed else None,
+            'vm_error': f'Error "{vm_msg}" != expected "{exp_msg}"' if not vm_passed else None,
+            'mismatch': False
+        }
 
-    case = '\n' + case
+def main():
+    # Change to repository root
+    repo_root = Path(__file__).parent.parent
+    os.chdir(repo_root)
     
-    result = {
-        'file': file,
-        'expect': expect,
-        'is_output_test': is_output_test,
-        'py_passed': False,
-        'vm_passed': False,
-        'mismatch': False,
-        'py_error': None,
-        'vm_error': None,
-        'py_output': None,
-        'vm_output': None
-    }
-
-    try:
-        ast = parse(case)
-    except Exception as e:
-        # Parse error
-        e_str = str(e)
-        e_normalized = extract_message(e_str).rstrip('.')
-        expect_normalized = extract_message(expect).rstrip('.')
-
-        if e_normalized == expect_normalized:
-            result['py_passed'] = True
-            result['vm_passed'] = True
-        else:
-            result['py_error'] = f'Parse error "{e_normalized}" != expected "{expect_normalized}"'
-            result['vm_error'] = result['py_error']
-        return result
-
-    # AST parsed successfully
-    should_run = is_output_test or (expect.lower() != 'none')
+    # Load all test files
+    test_files = sorted(glob.glob('cases/*.fr'))
     
-    if not should_run:
-        if expect.lower() == 'none':
-            result['py_passed'] = True
-            result['vm_passed'] = True
-        return result
-
-    # Run on Python runtime
-    py_output, py_error = run_python_runtime(ast)
-    result['py_output'] = py_output
-    result['py_error'] = py_error
+    if not test_files:
+        print("Error: No test files found in cases/")
+        return 1
     
-    # Run on C VM runtime
-    vm_output, vm_error = run_c_runtime(ast)
-    result['vm_output'] = vm_output
-    result['vm_error'] = vm_error
-
-    # Check Python runtime result
-    if is_output_test:
-        result['py_passed'] = (py_output == expect)
-        if not result['py_passed']:
-            result['py_error'] = f'Output "{py_output}" != expected "{expect}"'
-    else:
-        if py_error:
-            py_msg = extract_message(py_error).rstrip('.')
-            exp_msg = extract_message(expect).rstrip('.')
-            result['py_passed'] = (py_msg == exp_msg)
-            if not result['py_passed']:
-                result['py_error'] = f'Error "{py_msg}" != expected "{exp_msg}"'
-        else:
-            result['py_error'] = f'No error but expected: {expect}'
-
-    # Check C VM runtime result
-    if is_output_test:
-        result['vm_passed'] = (vm_output == expect)
-        if not result['vm_passed']:
-            result['vm_error'] = f'Output "{vm_output}" != expected "{expect}"'
-    else:
-        if vm_error:
-            vm_msg = extract_message(vm_error).rstrip('.')
-            exp_msg = extract_message(expect).rstrip('.')
-            result['vm_passed'] = (vm_msg == exp_msg)
-            if not result['vm_passed']:
-                result['vm_error'] = f'Error "{vm_msg}" != expected "{exp_msg}"'
-        else:
-            result['vm_error'] = f'No error but expected: {expect}'
-
-    # Check for runtime mismatch
-    if is_output_test and py_output != vm_output and py_error is None and vm_error is None:
-        result['mismatch'] = True
-
-    return result
-
-passed = 0
-failed = 0
-python_passed = 0
-python_failed = 0
-vm_passed = 0
-vm_failed = 0
-mismatch_count = 0
-
-if __name__ == '__main__':
-    # Run tests sequentially to avoid any race conditions
-    print(f"Running {len(cases)} tests on both runtimes...")
+    print(f"Running {len(test_files)} tests in isolated subprocesses...")
+    print()
+    
     results = []
-
-    for file, (expect, case) in cases.items():
-        result = run_single_test(file, expect.removeprefix('//').strip(), case)
-        results.append(result)
-
+    for test_path in test_files:
+        test_file = os.path.basename(test_path)
+        with open(test_path, 'r') as f:
+            content = f.read()
+        
+        try:
+            result = run_test_isolated(test_file, content)
+            results.append(result)
+        except subprocess.TimeoutExpired:
+            results.append({
+                'file': test_file,
+                'py_passed': False,
+                'vm_passed': False,
+                'py_error': 'Test timeout',
+                'vm_error': 'Test timeout',
+                'mismatch': False
+            })
+        except Exception as e:
+            results.append({
+                'file': test_file,
+                'py_passed': False,
+                'vm_passed': False,
+                'py_error': f'Test runner error: {e}',
+                'vm_error': f'Test runner error: {e}',
+                'mismatch': False
+            })
+    
+    # Print failures
+    python_passed = 0
+    vm_passed = 0
+    mismatch_count = 0
+    
     for result in results:
         if result['py_passed']:
             python_passed += 1
         else:
-            python_failed += 1
-            print(f'❌ {result["file"]} [Python]: {result["py_error"]}')
+            if result['py_error']:
+                print(f"❌ {result['file']} [Python]: {result['py_error']}")
         
         if result['vm_passed']:
             vm_passed += 1
         else:
-            vm_failed += 1
-            print(f'❌ {result["file"]} [C VM]: {result["vm_error"]}')
+            if result['vm_error']:
+                print(f"❌ {result['file']} [C VM]: {result['vm_error']}")
         
-        if result['mismatch']:
+        if result.get('mismatch'):
             mismatch_count += 1
-            print(f'⚠️  {result["file"]}: Runtime mismatch! Python: "{result["py_output"]}" vs C VM: "{result["vm_output"]}"')
-
-    total_tests = python_passed + python_failed
-
-    print(f'\n{"="*60}')
-    print(f'Test Results:')
-    print(f'{"="*60}')
-    print(f'Python Runtime: {python_passed}/{total_tests} passed')
-    print(f'C VM Runtime:   {vm_passed}/{total_tests} passed')
+            print(f"⚠️  {result['file']}: Runtime mismatch! "
+                  f"Python: \"{result.get('py_output')}\" vs C VM: \"{result.get('vm_output')}\"")
+    
+    # Print summary
+    total = len(results)
+    print()
+    print("=" * 60)
+    print("Test Results:")
+    print("=" * 60)
+    print(f"Python Runtime: {python_passed}/{total} passed")
+    print(f"C VM Runtime:   {vm_passed}/{total} passed")
     if mismatch_count > 0:
-        print(f'⚠️  Runtime Mismatches: {mismatch_count}')
-    print(f'{"="*60}')
-
-    if python_failed == 0 and vm_failed == 0 and mismatch_count == 0:
-        print('✅ All tests passed on BOTH runtimes!')
-        exit(0)
+        print(f"⚠️  Runtime Mismatches: {mismatch_count}")
+    print("=" * 60)
+    
+    if python_passed == total and vm_passed == total:
+        print("✅ All tests passed on BOTH runtimes!")
+        return 0
     else:
-        if python_failed > 0:
-            print(f'❌ Python runtime has {python_failed} failure(s)')
-        if vm_failed > 0:
-            print(f'❌ C VM runtime has {vm_failed} failure(s)')
-        if mismatch_count > 0:
-            print(f'⚠️  {mismatch_count} test(s) have different outputs between runtimes')
-        exit(1)
+        if python_passed < total:
+            print(f"❌ Python runtime has {total - python_passed} failure(s)")
+        if vm_passed < total:
+            print(f"❌ C VM runtime has {total - vm_passed} failure(s)")
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
