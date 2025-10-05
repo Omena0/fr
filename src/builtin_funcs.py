@@ -42,6 +42,76 @@ def _file_close(fd: int):
     _os.close(fd)
     return None
 
+def _file_exists(path: str):
+    """Check if a file or directory exists"""
+    return _os.path.exists(path)
+
+def _file_isfile(path: str):
+    """Check if path is a file"""
+    return _os.path.isfile(path)
+
+def _file_isdir(path: str):
+    """Check if path is a directory"""
+    return _os.path.isdir(path)
+
+def _file_listdir(path: str = '.'):
+    """List directory contents"""
+    return _os.listdir(path)
+
+def _file_mkdir(path: str):
+    """Create a directory"""
+    _os.mkdir(path)
+    return None
+
+def _file_makedirs(path: str):
+    """Create a directory and all parent directories"""
+    _os.makedirs(path, exist_ok=True)
+    return None
+
+def _file_remove(path: str):
+    """Remove a file"""
+    _os.remove(path)
+    return None
+
+def _file_rmdir(path: str):
+    """Remove an empty directory"""
+    _os.rmdir(path)
+    return None
+
+def _file_rename(old_path: str, new_path: str):
+    """Rename or move a file or directory"""
+    _os.rename(old_path, new_path)
+    return None
+
+def _file_getsize(path: str):
+    """Get file size in bytes"""
+    return _os.path.getsize(path)
+
+def _file_getcwd():
+    """Get current working directory"""
+    return _os.getcwd()
+
+def _file_chdir(path: str):
+    """Change current working directory"""
+    _os.chdir(path)
+    return None
+
+def _file_abspath(path: str):
+    """Get absolute path"""
+    return _os.path.abspath(path)
+
+def _file_basename(path: str):
+    """Get basename of path"""
+    return _os.path.basename(path)
+
+def _file_dirname(path: str):
+    """Get directory name of path"""
+    return _os.path.dirname(path)
+
+def _file_join(*paths: str):
+    """Join path components"""
+    return _os.path.join(*paths)
+
 # Socket I/O helper functions
 _socket_map = {}  # Map integer IDs to socket objects
 _next_socket_id = 1
@@ -49,7 +119,7 @@ _next_socket_id = 1
 def _socket_create(family: str = 'inet', type_: str = 'stream'):
     """Create a socket and return its ID"""
     global _next_socket_id
-    
+
     # Parse family
     if family.lower() == 'inet':
         fam = _socket.AF_INET
@@ -59,7 +129,7 @@ def _socket_create(family: str = 'inet', type_: str = 'stream'):
         fam = _socket.AF_UNIX
     else:
         fam = _socket.AF_INET
-    
+
     # Parse type
     if type_.lower() == 'stream':
         typ = _socket.SOCK_STREAM
@@ -69,7 +139,7 @@ def _socket_create(family: str = 'inet', type_: str = 'stream'):
         typ = _socket.SOCK_RAW
     else:
         typ = _socket.SOCK_STREAM
-    
+
     sock = _socket.socket(fam, typ)
     sock_id = _next_socket_id
     _next_socket_id += 1
@@ -141,7 +211,7 @@ def _socket_setsockopt(sock_id: int, level: str, option: str, value: int):
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
-    
+
     # Parse level
     if level.upper() == 'SOL_SOCKET':
         lev = _socket.SOL_SOCKET
@@ -151,7 +221,7 @@ def _socket_setsockopt(sock_id: int, level: str, option: str, value: int):
         lev = _socket.IPPROTO_IP
     else:
         lev = _socket.SOL_SOCKET
-    
+
     # Parse option
     opt_map = {
         'SO_REUSEADDR': _socket.SO_REUSEADDR,
@@ -161,7 +231,7 @@ def _socket_setsockopt(sock_id: int, level: str, option: str, value: int):
         'SO_SNDBUF': _socket.SO_SNDBUF,
     }
     opt = opt_map.get(option.upper(), _socket.SO_REUSEADDR)
-    
+
     sock.setsockopt(lev, opt, int(value))
     return None
 
@@ -428,7 +498,7 @@ funcs:dict[ # Holy type annotations
         "return_type": "float",
         "can_eval": True
     },
-    
+
     # File I/O functions
     'fopen': {
         "type": "builtin",
@@ -469,7 +539,150 @@ funcs:dict[ # Holy type annotations
         "return_type": "none",
         "can_eval": False
     },
-    
+    'exists': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_exists,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'isfile': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_isfile,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'isdir': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_isdir,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'listdir': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_listdir,
+        "return_type": "list",
+        "can_eval": False
+    },
+    'mkdir': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_mkdir,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'makedirs': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_makedirs,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'remove': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_remove,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'rmdir': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_rmdir,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'rename': {
+        "type": "builtin",
+        "args": {
+            "old_path": "string",
+            "new_path": "string"
+        },
+        "func": _file_rename,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'getsize': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_getsize,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'getcwd': {
+        "type": "builtin",
+        "args": {},
+        "func": _file_getcwd,
+        "return_type": "string",
+        "can_eval": False
+    },
+    'chdir': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_chdir,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'abspath': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_abspath,
+        "return_type": "string",
+        "can_eval": False
+    },
+    'basename': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_basename,
+        "return_type": "string",
+        "can_eval": False
+    },
+    'dirname': {
+        "type": "builtin",
+        "args": {
+            "path": "string"
+        },
+        "func": _file_dirname,
+        "return_type": "string",
+        "can_eval": False
+    },
+    'pathjoin': {
+        "type": "builtin",
+        "args": {
+            "paths": "list"
+        },
+        "func": lambda paths: _file_join(*paths),
+        "return_type": "string",
+        "can_eval": False
+    },
+
     # Socket I/O functions
     'socket': {
         "type": "builtin",

@@ -5,9 +5,8 @@ Compiles typed functions to bytecode format specified in BYTECODE.md
 
 from typing import Any, Dict, List, Optional
 from optimizer import BytecodeOptimizer
+from parser import parse, AstType, VarType
 import sys
-
-AstType = list[dict[str, Any]]
 
 flags = sys.argv[1:]
 
@@ -15,8 +14,17 @@ class CompilerError(Exception):
     """Raised when compilation fails"""
     pass
 
+def escape_string_for_bytecode(s: str) -> str:
+    """Escape a string for safe embedding in bytecode CONST_STR instructions."""
+    return (s.replace('\\', '\\\\')
+             .replace('"', '\\"')
+             .replace('\n', '\\n')
+             .replace('\r', '\\r')
+             .replace('\t', '\\t')
+             .replace('\0', '\\0'))
+
 # Helper functions for AST node type checking
-def is_literal_value(node: Any) -> bool:
+def is_literal_value(node):
     """Check if node is a literal value dict"""
     return (isinstance(node, dict) and 'value' in node and 
             'mods' not in node and 'slice' not in node and 'attr' not in node)
@@ -149,7 +157,7 @@ class BytecodeCompiler:
                 self.emit(f"LOAD {var_id}")
             else:
                 # Treat as string literal
-                value_str = str(expr).replace('\\', '\\\\').replace('"', '\\"')
+                value_str = escape_string_for_bytecode(str(expr))
                 self.emit(f'CONST_STR "{value_str}"')
             return
 
@@ -173,7 +181,7 @@ class BytecodeCompiler:
             elif isinstance(value, float):
                 self.emit(f"CONST_F64 {value}")
             elif isinstance(value, str):
-                value_str = str(value).replace('\\', '\\\\').replace('"', '\\"')
+                value_str = escape_string_for_bytecode(str(value))
                 self.emit(f'CONST_STR "{value_str}"')
             elif isinstance(value, bool):
                 bool_val = 1 if value else 0
@@ -186,7 +194,7 @@ class BytecodeCompiler:
         # Variable reference with 'id' key
         if is_var_ref(expr):
             var_name = expr['id']
-            
+
             # Handle boolean literals 'true' and 'false' as keywords
             if var_name == 'true':
                 self.emit("CONST_BOOL 1")
@@ -194,7 +202,7 @@ class BytecodeCompiler:
             elif var_name == 'false':
                 self.emit("CONST_BOOL 0")
                 return
-            
+
             var_id = self.get_var_id(var_name)
             self.emit(f"LOAD {var_id}")
             return
@@ -208,7 +216,7 @@ class BytecodeCompiler:
                 if not parts:
                     self.emit('CONST_STR ""')
                     return
-                
+
                 # Compile first part
                 first_part = parts[0]
                 if is_formatted_value(first_part):
@@ -217,11 +225,11 @@ class BytecodeCompiler:
                     self.emit("BUILTIN_STR")
                 elif is_literal_value(first_part):
                     # Constant string part
-                    value_str = str(first_part['value']).replace('\\', '\\\\').replace('"', '\\"')
+                    value_str = escape_string_for_bytecode(str(first_part['value']))
                     self.emit(f'CONST_STR "{value_str}"')
                 else:
                     self.compile_expr(first_part, expr_type)
-                
+
                 # Compile and concatenate remaining parts
                 for part in parts[1:]:
                     if is_formatted_value(part):
@@ -230,7 +238,7 @@ class BytecodeCompiler:
                         self.emit("BUILTIN_STR")
                     elif is_literal_value(part):
                         # Constant string part
-                        value_str = str(part['value']).replace('\\', '\\\\').replace('"', '\\"')
+                        value_str = escape_string_for_bytecode(str(part['value']))
                         self.emit(f'CONST_STR "{value_str}"')
                     else:
                         self.compile_expr(part, expr_type)
@@ -242,7 +250,7 @@ class BytecodeCompiler:
             if 'attr' in expr and 'value' in expr:
                 # Compile the struct value (could be a variable, list element, etc.)
                 self.compile_expr(expr['value'], expr_type)
-                
+
                 # Determine field index
                 field_name = expr['attr']
                 # Find first struct that has this field
@@ -251,7 +259,7 @@ class BytecodeCompiler:
                     if field_name in struct_def['field_map']:
                         field_idx = struct_def['field_map'][field_name]
                         break
-                
+
                 if field_idx >= 0:
                     self.emit(f"STRUCT_GET {field_idx}")
                     return
@@ -283,16 +291,16 @@ class BytecodeCompiler:
                 left = expr['left']
                 ops = expr['ops']
                 comparators = expr['comparators']
-                
+
                 # For simplicity, handle single comparison for now
                 if len(ops) == 1 and len(comparators) == 1:
                     op = ops[0]
                     right = comparators[0]
-                    
+
                     # Compile operands
                     self.compile_expr(left, expr_type)
                     self.compile_expr(right, expr_type)
-                    
+
                     # Emit comparison
                     op_map = {
                         'Eq': 'CMP_EQ',
@@ -302,27 +310,33 @@ class BytecodeCompiler:
                         'LtE': 'CMP_LE',
                         'GtE': 'CMP_GE',
                     }
-                    
+
                     if op in op_map:
                         self.emit(op_map[op])
                     else:
                         raise CompilerError(f"Unknown comparison operator: {op}")
                     return
 
-            # Unary operation (USub for -, UAdd for +): {op, operand}
+            # Unary operation (USub for -, UAdd for +, Not for not, Invert for ~): {op, operand}
             if 'op' in expr and 'operand' in expr:
                 op = expr['op']
                 operand = expr['operand']
-                
+
                 # Compile operand
                 self.compile_expr(operand, expr_type)
-                
+
                 # Emit unary operation
                 if op == 'USub':
                     self.emit('NEG')
                 elif op == 'UAdd':
                     # UAdd is a no-op (unary plus), do nothing
                     pass
+                elif op == 'Not':
+                    self.emit('NOT')
+                elif op == 'Invert':
+                    # Bitwise NOT - can be implemented as XOR with -1
+                    self.emit('CONST_I64 -1')
+                    self.emit('XOR_I64')
                 else:
                     raise CompilerError(f"Unknown unary operator: {op}")
                 return
@@ -340,7 +354,7 @@ class BytecodeCompiler:
                 # Determine type suffix - check if either operand is a string
                 # For string concatenation, we need ADD_STR
                 is_string_op = False
-                
+
                 # Check if left is a string literal or string operation
                 if isinstance(left, dict):
                     if left.get('type') in ('string', 'str'):
@@ -351,7 +365,7 @@ class BytecodeCompiler:
                         is_string_op = True
                     elif is_function_call(left) and extract_func_name(left.get('func', '')) == 'str':
                         is_string_op = True
-                
+
                 # Check if right is a string literal or string operation
                 if isinstance(right, dict):
                     if right.get('type') in ('string', 'str'):
@@ -362,16 +376,16 @@ class BytecodeCompiler:
                         is_string_op = True
                     elif is_function_call(right) and extract_func_name(right.get('func', '')) == 'str':
                         is_string_op = True
-                
-                if is_string_op or expr_type in ('str', 'string'):
-                    type_suffix = '_STR'
-                elif expr_type in ('i64', 'int'):
-                    type_suffix = '_I64'
-                elif expr_type in ('f64', 'float'):
-                    type_suffix = '_F64'
-                else:
-                    type_suffix = '_I64'  # Default to integer
 
+                if is_string_op or expr_type in {'str', 'string'}:
+                    type_suffix = '_STR'
+                elif expr_type in {'i64', 'int'} or expr_type not in (
+                    'f64',
+                    'float',
+                ):
+                    type_suffix = '_I64'
+                else:
+                    type_suffix = '_F64'
                 op_map = {
                     'Add': f'ADD{type_suffix}',
                     '+': f'ADD{type_suffix}',  # Support literal '+' operator
@@ -453,6 +467,22 @@ class BytecodeCompiler:
                     'fread': 'FILE_READ',
                     'fwrite': 'FILE_WRITE',
                     'fclose': 'FILE_CLOSE',
+                    'exists': 'FILE_EXISTS',
+                    'isfile': 'FILE_ISFILE',
+                    'isdir': 'FILE_ISDIR',
+                    'listdir': 'FILE_LISTDIR',
+                    'mkdir': 'FILE_MKDIR',
+                    'makedirs': 'FILE_MAKEDIRS',
+                    'remove': 'FILE_REMOVE',
+                    'rmdir': 'FILE_RMDIR',
+                    'rename': 'FILE_RENAME',
+                    'getsize': 'FILE_GETSIZE',
+                    'getcwd': 'FILE_GETCWD',
+                    'chdir': 'FILE_CHDIR',
+                    'abspath': 'FILE_ABSPATH',
+                    'basename': 'FILE_BASENAME',
+                    'dirname': 'FILE_DIRNAME',
+                    'pathjoin': 'FILE_JOIN',
                     # Socket I/O
                     'socket': 'SOCKET_CREATE',
                     'connect': 'SOCKET_CONNECT',
@@ -662,7 +692,7 @@ class BytecodeCompiler:
                     if isinstance(case_value_node, dict):
                         if case_value_node.get('type') == 'string':
                             # String comparison
-                            value_str = case_value_node.get('value', '').replace('"', '\\"')
+                            value_str = escape_string_for_bytecode(case_value_node.get('value', ''))
                             self.emit(f'CONST_STR "{value_str}"')
                             self.emit("STR_EQ")
                         else:

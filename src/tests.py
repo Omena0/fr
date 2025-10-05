@@ -78,6 +78,9 @@ def run_c_runtime(ast):
 cases = {}
 
 for file in os.listdir('cases'):
+    # Only process .c files, skip .example files
+    if not file.endswith('.c') or file.endswith('.c.example'):
+        continue
     content = open(f'cases/{file}').read()
     cases[file] = content.split('\n',1)
 
@@ -87,15 +90,30 @@ def extract_message(s):
         parts = s.removeprefix('?').split(':', 1)
         if len(parts) == 2:
             return parts[1]
+    
+    # Handle new multi-line format: last line has "Location: message"
+    if 'Syntax Error' in s and '\n' in s:
+        lines = s.strip().split('\n')
+        # Last line should be "    Location: message"
+        last_line = lines[-1].strip()
+        if ': ' in last_line:
+            # Extract message after the location prefix
+            parts = last_line.split(': ', 1)
+            if len(parts) == 2:
+                return parts[1].strip()
+    
+    # Old format: "Line X:Y: message"
     if s.startswith('Line '):
         lines = s.split('\n')
         first_line = lines[0]
         parts = first_line.split(':', 2)
         if len(parts) >= 3:
             return parts[2].strip()
+    
     # Handle "Runtime error:" prefix
     if 'Runtime error:' in s:
         return s.split('Runtime error:', 1)[1].strip()
+    
     return s
 
 def run_single_test(file, expect, case):

@@ -1,4 +1,4 @@
-// Test file append mode
+// !File content:\nLine 1 Line 2 Line 3
 
 void main() {
     fd = fopen("/tmp/append_test.txt", "w")

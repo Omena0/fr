@@ -80,9 +80,12 @@ def parse_cmd(args):
     
     with open(source_file) as f:
         source = f.read()
-    
-    stream = InputStream(source.strip())
-    ast = parse(stream, file=source_file)
+
+    try:
+        ast = parse(source, file=source_file)
+    except SyntaxError as e:
+        print(f'Exception: {e}')
+        sys.exit(1)
     
     if output_json:
         output_file = 'out.json'
@@ -120,7 +123,11 @@ def compile_cmd(args=None):
         with open(input_file) as f:
             source = f.read()
         stream = InputStream(source.strip())
-        ast = parse(stream, file=input_file)
+        try:
+            ast = parse(stream, file=input_file)
+        except SyntaxError as e:
+            print(f'Exception: {e}')
+            sys.exit(1)
     else:
         # Load AST
         file_type = detect_file_type(input_file)
@@ -275,7 +282,11 @@ def main():
                 source = f.read()
             
             # Parse with optimization flag (checks sys.argv internally)
-            ast = parse(source, file=cmd)
+            try:
+                ast = parse(source, file=cmd)
+            except SyntaxError as e:
+                print(f'Exception: {e}')
+                sys.exit(1)
             
             # Determine which backend to use
             if force_py_backend:
