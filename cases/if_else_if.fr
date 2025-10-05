@@ -4,11 +4,9 @@ void main() {
     int x = 50
     if (x < 30) {
         println("small")
+    } elif (x < 70) {
+        println("medium")
     } else {
-        if (x < 70) {
-            println("medium")
-        } else {
-            println("large")
-        }
+        println("large")
     }
 }

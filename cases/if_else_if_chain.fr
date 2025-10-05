@@ -4,15 +4,11 @@ void main() {
     int x = 100
     if (x < 30) {
         println("first")
+    } elif (x < 70) {
+        println("second")
+    } elif (x < 120) {
+        println("third")
     } else {
-        if (x < 70) {
-            println("second")
-        } else {
-            if (x < 120) {
-                println("third")
-            } else {
-                println("fourth")
-            }
-        }
+        println("fourth")
     }
 }

@@ -128,9 +128,8 @@ class BytecodeCompiler:
             self.emit("LIST_NEW")
             # Append each element
             for elem in expr:
-                self.emit("DUP")  # Duplicate list reference
                 self.compile_expr(elem, expr_type)  # Push element
-                self.emit("LIST_APPEND")  # Append and push back list
+                self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
             return
 
         # Literal boolean (must be before int since bool is subclass of int in Python)
@@ -171,9 +170,8 @@ class BytecodeCompiler:
                 self.emit("LIST_NEW")
                 # Append each element
                 for elem in value:
-                    self.emit("DUP")  # Duplicate list reference
                     self.compile_expr(elem, expr_type)  # Push element
-                    self.emit("LIST_APPEND")  # Append and push back list
+                    self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
                 return
 
             if isinstance(value, int):
@@ -209,6 +207,24 @@ class BytecodeCompiler:
 
         # Complex expression
         if isinstance(expr, dict):
+            # Boolean operations (And, Or): {'op': 'And'/'Or', 'values': [...]}
+            # Must check before f-string since both have 'values' key
+            if 'op' in expr and expr['op'] in ('And', 'Or') and 'values' in expr:
+                op = expr['op']
+                values = expr['values']
+                
+                # Compile first value
+                self.compile_expr(values[0], expr_type)
+                
+                # For each subsequent value, compile and apply the operation
+                for value in values[1:]:
+                    self.compile_expr(value, expr_type)
+                    if op == 'And':
+                        self.emit("AND")
+                    elif op == 'Or':
+                        self.emit("OR")
+                return
+            
             # F-string (JoinedStr): {'values': [...]}
             if is_fstring(expr):
                 # Compile each part and concatenate
