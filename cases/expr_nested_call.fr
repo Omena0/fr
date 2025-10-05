@@ -1,0 +1,6 @@
+// !6
+
+void main() {
+    int result = len("hello") + 1
+    println(str(result))
+}

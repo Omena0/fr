@@ -1,0 +1,6 @@
+// !2
+
+void main() {
+    int result = 10 % 4
+    println(str(result))
+}

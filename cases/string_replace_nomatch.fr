@@ -1,0 +1,7 @@
+// !hello
+
+void main() {
+    str result = "hello"
+    result = replace(result, "x", "y")
+    println(result)
+}

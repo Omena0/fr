@@ -277,7 +277,7 @@ funcs:dict[ # Holy type annotations
         "args": {
             "value": "any"
         },
-        "func": str,
+        "func": lambda value: 'true' if value is True else ('false' if value is False else str(value)),
         "return_type": "string",
         "can_eval": True
     },

@@ -1,0 +1,7 @@
+// !5
+
+void main() {
+    list lst = [1, 2, 3, 4, 5]
+    int value = lst[-1]
+    println(str(value))
+}

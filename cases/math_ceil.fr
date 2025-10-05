@@ -1,0 +1,6 @@
+// !4
+
+void main() {
+    int result = ceil(3.1)
+    println(str(result))
+}
