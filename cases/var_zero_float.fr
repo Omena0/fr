@@ -1,0 +1,6 @@
+// !0.0
+
+void main() {
+    float x = 0.0
+    println(str(x))
+}

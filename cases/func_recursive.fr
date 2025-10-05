@@ -1,0 +1,14 @@
+// !120
+
+int factorial(n) {
+    if (n <= 1) {
+        return 1
+    } else {
+        return n * factorial(n - 1)
+    }
+}
+
+void main() {
+    int result = factorial(5)
+    println(str(result))
+}

@@ -1,0 +1,6 @@
+// !15
+
+void main() {
+    int result = 5 + 10
+    println(str(result))
+}

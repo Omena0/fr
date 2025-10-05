@@ -1,0 +1,6 @@
+// !25
+
+void main() {
+    int result = (2 + 3) * 5
+    println(str(result))
+}

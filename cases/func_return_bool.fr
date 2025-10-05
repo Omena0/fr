@@ -1,0 +1,10 @@
+// !true
+
+bool check() {
+    return 5 > 3
+}
+
+void main() {
+    bool result = check()
+    println(str(result))
+}

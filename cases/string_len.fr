@@ -1,0 +1,6 @@
+// !5
+
+void main() {
+    str s = "hello"
+    println(str(len(s)))
+}

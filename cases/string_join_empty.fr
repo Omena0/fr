@@ -1,0 +1,6 @@
+// !
+
+void main() {
+    str result = join("-", [])
+    println(result)
+}

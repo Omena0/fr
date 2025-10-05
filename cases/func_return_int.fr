@@ -1,0 +1,10 @@
+// !15
+
+int triple(x) {
+    return x * 3
+}
+
+void main() {
+    int result = triple(5)
+    println(str(result))
+}

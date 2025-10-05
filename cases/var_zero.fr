@@ -1,0 +1,6 @@
+// !0
+
+void main() {
+    int x = 0
+    println(str(x))
+}

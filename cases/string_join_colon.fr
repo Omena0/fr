@@ -1,0 +1,6 @@
+// !a:b:c
+
+void main() {
+    str result = join(":", ["a", "b", "c"])
+    println(result)
+}

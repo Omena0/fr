@@ -1,0 +1,7 @@
+// !42
+
+void main() {
+    str s = "42"
+    int value = int(s)
+    println(str(value))
+}
