@@ -1,0 +1,6 @@
+// !0
+
+void main() {
+    list lst = []
+    println(str(len(lst)))
+}

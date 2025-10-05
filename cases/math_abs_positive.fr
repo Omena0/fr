@@ -1,0 +1,6 @@
+// !15
+
+void main() {
+    int result = abs(15)
+    println(str(result))
+}

@@ -1,0 +1,6 @@
+// !3.5
+
+void main() {
+    float result = 1.5 + 2.0
+    println(str(result))
+}

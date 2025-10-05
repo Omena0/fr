@@ -1,0 +1,5 @@
+// !3.14
+
+void main() {
+    println(str(round(PI() * 100) / 100))
+}

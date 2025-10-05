@@ -1,0 +1,7 @@
+// !hello world
+
+void main() {
+    str result = "   hello world   "
+    result = strip(result)
+    println(result)
+}

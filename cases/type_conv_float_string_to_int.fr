@@ -1,0 +1,7 @@
+// !3
+
+void main() {
+    str x = "3.99"
+    int result = int(x)
+    println(str(result))
+}

@@ -1,0 +1,7 @@
+// ![]
+
+void main() {
+    list lst = [1]
+    int value = pop(lst)
+    println(str(lst))
+}

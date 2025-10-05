@@ -1,0 +1,6 @@
+// !8.0
+
+void main() {
+    float result = pow(2.0, 3.0)
+    println(str(result))
+}

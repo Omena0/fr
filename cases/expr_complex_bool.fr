@@ -1,0 +1,6 @@
+// !true
+
+void main() {
+    bool result = (5 > 3) && (10 < 20)
+    println(str(result))
+}

@@ -1,0 +1,6 @@
+// !5.0
+
+void main() {
+    float result = 10 / 2
+    println(str(result))
+}

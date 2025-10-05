@@ -6,6 +6,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 500
+#define _USE_MATH_DEFINES  // For M_PI on some platforms
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+
+// Ensure M_PI is defined
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include <ctype.h>
 #include <gmp.h>
 #include <sys/types.h>
@@ -160,6 +167,9 @@ typedef enum
     OP_BUILTIN_LEN,
     OP_BUILTIN_SQRT,
     OP_BUILTIN_ROUND,
+    OP_BUILTIN_FLOOR,
+    OP_BUILTIN_CEIL,
+    OP_BUILTIN_PI,
     OP_POP,
     OP_DUP,
     OP_LABEL,
@@ -463,6 +473,12 @@ void list_append(List *list, Value value)
 
 Value list_get(List *list, int index)
 {
+    // Handle negative indices (Python-style)
+    if (index < 0)
+    {
+        index = list->length + index;
+    }
+    
     if (index < 0 || index >= list->length)
     {
         fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
@@ -473,6 +489,12 @@ Value list_get(List *list, int index)
 
 void list_set(List *list, int index, Value value)
 {
+    // Handle negative indices (Python-style)
+    if (index < 0)
+    {
+        index = list->length + index;
+    }
+    
     if (index < 0 || index >= list->length)
     {
         fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
@@ -1419,6 +1441,12 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_BUILTIN_SQRT;
             else if (strcmp(token, "BUILTIN_ROUND") == 0)
                 inst.op = OP_BUILTIN_ROUND;
+            else if (strcmp(token, "BUILTIN_FLOOR") == 0)
+                inst.op = OP_BUILTIN_FLOOR;
+            else if (strcmp(token, "BUILTIN_CEIL") == 0)
+                inst.op = OP_BUILTIN_CEIL;
+            else if (strcmp(token, "BUILTIN_PI") == 0)
+                inst.op = OP_BUILTIN_PI;
             else if (strcmp(token, "LIST_NEW") == 0)
                 inst.op = OP_LIST_NEW;
             else if (strcmp(token, "LIST_APPEND") == 0)
@@ -1878,6 +1906,9 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_BUILTIN_LEN] = &&L_BUILTIN_LEN,
         [OP_BUILTIN_SQRT] = &&L_BUILTIN_SQRT,
         [OP_BUILTIN_ROUND] = &&L_BUILTIN_ROUND,
+        [OP_BUILTIN_FLOOR] = &&L_BUILTIN_FLOOR,
+        [OP_BUILTIN_CEIL] = &&L_BUILTIN_CEIL,
+        [OP_BUILTIN_PI] = &&L_BUILTIN_PI,
         [OP_POP] = &&L_POP,
         [OP_DUP] = &&L_DUP,
         [OP_LABEL] = &&L_LABEL,
@@ -2077,11 +2108,11 @@ L_DIV_F64: // OP_DIV_F64
 {
     Value b = vm_pop(vm);
     Value a = vm_pop(vm);
-    // Fast path for int64 / int64
+    // For DIV_F64, always return float result
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
-        int64_t result = a.as.int64 / b.as.int64;
-        vm_push(vm, value_make_int_si(result));
+        double result = (double)a.as.int64 / (double)b.as.int64;
+        vm_push(vm, value_make_f64(result));
     }
     else
     {
@@ -2385,6 +2416,38 @@ L_BUILTIN_ROUND: // OP_BUILTIN_ROUND
         DISPATCH();
     }
 }
+L_BUILTIN_FLOOR: // OP_BUILTIN_FLOOR
+{
+    {
+        Value v = vm_pop(vm);
+        if (v.type == VAL_F64)
+        {
+            vm_push(vm, value_make_int_si((long)floor(v.as.f64)));
+        }
+        value_free(v);
+        DISPATCH();
+    }
+}
+L_BUILTIN_CEIL: // OP_BUILTIN_CEIL
+{
+    {
+        Value v = vm_pop(vm);
+        if (v.type == VAL_F64)
+        {
+            vm_push(vm, value_make_int_si((long)ceil(v.as.f64)));
+        }
+        value_free(v);
+        DISPATCH();
+    }
+}
+L_BUILTIN_PI: // OP_BUILTIN_PI
+{
+    {
+        // Push the value of PI (3.141592653589793)
+        vm_push(vm, value_make_f64(M_PI));
+        DISPATCH();
+    }
+}
 L_POP: // OP_POP
 {
     {
@@ -2477,6 +2540,11 @@ L_ADD_CONST_I64: // OP_ADD_CONST_I64
             }
             vm_push(vm, a);
         }
+        else if (a.type == VAL_F64)
+        {
+            a.as.f64 += (double)const_val;
+            vm_push(vm, a);
+        }
         else
         {
             value_free(a);
@@ -2507,6 +2575,11 @@ L_SUB_CONST_I64: // OP_SUB_CONST_I64
             }
             vm_push(vm, a);
         }
+        else if (a.type == VAL_F64)
+        {
+            a.as.f64 -= (double)const_val;
+            vm_push(vm, a);
+        }
         else
         {
             value_free(a);
@@ -2530,6 +2603,11 @@ L_MUL_CONST_I64: // OP_MUL_CONST_I64
             mpz_mul_si(*a.as.bigint, *a.as.bigint, const_val);
             vm_push(vm, a);
         }
+        else if (a.type == VAL_F64)
+        {
+            a.as.f64 *= (double)const_val;
+            vm_push(vm, a);
+        }
         else
         {
             value_free(a);
@@ -2550,14 +2628,22 @@ L_DIV_CONST_I64: // OP_DIV_CONST_I64
         }
         if (likely(a.type == VAL_INT))
         {
-            a.as.int64 /= const_val;
-            vm_push(vm, a);
+            // Python-style true division: always return float
+            double result = (double)a.as.int64 / (double)const_val;
+            value_free(a);
+            vm_push(vm, value_make_f64(result));
         }
         else if (a.type == VAL_BIGINT)
         {
-            mpz_tdiv_q_ui(*a.as.bigint, *a.as.bigint, llabs(const_val));
-            if (const_val < 0)
-                mpz_neg(*a.as.bigint, *a.as.bigint);
+            // Convert bigint to double for true division
+            double a_val = mpz_get_d(*a.as.bigint);
+            double result = a_val / (double)const_val;
+            value_free(a);
+            vm_push(vm, value_make_f64(result));
+        }
+        else if (a.type == VAL_F64)
+        {
+            a.as.f64 /= (double)const_val;
             vm_push(vm, a);
         }
         else

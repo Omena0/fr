@@ -319,6 +319,10 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     # Binary expression (left op right)
     if 'left' in node:
         return eval_expr(node)
+    
+    # Boolean operations (And, Or) with multiple values
+    if 'op' in node and 'values' in node and node['op'] in ('And', 'Or'):
+        return eval_expr(node)
 
     # Field access: obj.field
     if 'attr' in node and 'value' in node:
@@ -365,9 +369,9 @@ def eval_expr_calc(left, op, right):
     elif op == 'LtE':
         return left <= right
     elif op == 'Or':
-        return left or right
+        return bool(left or right)
     elif op == 'And':
-        return left and right
+        return bool(left and right)
     elif op == 'Not':
         return not left
     elif op == 'BitXor':
@@ -420,7 +424,7 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
         if 'operand' in expr:
             return _handle_unary_op(expr)
         else:
-            left = expr['values'][0]
+            left = eval_expr_node(expr['values'][0])
             comps = expr['values'][1:]
     # Handle comparison chains
     elif 'ops' in expr:
@@ -490,17 +494,23 @@ def _execute_node_struct_def(node: dict):
 def _execute_node_var(node: dict):
     """Handle variable declaration node"""
     from parser import cast_value
+    import copy
     
     value = cast_value(node['value'], node['value_type'])
     
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
-        if 'values' in value and 'value' not in value:
+        # Check if it's a runtime expression (has slice, attr, or other runtime features)
+        if 'slice' in value or 'attr' in value or ('values' in value and 'value' not in value):
             value = eval_expr_node(value)
         elif 'value' not in value:
             value = eval_expr_node(value)
         else:
             value = value['value']
+    
+    # Make a deep copy of mutable objects to avoid mutating the AST
+    if isinstance(value, (list, dict, set)):
+        value = copy.deepcopy(value)
 
     vars[node['name']] = {
         "type": node['value_type'],

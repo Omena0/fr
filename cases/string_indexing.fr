@@ -1,0 +1,7 @@
+// !h
+
+void main() {
+    str s = "hello"
+    str first = s[0]
+    println(first)
+}

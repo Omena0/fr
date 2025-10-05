@@ -1,0 +1,9 @@
+// !true
+
+void main() {
+    if (0 || 1) {
+        println("true")
+    } else {
+        println("false")
+    }
+}

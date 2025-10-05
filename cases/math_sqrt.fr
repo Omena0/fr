@@ -1,0 +1,6 @@
+// !3.0
+
+void main() {
+    float result = sqrt(9.0)
+    println(str(result))
+}
