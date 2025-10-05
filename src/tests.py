@@ -225,50 +225,51 @@ vm_passed = 0
 vm_failed = 0
 mismatch_count = 0
 
-# Run tests sequentially to avoid any race conditions
-print(f"Running {len(cases)} tests on both runtimes...")
-results = []
+if __name__ == '__main__':
+    # Run tests sequentially to avoid any race conditions
+    print(f"Running {len(cases)} tests on both runtimes...")
+    results = []
 
-for file, (expect, case) in cases.items():
-    result = run_single_test(file, expect.removeprefix('//').strip(), case)
-    results.append(result)
+    for file, (expect, case) in cases.items():
+        result = run_single_test(file, expect.removeprefix('//').strip(), case)
+        results.append(result)
 
-for result in results:
-    if result['py_passed']:
-        python_passed += 1
-    else:
-        python_failed += 1
-        print(f'❌ {result["file"]} [Python]: {result["py_error"]}')
-    
-    if result['vm_passed']:
-        vm_passed += 1
-    else:
-        vm_failed += 1
-        print(f'❌ {result["file"]} [C VM]: {result["vm_error"]}')
-    
-    if result['mismatch']:
-        mismatch_count += 1
-        print(f'⚠️  {result["file"]}: Runtime mismatch! Python: "{result["py_output"]}" vs C VM: "{result["vm_output"]}"')
+    for result in results:
+        if result['py_passed']:
+            python_passed += 1
+        else:
+            python_failed += 1
+            print(f'❌ {result["file"]} [Python]: {result["py_error"]}')
+        
+        if result['vm_passed']:
+            vm_passed += 1
+        else:
+            vm_failed += 1
+            print(f'❌ {result["file"]} [C VM]: {result["vm_error"]}')
+        
+        if result['mismatch']:
+            mismatch_count += 1
+            print(f'⚠️  {result["file"]}: Runtime mismatch! Python: "{result["py_output"]}" vs C VM: "{result["vm_output"]}"')
 
-total_tests = python_passed + python_failed
+    total_tests = python_passed + python_failed
 
-print(f'\n{"="*60}')
-print(f'Test Results:')
-print(f'{"="*60}')
-print(f'Python Runtime: {python_passed}/{total_tests} passed')
-print(f'C VM Runtime:   {vm_passed}/{total_tests} passed')
-if mismatch_count > 0:
-    print(f'⚠️  Runtime Mismatches: {mismatch_count}')
-print(f'{"="*60}')
-
-if python_failed == 0 and vm_failed == 0 and mismatch_count == 0:
-    print('✅ All tests passed on BOTH runtimes!')
-    exit(0)
-else:
-    if python_failed > 0:
-        print(f'❌ Python runtime has {python_failed} failure(s)')
-    if vm_failed > 0:
-        print(f'❌ C VM runtime has {vm_failed} failure(s)')
+    print(f'\n{"="*60}')
+    print(f'Test Results:')
+    print(f'{"="*60}')
+    print(f'Python Runtime: {python_passed}/{total_tests} passed')
+    print(f'C VM Runtime:   {vm_passed}/{total_tests} passed')
     if mismatch_count > 0:
-        print(f'⚠️  {mismatch_count} test(s) have different outputs between runtimes')
-    exit(1)
+        print(f'⚠️  Runtime Mismatches: {mismatch_count}')
+    print(f'{"="*60}')
+
+    if python_failed == 0 and vm_failed == 0 and mismatch_count == 0:
+        print('✅ All tests passed on BOTH runtimes!')
+        exit(0)
+    else:
+        if python_failed > 0:
+            print(f'❌ Python runtime has {python_failed} failure(s)')
+        if vm_failed > 0:
+            print(f'❌ C VM runtime has {vm_failed} failure(s)')
+        if mismatch_count > 0:
+            print(f'⚠️  {mismatch_count} test(s) have different outputs between runtimes')
+        exit(1)
