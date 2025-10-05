@@ -8,11 +8,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
 #include <ctype.h>
 #include <gmp.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <netdb.h>
 // Branch prediction hints
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -207,6 +215,23 @@ typedef enum
     OP_STRUCT_NEW,    // Create new struct instance (struct_id -> struct)
     OP_STRUCT_GET,    // Get field from struct (struct, field_idx -> value)
     OP_STRUCT_SET,    // Set field in struct (struct, field_idx, value -> struct)
+    
+    // File I/O operations
+    OP_FILE_OPEN,     // Open file (path, mode -> fd)
+    OP_FILE_READ,     // Read from file (fd, size -> string)
+    OP_FILE_WRITE,    // Write to file (fd, data -> bytes_written)
+    OP_FILE_CLOSE,    // Close file (fd -> void)
+    
+    // Socket I/O operations
+    OP_SOCKET_CREATE,     // Create socket (family, type -> sock_id)
+    OP_SOCKET_CONNECT,    // Connect socket (sock_id, host, port -> void)
+    OP_SOCKET_BIND,       // Bind socket (sock_id, host, port -> void)
+    OP_SOCKET_LISTEN,     // Listen on socket (sock_id, backlog -> void)
+    OP_SOCKET_ACCEPT,     // Accept connection (sock_id -> client_sock_id)
+    OP_SOCKET_SEND,       // Send data (sock_id, data -> bytes_sent)
+    OP_SOCKET_RECV,       // Receive data (sock_id, size -> string)
+    OP_SOCKET_CLOSE,      // Close socket (sock_id -> void)
+    OP_SOCKET_SETSOCKOPT, // Set socket option (sock_id, level, option, value -> void)
 } OpCode;
 
 // Instruction structure
@@ -1401,6 +1426,34 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_NEG;
             else if (strcmp(token, "ASSERT") == 0)
                 inst.op = OP_ASSERT;
+            // File I/O operations
+            else if (strcmp(token, "FILE_OPEN") == 0)
+                inst.op = OP_FILE_OPEN;
+            else if (strcmp(token, "FILE_READ") == 0)
+                inst.op = OP_FILE_READ;
+            else if (strcmp(token, "FILE_WRITE") == 0)
+                inst.op = OP_FILE_WRITE;
+            else if (strcmp(token, "FILE_CLOSE") == 0)
+                inst.op = OP_FILE_CLOSE;
+            // Socket I/O operations
+            else if (strcmp(token, "SOCKET_CREATE") == 0)
+                inst.op = OP_SOCKET_CREATE;
+            else if (strcmp(token, "SOCKET_CONNECT") == 0)
+                inst.op = OP_SOCKET_CONNECT;
+            else if (strcmp(token, "SOCKET_BIND") == 0)
+                inst.op = OP_SOCKET_BIND;
+            else if (strcmp(token, "SOCKET_LISTEN") == 0)
+                inst.op = OP_SOCKET_LISTEN;
+            else if (strcmp(token, "SOCKET_ACCEPT") == 0)
+                inst.op = OP_SOCKET_ACCEPT;
+            else if (strcmp(token, "SOCKET_SEND") == 0)
+                inst.op = OP_SOCKET_SEND;
+            else if (strcmp(token, "SOCKET_RECV") == 0)
+                inst.op = OP_SOCKET_RECV;
+            else if (strcmp(token, "SOCKET_CLOSE") == 0)
+                inst.op = OP_SOCKET_CLOSE;
+            else if (strcmp(token, "SOCKET_SETSOCKOPT") == 0)
+                inst.op = OP_SOCKET_SETSOCKOPT;
             else if (strcmp(token, "STR_JOIN") == 0)
                 inst.op = OP_STR_JOIN;
             else if (strcmp(token, "STR_REPLACE") == 0)
@@ -1801,6 +1854,19 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_STR_SPLIT] = &&L_STR_SPLIT,
         [OP_STR_JOIN] = &&L_STR_JOIN,
         [OP_STR_REPLACE] = &&L_STR_REPLACE,
+        [OP_FILE_OPEN] = &&L_FILE_OPEN,
+        [OP_FILE_READ] = &&L_FILE_READ,
+        [OP_FILE_WRITE] = &&L_FILE_WRITE,
+        [OP_FILE_CLOSE] = &&L_FILE_CLOSE,
+        [OP_SOCKET_CREATE] = &&L_SOCKET_CREATE,
+        [OP_SOCKET_CONNECT] = &&L_SOCKET_CONNECT,
+        [OP_SOCKET_BIND] = &&L_SOCKET_BIND,
+        [OP_SOCKET_LISTEN] = &&L_SOCKET_LISTEN,
+        [OP_SOCKET_ACCEPT] = &&L_SOCKET_ACCEPT,
+        [OP_SOCKET_SEND] = &&L_SOCKET_SEND,
+        [OP_SOCKET_RECV] = &&L_SOCKET_RECV,
+        [OP_SOCKET_CLOSE] = &&L_SOCKET_CLOSE,
+        [OP_SOCKET_SETSOCKOPT] = &&L_SOCKET_SETSOCKOPT,
     };
 #define DISPATCH() goto *dispatch_table[vm->code[vm->pc++].op]
     DISPATCH();
@@ -3202,6 +3268,389 @@ L_STR_REPLACE: // OP_STR_REPLACE - Replace substring (str, old, new -> str)
     value_free(old_str);
     value_free(new_str);
     vm_push(vm, value_make_str(result));
+    DISPATCH();
+}
+
+L_FILE_OPEN: // OP_FILE_OPEN - Open file (path, mode -> fd)
+{
+    Value mode_val = vm_pop(vm);
+    Value path_val = vm_pop(vm);
+    
+    if (path_val.type != VAL_STR || mode_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: fopen() expects (string, string)\n");
+        value_free(path_val);
+        value_free(mode_val);
+        exit(1);
+    }
+    
+    const char *path = path_val.as.str;
+    const char *mode = mode_val.as.str;
+    
+    int flags = O_RDONLY;
+    if (strcmp(mode, "w") == 0)
+        flags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (strcmp(mode, "a") == 0)
+        flags = O_WRONLY | O_CREAT | O_APPEND;
+    else if (strcmp(mode, "r+") == 0)
+        flags = O_RDWR;
+    else if (strcmp(mode, "w+") == 0)
+        flags = O_RDWR | O_CREAT | O_TRUNC;
+    
+    int fd = open(path, flags, 0666);
+    
+    value_free(path_val);
+    value_free(mode_val);
+    vm_push(vm, value_make_int_si(fd));
+    DISPATCH();
+}
+
+L_FILE_READ: // OP_FILE_READ - Read from file (fd, size -> string)
+{
+    Value size_val = vm_pop(vm);
+    Value fd_val = vm_pop(vm);
+    
+    if (fd_val.type != VAL_INT || size_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: fread() expects (int, int)\n");
+        value_free(fd_val);
+        value_free(size_val);
+        exit(1);
+    }
+    
+    int fd = (int)fd_val.as.int64;
+    int size = (int)size_val.as.int64;
+    
+    char *buffer;
+    int total_read = 0;
+    
+    if (size < 0)
+    {
+        // Read all
+        int capacity = 4096;
+        buffer = malloc(capacity);
+        int n;
+        while ((n = read(fd, buffer + total_read, 4096)) > 0)
+        {
+            total_read += n;
+            if (total_read + 4096 > capacity)
+            {
+                capacity *= 2;
+                buffer = realloc(buffer, capacity);
+            }
+        }
+        buffer[total_read] = '\0';
+    }
+    else
+    {
+        buffer = malloc(size + 1);
+        total_read = read(fd, buffer, size);
+        if (total_read < 0) total_read = 0;
+        buffer[total_read] = '\0';
+    }
+    
+    value_free(fd_val);
+    value_free(size_val);
+    vm_push(vm, value_make_str(buffer));
+    DISPATCH();
+}
+
+L_FILE_WRITE: // OP_FILE_WRITE - Write to file (fd, data -> bytes_written)
+{
+    Value data_val = vm_pop(vm);
+    Value fd_val = vm_pop(vm);
+    
+    if (fd_val.type != VAL_INT || data_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: fwrite() expects (int, string)\n");
+        value_free(fd_val);
+        value_free(data_val);
+        exit(1);
+    }
+    
+    int fd = (int)fd_val.as.int64;
+    const char *data = data_val.as.str;
+    int bytes_written = write(fd, data, strlen(data));
+    
+    value_free(fd_val);
+    value_free(data_val);
+    vm_push(vm, value_make_int_si(bytes_written));
+    DISPATCH();
+}
+
+L_FILE_CLOSE: // OP_FILE_CLOSE - Close file (fd -> void)
+{
+    Value fd_val = vm_pop(vm);
+    
+    if (fd_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: fclose() expects int\n");
+        value_free(fd_val);
+        exit(1);
+    }
+    
+    int fd = (int)fd_val.as.int64;
+    close(fd);
+    
+    value_free(fd_val);
+    DISPATCH();
+}
+
+L_SOCKET_CREATE: // OP_SOCKET_CREATE - Create socket (family, type -> sock_id)
+{
+    Value type_val = vm_pop(vm);
+    Value family_val = vm_pop(vm);
+    
+    if (family_val.type != VAL_STR || type_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: socket() expects (string, string)\n");
+        value_free(family_val);
+        value_free(type_val);
+        exit(1);
+    }
+    
+    const char *family_str = family_val.as.str;
+    const char *type_str = type_val.as.str;
+    
+    int family = AF_INET;
+    if (strcasecmp(family_str, "inet6") == 0)
+        family = AF_INET6;
+    else if (strcasecmp(family_str, "unix") == 0)
+        family = AF_UNIX;
+    
+    int type = SOCK_STREAM;
+    if (strcasecmp(type_str, "dgram") == 0)
+        type = SOCK_DGRAM;
+    else if (strcasecmp(type_str, "raw") == 0)
+        type = SOCK_RAW;
+    
+    int sock = socket(family, type, 0);
+    
+    value_free(family_val);
+    value_free(type_val);
+    vm_push(vm, value_make_int_si(sock));
+    DISPATCH();
+}
+
+L_SOCKET_CONNECT: // OP_SOCKET_CONNECT - Connect socket (sock_id, host, port -> void)
+{
+    Value port_val = vm_pop(vm);
+    Value host_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || host_val.type != VAL_STR || port_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: connect() expects (int, string, int)\n");
+        value_free(sock_val);
+        value_free(host_val);
+        value_free(port_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    const char *host = host_val.as.str;
+    int port = (int)port_val.as.int64;
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &addr.sin_addr);
+    
+    connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+    
+    value_free(sock_val);
+    value_free(host_val);
+    value_free(port_val);
+    DISPATCH();
+}
+
+L_SOCKET_BIND: // OP_SOCKET_BIND - Bind socket (sock_id, host, port -> void)
+{
+    Value port_val = vm_pop(vm);
+    Value host_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || host_val.type != VAL_STR || port_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: bind() expects (int, string, int)\n");
+        value_free(sock_val);
+        value_free(host_val);
+        value_free(port_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    const char *host = host_val.as.str;
+    int port = (int)port_val.as.int64;
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &addr.sin_addr);
+    
+    bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    
+    value_free(sock_val);
+    value_free(host_val);
+    value_free(port_val);
+    DISPATCH();
+}
+
+L_SOCKET_LISTEN: // OP_SOCKET_LISTEN - Listen on socket (sock_id, backlog -> void)
+{
+    Value backlog_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || backlog_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: listen() expects (int, int)\n");
+        value_free(sock_val);
+        value_free(backlog_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    int backlog = (int)backlog_val.as.int64;
+    
+    listen(sock, backlog);
+    
+    value_free(sock_val);
+    value_free(backlog_val);
+    DISPATCH();
+}
+
+L_SOCKET_ACCEPT: // OP_SOCKET_ACCEPT - Accept connection (sock_id -> client_sock_id)
+{
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: accept() expects int\n");
+        value_free(sock_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    int client = accept(sock, NULL, NULL);
+    
+    value_free(sock_val);
+    vm_push(vm, value_make_int_si(client));
+    DISPATCH();
+}
+
+L_SOCKET_SEND: // OP_SOCKET_SEND - Send data (sock_id, data -> bytes_sent)
+{
+    Value data_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || data_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: send() expects (int, string)\n");
+        value_free(sock_val);
+        value_free(data_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    const char *data = data_val.as.str;
+    int sent = send(sock, data, strlen(data), 0);
+    
+    value_free(sock_val);
+    value_free(data_val);
+    vm_push(vm, value_make_int_si(sent));
+    DISPATCH();
+}
+
+L_SOCKET_RECV: // OP_SOCKET_RECV - Receive data (sock_id, size -> string)
+{
+    Value size_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || size_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: recv() expects (int, int)\n");
+        value_free(sock_val);
+        value_free(size_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    int size = (int)size_val.as.int64;
+    
+    char *buffer = malloc(size + 1);
+    int received = recv(sock, buffer, size, 0);
+    if (received < 0) received = 0;
+    buffer[received] = '\0';
+    
+    value_free(sock_val);
+    value_free(size_val);
+    vm_push(vm, value_make_str(buffer));
+    DISPATCH();
+}
+
+L_SOCKET_CLOSE: // OP_SOCKET_CLOSE - Close socket (sock_id -> void)
+{
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: sclose() expects int\n");
+        value_free(sock_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    close(sock);
+    
+    value_free(sock_val);
+    DISPATCH();
+}
+
+L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level, option, value -> void)
+{
+    Value value_val = vm_pop(vm);
+    Value option_val = vm_pop(vm);
+    Value level_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    
+    if (sock_val.type != VAL_INT || level_val.type != VAL_STR || 
+        option_val.type != VAL_STR || value_val.type != VAL_INT)
+    {
+        fprintf(stderr, "Runtime error: setsockopt() expects (int, string, string, int)\n");
+        value_free(sock_val);
+        value_free(level_val);
+        value_free(option_val);
+        value_free(value_val);
+        exit(1);
+    }
+    
+    int sock = (int)sock_val.as.int64;
+    const char *level_str = level_val.as.str;
+    const char *option_str = option_val.as.str;
+    int value = (int)value_val.as.int64;
+    
+    int level = SOL_SOCKET;
+    if (strcasecmp(level_str, "IPPROTO_TCP") == 0)
+        level = IPPROTO_TCP;
+    else if (strcasecmp(level_str, "IPPROTO_IP") == 0)
+        level = IPPROTO_IP;
+    
+    int option = SO_REUSEADDR;
+    if (strcasecmp(option_str, "SO_KEEPALIVE") == 0)
+        option = SO_KEEPALIVE;
+    else if (strcasecmp(option_str, "SO_BROADCAST") == 0)
+        option = SO_BROADCAST;
+    else if (strcasecmp(option_str, "SO_RCVBUF") == 0)
+        option = SO_RCVBUF;
+    else if (strcasecmp(option_str, "SO_SNDBUF") == 0)
+        option = SO_SNDBUF;
+    
+    setsockopt(sock, level, option, &value, sizeof(value));
+    
+    value_free(sock_val);
+    value_free(level_val);
+    value_free(option_val);
+    value_free(value_val);
     DISPATCH();
 }
 
