@@ -69,7 +69,7 @@ def run_test_isolated(test_file, test_content):
             'mismatch': py_passed and not vm_passed and py_output != vm_output
         }
     else:
-        # Error test
+        # Error test or "none" test
         def extract_msg(text):
             if not text:
                 return ''
@@ -79,19 +79,24 @@ def run_test_isolated(test_file, test_content):
                     return parts[2].strip().rstrip('.')
             return text.rstrip('.')
         
-        py_msg = extract_msg(py_error) if py_error else ''
-        vm_msg = extract_msg(vm_error) if vm_error else ''
-        exp_msg = extract_msg(expect)
-        
-        py_passed = (py_msg == exp_msg)
-        vm_passed = (vm_msg == exp_msg)
+        # Check if this is a "none" test (parsing succeeded)
+        if py_output == 'none' and vm_output == 'none' and expect.lower() == 'none':
+            py_passed = True
+            vm_passed = True
+        else:
+            py_msg = extract_msg(py_error) if py_error else ''
+            vm_msg = extract_msg(vm_error) if vm_error else ''
+            exp_msg = extract_msg(expect)
+            
+            py_passed = (py_msg == exp_msg)
+            vm_passed = (vm_msg == exp_msg)
         
         return {
             'file': test_file,
             'py_passed': py_passed,
             'vm_passed': vm_passed,
-            'py_error': f'Error "{py_msg}" != expected "{exp_msg}"' if not py_passed else None,
-            'vm_error': f'Error "{vm_msg}" != expected "{exp_msg}"' if not vm_passed else None,
+            'py_error': f'Error "{py_msg if "py_msg" in locals() else py_output}" != expected "{expect}"' if not py_passed else None,
+            'vm_error': f'Error "{vm_msg if "vm_msg" in locals() else vm_output}" != expected "{expect}"' if not vm_passed else None,
             'mismatch': False
         }
 
