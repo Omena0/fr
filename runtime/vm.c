@@ -41,11 +41,11 @@
 // Helper function to unescape string literals from bytecode
 char* unescape_string(const char* str) {
     if (!str) return strdup("");
-    
+
     size_t len = strlen(str);
     char* result = malloc(len + 1); // Worst case: same length
     if (!result) return strdup("");
-    
+
     size_t j = 0;
     for (size_t i = 0; i < len; i++) {
         if (str[i] == '\\' && i + 1 < len) {
@@ -103,7 +103,7 @@ typedef struct List
     int capacity; // Allocated capacity
 } List;
 
-// Struct structure  
+// Struct structure
 typedef struct Struct
 {
     int struct_id;    // ID identifying which struct type this is
@@ -140,6 +140,10 @@ typedef enum
     OP_CONST_F64,
     OP_CONST_STR,
     OP_CONST_BOOL,
+    OP_CONST_I64_MULTI,  // Push multiple int64 constants
+    OP_CONST_F64_MULTI,  // Push multiple float64 constants
+    OP_CONST_STR_MULTI,  // Push multiple string constants
+    OP_CONST_BOOL_MULTI, // Push multiple bool constants
     OP_LOAD,
     OP_STORE,
     OP_ADD_I64,
@@ -187,6 +191,12 @@ typedef enum
     OP_SUB_CONST_I64, // Subtract constant from top of stack
     OP_MUL_CONST_I64, // Multiply top of stack by constant
     OP_DIV_CONST_I64, // Divide top of stack by constant
+    OP_ADD_CONST_I64_MULTI, // Add multiple constants to top of stack
+    OP_AND_CONST,     // Logical AND with constant bool
+    OP_OR_CONST,      // Logical OR with constant bool
+    OP_AND_CONST_I64, // Bitwise AND with constant
+    OP_OR_CONST_I64,  // Bitwise OR with constant
+    OP_XOR_CONST_I64, // Bitwise XOR with constant
     // Stack manipulation (reduce memory traffic)
     OP_SWAP, // Swap top two stack values
     OP_ROT,  // Rotate top three stack values (a b c -> b c a)
@@ -265,7 +275,7 @@ typedef enum
     OP_STRUCT_NEW,    // Create new struct instance (struct_id -> struct)
     OP_STRUCT_GET,    // Get field from struct (struct, field_idx -> value)
     OP_STRUCT_SET,    // Set field in struct (struct, field_idx, value -> struct)
-    
+
     // File I/O operations
     OP_FILE_OPEN,     // Open file (path, mode -> fd)
     OP_FILE_READ,     // Read from file (fd, size -> string)
@@ -287,7 +297,7 @@ typedef enum
     OP_FILE_BASENAME, // Get basename (path -> string)
     OP_FILE_DIRNAME,  // Get directory name (path -> string)
     OP_FILE_JOIN,     // Join paths (list -> string)
-    
+
     // Socket I/O operations
     OP_SOCKET_CREATE,     // Create socket (family, type -> sock_id)
     OP_SOCKET_CONNECT,    // Connect socket (sock_id, host, port -> void)
@@ -298,11 +308,12 @@ typedef enum
     OP_SOCKET_RECV,       // Receive data (sock_id, size -> string)
     OP_SOCKET_CLOSE,      // Close socket (sock_id -> void)
     OP_SOCKET_SETSOCKOPT, // Set socket option (sock_id, level, option, value -> void)
-    
+
     // Python library integration
     OP_PY_IMPORT,         // Import a Python module (module_name -> module_object)
     OP_PY_CALL,           // Call a Python function (module_name, func_name, arg1, ..., argN, num_args -> result)
     OP_PY_GETATTR,        // Get attribute from Python object (obj, attr_name -> value)
+    OP_PY_SETATTR,        // Set attribute on Python object (obj, attr_name, value -> none)
     OP_PY_CALL_METHOD,    // Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
 } OpCode;
 
@@ -490,7 +501,7 @@ Value list_get(List *list, int index)
     {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length)
     {
         fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
@@ -506,7 +517,7 @@ void list_set(List *list, int index, Value value)
     {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length)
     {
         fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
@@ -688,7 +699,7 @@ void vm_init(VM *vm)
     vm->struct_count = 0;
     vm->prog_argc = 0;
     vm->prog_argv = NULL;
-    
+
     // Initialize Python interpreter
     if (!Py_IsInitialized()) {
         Py_Initialize();
@@ -727,8 +738,31 @@ void vm_free(VM *vm)
         {
             free(vm->code[i].operand.str_val);
         }
+        // Free multi-arg constant instructions
+        else if (vm->code[i].op == OP_CONST_I64_MULTI ||
+                 vm->code[i].op == OP_CONST_F64_MULTI ||
+                 vm->code[i].op == OP_CONST_BOOL_MULTI)
+        {
+            if (vm->code[i].operand.ptr)
+                free(vm->code[i].operand.ptr);
+        }
+        else if (vm->code[i].op == OP_CONST_STR_MULTI)
+        {
+            // Free each string in the array, then the array itself
+            if (vm->code[i].operand.ptr)
+            {
+                char **args = (char**)vm->code[i].operand.ptr;
+                int count = *((int64_t*)args);
+                for (int j = 0; j < count; j++)
+                {
+                    if (args[j + 1])
+                        free(args[j + 1]);
+                }
+                free(args);
+            }
+        }
     }
-    
+
     // Finalize Python interpreter
     if (Py_IsInitialized()) {
         Py_Finalize();
@@ -1338,24 +1372,24 @@ bool vm_load_bytecode(VM *vm,
             // .struct <id> <field_count> <field_names...>
             char *struct_id_str = strtok(NULL, " ");
             char *field_count_str = strtok(NULL, " ");
-            
+
             if (!struct_id_str || !field_count_str)
             {
                 fprintf(stderr, "Invalid .struct directive\n");
                 return false;
             }
-            
+
             int struct_id = atoi(struct_id_str);
             int field_count = atoi(field_count_str);
-            
+
             if (struct_id < 0 || struct_id >= MAX_STRUCTS)
             {
                 fprintf(stderr, "Struct ID out of range: %d\n", struct_id);
                 return false;
             }
-            
+
             vm->structs[struct_id].field_count = field_count;
-            
+
             // Parse field names
             for (int i = 0; i < field_count && i < MAX_STRUCT_FIELDS; i++)
             {
@@ -1365,7 +1399,7 @@ bool vm_load_bytecode(VM *vm,
                     vm->structs[struct_id].field_names[i] = strdup(field_name);
                 }
             }
-            
+
             vm->struct_count = (vm->struct_count > struct_id + 1) ? vm->struct_count : (struct_id + 1);
             continue;
         }
@@ -1429,39 +1463,197 @@ bool vm_load_bytecode(VM *vm,
             Instruction inst;
             if (strcmp(token, "CONST_I64") == 0)
             {
-                char *val = strtok(NULL, " ");
-                inst.op = OP_CONST_I64;
-                // Pre-parse integer at load time for performance
-                inst.operand.int64 = atoll(val);
+                // Support CONST_I64 with multiple arguments: CONST_I64 n1 n2 n3...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: CONST_I64 requires at least one argument\n");
+                    exit(1);
+                }
+
+                // Parse all values
+                int64_t values[256];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                while (val_str != NULL && count < 256)
+                {
+                    values[count++] = atoll(val_str);
+                    val_str = strtok(NULL, " ");
+                }
+
+                if (count == 1)
+                {
+                    // Single CONST_I64 - use original instruction
+                    inst.op = OP_CONST_I64;
+                    inst.operand.int64 = values[0];
+                }
+                else
+                {
+                    // Multiple CONST_I64 - use CONST_I64_MULTI
+                    inst.op = OP_CONST_I64_MULTI;
+                    int64_t *args = malloc((count + 1) * sizeof(int64_t));
+                    args[0] = count;
+                    for (int j = 0; j < count; j++)
+                    {
+                        args[j + 1] = values[j];
+                    }
+                    inst.operand.ptr = args;
+                }
             }
             else if (strcmp(token, "CONST_F64") == 0)
             {
-                char *val = strtok(NULL, " ");
-                inst.op = OP_CONST_F64;
-                inst.operand.f64 = atof(val);
+                // Support CONST_F64 with multiple arguments
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: CONST_F64 requires at least one argument\n");
+                    exit(1);
+                }
+
+                // Parse all values
+                double values[256];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                while (val_str != NULL && count < 256)
+                {
+                    values[count++] = atof(val_str);
+                    val_str = strtok(NULL, " ");
+                }
+
+                if (count == 1)
+                {
+                    // Single CONST_F64 - use original instruction
+                    inst.op = OP_CONST_F64;
+                    inst.operand.f64 = values[0];
+                }
+                else
+                {
+                    // Multiple CONST_F64 - use CONST_F64_MULTI
+                    inst.op = OP_CONST_F64_MULTI;
+                    double *args = malloc((count + 1) * sizeof(double));
+                    // Store count as int64 at the start (cast for alignment)
+                    *((int64_t*)args) = count;
+                    for (int j = 0; j < count; j++)
+                    {
+                        args[j + 1] = values[j];
+                    }
+                    inst.operand.ptr = args;
+                }
             }
             else if (strcmp(token, "CONST_STR") == 0)
             {
-                char *val = strtok(NULL, ""); // Rest of line
-                // Remove quotes
-                if (val && val[0] == '"')
+                // Support CONST_STR with multiple arguments
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
                 {
-                    val++;
-                    val[strlen(val) - 1] = '\0';
+                    fprintf(stderr, "Error: CONST_STR requires at least one argument\n");
+                    exit(1);
                 }
-                inst.op = OP_CONST_STR;
-                // Unescape the string (handles \n, \r, \t, \\, \", etc.)
-                inst.operand.str_val = unescape_string(val ? val : "");
+
+                // Parse quoted strings
+                char *strings[256];
+                int count = 0;
+
+                // Manually parse quoted strings from rest_of_line
+                char *p = rest_of_line;
+                while (*p && count < 256)
+                {
+                    // Skip whitespace
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == '\0') break;
+
+                    // Expect a quote
+                    if (*p != '"')
+                    {
+                        fprintf(stderr, "Error: CONST_STR expects quoted strings\n");
+                        exit(1);
+                    }
+                    p++; // Skip opening quote
+
+                    // Find closing quote (considering escapes)
+                    char *start = p;
+                    while (*p && (*p != '"' || (p > start && *(p-1) == '\\')))
+                    {
+                        p++;
+                    }
+
+                    if (*p != '"')
+                    {
+                        fprintf(stderr, "Error: CONST_STR unterminated string\n");
+                        exit(1);
+                    }
+
+                    // Extract and unescape the string
+                    size_t len = p - start;
+                    char *temp = malloc(len + 1);
+                    strncpy(temp, start, len);
+                    temp[len] = '\0';
+                    strings[count++] = unescape_string(temp);
+                    free(temp);
+
+                    p++; // Skip closing quote
+                }
+
+                if (count == 1)
+                {
+                    // Single CONST_STR - use original instruction
+                    inst.op = OP_CONST_STR;
+                    inst.operand.str_val = strings[0];
+                }
+                else
+                {
+                    // Multiple CONST_STR - use CONST_STR_MULTI
+                    inst.op = OP_CONST_STR_MULTI;
+                    char **args = malloc((count + 1) * sizeof(char*));
+                    *((int64_t*)args) = count; // Store count at start
+                    for (int j = 0; j < count; j++)
+                    {
+                        args[j + 1] = strings[j];
+                    }
+                    inst.operand.ptr = args;
+                }
             }
             else if (strcmp(token, "CONST_BOOL") == 0)
             {
-                char *val = strtok(NULL, " ");
-                inst.op = OP_CONST_BOOL;
-                // Accept either "true"/"false" or "1"/"0"
-                if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0)
-                    inst.operand.index = 1;
+                // Support CONST_BOOL with multiple arguments
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: CONST_BOOL requires at least one argument\n");
+                    exit(1);
+                }
+
+                // Parse all values
+                int values[256];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                while (val_str != NULL && count < 256)
+                {
+                    if (strcmp(val_str, "true") == 0 || strcmp(val_str, "1") == 0)
+                        values[count++] = 1;
+                    else
+                        values[count++] = 0;
+                    val_str = strtok(NULL, " ");
+                }
+
+                if (count == 1)
+                {
+                    // Single CONST_BOOL - use original instruction
+                    inst.op = OP_CONST_BOOL;
+                    inst.operand.index = values[0];
+                }
                 else
-                    inst.operand.index = 0;
+                {
+                    // Multiple CONST_BOOL - use CONST_BOOL_MULTI
+                    inst.op = OP_CONST_BOOL_MULTI;
+                    int *args = malloc((count + 1) * sizeof(int));
+                    args[0] = count;
+                    for (int j = 0; j < count; j++)
+                    {
+                        args[j + 1] = values[j];
+                    }
+                    inst.operand.ptr = args;
+                }
             }
             else if (strcmp(token, "LOAD") == 0)
             {
@@ -1726,6 +1918,8 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_PY_CALL;
             else if (strcmp(token, "PY_GETATTR") == 0)
                 inst.op = OP_PY_GETATTR;
+            else if (strcmp(token, "PY_SETATTR") == 0)
+                inst.op = OP_PY_SETATTR;
             else if (strcmp(token, "PY_CALL_METHOD") == 0)
                 inst.op = OP_PY_CALL_METHOD;
             else if (strcmp(token, "POP") == 0)
@@ -1749,9 +1943,42 @@ bool vm_load_bytecode(VM *vm,
             }
             else if (strcmp(token, "ADD_CONST_I64") == 0)
             {
-                char *val = strtok(NULL, " ");
-                inst.op = OP_ADD_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                // Support ADD_CONST_I64 with multiple arguments: ADD_CONST_I64 n1 n2 n3...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: ADD_CONST_I64 requires at least one argument\n");
+                    exit(1);
+                }
+
+                // Parse all values
+                int64_t values[256];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                while (val_str != NULL && count < 256)
+                {
+                    values[count++] = atoll(val_str);
+                    val_str = strtok(NULL, " ");
+                }
+
+                if (count == 1)
+                {
+                    // Single value - use simple instruction
+                    inst.op = OP_ADD_CONST_I64;
+                    inst.operand.int64 = values[0];
+                }
+                else
+                {
+                    // Multiple values - use multi instruction
+                    inst.op = OP_ADD_CONST_I64_MULTI;
+                    int64_t *args = malloc(sizeof(int64_t) * (count + 1));
+                    args[0] = count;
+                    for (int j = 0; j < count; j++)
+                    {
+                        args[j + 1] = values[j];
+                    }
+                    inst.operand.ptr = args;
+                }
             }
             else if (strcmp(token, "SUB_CONST_I64") == 0)
             {
@@ -1769,6 +1996,36 @@ bool vm_load_bytecode(VM *vm,
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_DIV_CONST_I64;
+                inst.operand.int64 = atoll(val);
+            }
+            else if (strcmp(token, "AND_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_AND_CONST;
+                inst.operand.int64 = atoi(val);
+            }
+            else if (strcmp(token, "OR_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_OR_CONST;
+                inst.operand.int64 = atoi(val);
+            }
+            else if (strcmp(token, "AND_CONST_I64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_AND_CONST_I64;
+                inst.operand.int64 = atoll(val);
+            }
+            else if (strcmp(token, "OR_CONST_I64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_OR_CONST_I64;
+                inst.operand.int64 = atoll(val);
+            }
+            else if (strcmp(token, "XOR_CONST_I64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_XOR_CONST_I64;
                 inst.operand.int64 = atoll(val);
             }
             // Stack manipulation
@@ -2001,7 +2258,7 @@ __attribute__((hot)) void vm_run(VM *vm)
     {
         vm->call_stack[0].vars.vars[i] = value_make_int_si(0);
     }
-    
+
     // If main() expects an argument and we have program arguments, pass argv as a list
     if (entry->arg_count > 0)
     {
@@ -2010,18 +2267,18 @@ __attribute__((hot)) void vm_run(VM *vm)
         argv_list->length = vm->prog_argc;
         argv_list->capacity = (vm->prog_argc > 0) ? vm->prog_argc : 1;  // At least capacity of 1
         argv_list->items = malloc(sizeof(Value) * argv_list->capacity);
-        
+
         // Convert each C string argument to a Value string
         for (int i = 0; i < vm->prog_argc; i++)
         {
             argv_list->items[i] = value_make_str(vm->prog_argv[i]);
         }
-        
+
         // Pass the list as the first argument to main
         value_free(vm->call_stack[0].vars.vars[0]);
         vm->call_stack[0].vars.vars[0] = (Value){.type = VAL_LIST, .as.list = argv_list};
     }
-    
+
     vm->call_stack[0].return_pc = -1;
     vm->call_stack_top = 1;
     vm->pc = entry->start_pc;
@@ -2032,6 +2289,10 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_CONST_F64] = &&L_CONST_F64,
         [OP_CONST_STR] = &&L_CONST_STR,
         [OP_CONST_BOOL] = &&L_CONST_BOOL,
+        [OP_CONST_I64_MULTI] = &&L_CONST_I64_MULTI,
+        [OP_CONST_F64_MULTI] = &&L_CONST_F64_MULTI,
+        [OP_CONST_STR_MULTI] = &&L_CONST_STR_MULTI,
+        [OP_CONST_BOOL_MULTI] = &&L_CONST_BOOL_MULTI,
         [OP_LOAD] = &&L_LOAD,
         [OP_STORE] = &&L_STORE,
         [OP_ADD_I64] = &&L_ADD_I64,
@@ -2078,6 +2339,12 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_SUB_CONST_I64] = &&L_SUB_CONST_I64,
         [OP_MUL_CONST_I64] = &&L_MUL_CONST_I64,
         [OP_DIV_CONST_I64] = &&L_DIV_CONST_I64,
+        [OP_ADD_CONST_I64_MULTI] = &&L_ADD_CONST_I64_MULTI,
+        [OP_AND_CONST] = &&L_AND_CONST,
+        [OP_OR_CONST] = &&L_OR_CONST,
+        [OP_AND_CONST_I64] = &&L_AND_CONST_I64,
+        [OP_OR_CONST_I64] = &&L_OR_CONST_I64,
+        [OP_XOR_CONST_I64] = &&L_XOR_CONST_I64,
         [OP_SWAP] = &&L_SWAP,
         [OP_ROT] = &&L_ROT,
         [OP_OVER] = &&L_OVER,
@@ -2159,6 +2426,7 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_PY_IMPORT] = &&L_PY_IMPORT,
         [OP_PY_CALL] = &&L_PY_CALL,
         [OP_PY_GETATTR] = &&L_PY_GETATTR,
+        [OP_PY_SETATTR] = &&L_PY_SETATTR,
         [OP_PY_CALL_METHOD] = &&L_PY_CALL_METHOD,
     };
 #define DISPATCH() goto *dispatch_table[vm->code[vm->pc++].op]
@@ -2185,6 +2453,50 @@ L_CONST_BOOL: // OP_CONST_BOOL
 {
     Instruction inst = vm->code[vm->pc - 1];
     vm_push(vm, value_make_bool(inst.operand.index != 0));
+    DISPATCH();
+}
+L_CONST_I64_MULTI: // OP_CONST_I64_MULTI
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int64_t *args = (int64_t*)inst.operand.ptr;
+    int count = args[0];
+    for (int i = 0; i < count; i++)
+    {
+        vm_push(vm, value_make_int_si(args[i + 1]));
+    }
+    DISPATCH();
+}
+L_CONST_F64_MULTI: // OP_CONST_F64_MULTI
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    double *args = (double*)inst.operand.ptr;
+    int count = *((int64_t*)args);
+    for (int i = 0; i < count; i++)
+    {
+        vm_push(vm, value_make_f64(args[i + 1]));
+    }
+    DISPATCH();
+}
+L_CONST_STR_MULTI: // OP_CONST_STR_MULTI
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    char **args = (char**)inst.operand.ptr;
+    int count = *((int64_t*)args);
+    for (int i = 0; i < count; i++)
+    {
+        vm_push(vm, value_make_str(args[i + 1]));
+    }
+    DISPATCH();
+}
+L_CONST_BOOL_MULTI: // OP_CONST_BOOL_MULTI
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int *args = (int*)inst.operand.ptr;
+    int count = args[0];
+    for (int i = 0; i < count; i++)
+    {
+        vm_push(vm, value_make_bool(args[i + 1] != 0));
+    }
     DISPATCH();
 }
 L_LOAD: // OP_LOAD
@@ -2387,7 +2699,7 @@ L_NOT: // OP_NOT
             result = !(a.as.f64);
         else
             result = false; // Default for other types
-        
+
         value_free(a);
         vm_push(vm, value_make_bool(result));
         DISPATCH();
@@ -2816,6 +3128,174 @@ L_DIV_CONST_I64: // OP_DIV_CONST_I64
         DISPATCH();
     }
 }
+L_ADD_CONST_I64_MULTI: // OP_ADD_CONST_I64_MULTI
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int64_t *args = (int64_t*)inst.operand.ptr;
+        int count = args[0];
+
+        for (int i = 0; i < count; i++)
+        {
+            int64_t const_val = args[i + 1];
+            if (likely(a.type == VAL_INT))
+            {
+                a.as.int64 += const_val;
+            }
+            else if (a.type == VAL_BIGINT)
+            {
+                if (const_val >= 0)
+                {
+                    mpz_add_ui(*a.as.bigint, *a.as.bigint, (unsigned long)const_val);
+                }
+                else
+                {
+                    mpz_sub_ui(*a.as.bigint, *a.as.bigint, (unsigned long)(-const_val));
+                }
+            }
+            else if (a.type == VAL_F64)
+            {
+                a.as.f64 += (double)const_val;
+            }
+            else
+            {
+                value_free(a);
+                DISPATCH();
+            }
+        }
+        vm_push(vm, a);
+        DISPATCH();
+    }
+}
+L_AND_CONST: // OP_AND_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int const_val = inst.operand.int64;
+        bool a_truthy = false;
+
+        if (a.type == VAL_BOOL)
+            a_truthy = a.as.boolean;
+        else if (a.type == VAL_INT)
+            a_truthy = (a.as.int64 != 0);
+        else if (a.type == VAL_F64)
+            a_truthy = (a.as.f64 != 0.0);
+        else if (a.type == VAL_STR)
+            a_truthy = (strlen(a.as.str) > 0);
+        else if (a.type == VAL_LIST)
+            a_truthy = (a.as.list->length > 0);
+
+        bool result = a_truthy && (const_val != 0);
+        value_free(a);
+        vm_push(vm, value_make_bool(result));
+        DISPATCH();
+    }
+}
+L_OR_CONST: // OP_OR_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int const_val = inst.operand.int64;
+        bool a_truthy = false;
+
+        if (a.type == VAL_BOOL)
+            a_truthy = a.as.boolean;
+        else if (a.type == VAL_INT)
+            a_truthy = (a.as.int64 != 0);
+        else if (a.type == VAL_F64)
+            a_truthy = (a.as.f64 != 0.0);
+        else if (a.type == VAL_STR)
+            a_truthy = (strlen(a.as.str) > 0);
+        else if (a.type == VAL_LIST)
+            a_truthy = (a.as.list->length > 0);
+
+        bool result = a_truthy || (const_val != 0);
+        value_free(a);
+        vm_push(vm, value_make_bool(result));
+        DISPATCH();
+    }
+}
+L_AND_CONST_I64: // OP_AND_CONST_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int64_t const_val = inst.operand.int64;
+        if (likely(a.type == VAL_INT))
+        {
+            a.as.int64 &= const_val;
+            vm_push(vm, a);
+        }
+        else if (a.type == VAL_BIGINT)
+        {
+            mpz_t temp;
+            mpz_init_set_si(temp, const_val);
+            mpz_and(*a.as.bigint, *a.as.bigint, temp);
+            mpz_clear(temp);
+            vm_push(vm, a);
+        }
+        else
+        {
+            value_free(a);
+        }
+        DISPATCH();
+    }
+}
+L_OR_CONST_I64: // OP_OR_CONST_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int64_t const_val = inst.operand.int64;
+        if (likely(a.type == VAL_INT))
+        {
+            a.as.int64 |= const_val;
+            vm_push(vm, a);
+        }
+        else if (a.type == VAL_BIGINT)
+        {
+            mpz_t temp;
+            mpz_init_set_si(temp, const_val);
+            mpz_ior(*a.as.bigint, *a.as.bigint, temp);
+            mpz_clear(temp);
+            vm_push(vm, a);
+        }
+        else
+        {
+            value_free(a);
+        }
+        DISPATCH();
+    }
+}
+L_XOR_CONST_I64: // OP_XOR_CONST_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int64_t const_val = inst.operand.int64;
+        if (likely(a.type == VAL_INT))
+        {
+            a.as.int64 ^= const_val;
+            vm_push(vm, a);
+        }
+        else if (a.type == VAL_BIGINT)
+        {
+            mpz_t temp;
+            mpz_init_set_si(temp, const_val);
+            mpz_xor(*a.as.bigint, *a.as.bigint, temp);
+            mpz_clear(temp);
+            vm_push(vm, a);
+        }
+        else
+        {
+            value_free(a);
+        }
+        DISPATCH();
+    }
+}
 // Stack manipulation instructions
 L_SWAP: // OP_SWAP
 {
@@ -3222,7 +3702,7 @@ L_STRUCT_NEW: // OP_STRUCT_NEW
 {
     Instruction inst = vm->code[vm->pc - 1];
     int struct_id = inst.operand.index;
-    
+
     // Validate struct ID
     if (struct_id < 0 || struct_id >= vm->struct_count)
     {
@@ -3231,21 +3711,21 @@ L_STRUCT_NEW: // OP_STRUCT_NEW
         vm->exit_code = 1;
         return;
     }
-    
+
     StructDef *def = &vm->structs[struct_id];
-    
+
     // Create new struct instance
     Struct *s = malloc(sizeof(Struct));
     s->struct_id = struct_id;
     s->field_count = def->field_count;
     s->fields = malloc(sizeof(Value) * s->field_count);
-    
+
     // Pop field values from stack in reverse order (last field pushed first)
     for (int i = s->field_count - 1; i >= 0; i--)
     {
         s->fields[i] = vm_pop(vm);
     }
-    
+
     // Push struct value
     Value struct_val;
     struct_val.type = VAL_STRUCT;
@@ -3258,9 +3738,9 @@ L_STRUCT_GET: // OP_STRUCT_GET
 {
     Instruction inst = vm->code[vm->pc - 1];
     int field_idx = inst.operand.index;
-    
+
     Value struct_val = vm_pop(vm);
-    
+
     if (struct_val.type != VAL_STRUCT)
     {
         fprintf(stderr, "Error: Cannot get field from non-struct type\n");
@@ -3269,7 +3749,7 @@ L_STRUCT_GET: // OP_STRUCT_GET
         vm->exit_code = 1;
         return;
     }
-    
+
     if (field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
     {
         fprintf(stderr, "Error: Field index %d out of range\n", field_idx);
@@ -3278,7 +3758,7 @@ L_STRUCT_GET: // OP_STRUCT_GET
         vm->exit_code = 1;
         return;
     }
-    
+
     Value field_val = value_copy(struct_val.as.struct_val->fields[field_idx]);
     value_free(struct_val);
     vm_push(vm, field_val);
@@ -3289,10 +3769,10 @@ L_STRUCT_SET: // OP_STRUCT_SET
 {
     Instruction inst = vm->code[vm->pc - 1];
     int field_idx = inst.operand.index;
-    
+
     Value new_value = vm_pop(vm);
     Value struct_val = vm_pop(vm);
-    
+
     if (struct_val.type != VAL_STRUCT)
     {
         fprintf(stderr, "Error: Cannot set field on non-struct type\n");
@@ -3302,7 +3782,7 @@ L_STRUCT_SET: // OP_STRUCT_SET
         vm->exit_code = 1;
         return;
     }
-    
+
     if (field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
     {
         fprintf(stderr, "Error: Field index %d out of range\n", field_idx);
@@ -3312,11 +3792,11 @@ L_STRUCT_SET: // OP_STRUCT_SET
         vm->exit_code = 1;
         return;
     }
-    
+
     // Free old value and set new one
     value_free(struct_val.as.struct_val->fields[field_idx]);
     struct_val.as.struct_val->fields[field_idx] = new_value;
-    
+
     vm_push(vm, struct_val);
     DISPATCH();
 }
@@ -3510,7 +3990,7 @@ L_STR_SPLIT: // OP_STR_SPLIT - Split string by delimiter (str, sep -> list)
     }
 
     List *result_list = list_new();
-    
+
     // Handle empty string - should return list with one empty string
     if (strlen(str.as.str) == 0) {
         list_append(result_list, value_make_str(strdup("")));
@@ -3519,7 +3999,7 @@ L_STR_SPLIT: // OP_STR_SPLIT - Split string by delimiter (str, sep -> list)
         vm_push(vm, value_wrap_list(result_list));
         DISPATCH();
     }
-    
+
     // Handle empty separator - split into individual characters
     if (strlen(sep.as.str) == 0) {
         for (size_t i = 0; str.as.str[i] != '\0'; i++) {
@@ -3531,11 +4011,11 @@ L_STR_SPLIT: // OP_STR_SPLIT - Split string by delimiter (str, sep -> list)
         vm_push(vm, value_wrap_list(result_list));
         DISPATCH();
     }
-    
+
     // Proper string splitting (not character-set splitting like strtok)
     char *remaining = str.as.str;
     size_t sep_len = strlen(sep.as.str);
-    
+
     while (*remaining) {
         char *found = strstr(remaining, sep.as.str);
         if (found) {
@@ -3552,7 +4032,7 @@ L_STR_SPLIT: // OP_STR_SPLIT - Split string by delimiter (str, sep -> list)
             break;
         }
     }
-    
+
     // If string ends with separator, add empty string
     if (remaining == str.as.str + strlen(str.as.str) && strlen(str.as.str) > 0) {
         list_append(result_list, value_make_str(strdup("")));
@@ -3671,7 +4151,7 @@ L_FILE_OPEN: // OP_FILE_OPEN - Open file (path, mode -> fd)
 {
     Value mode_val = vm_pop(vm);
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR || mode_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: fopen() expects (string, string)\n");
@@ -3679,10 +4159,10 @@ L_FILE_OPEN: // OP_FILE_OPEN - Open file (path, mode -> fd)
         value_free(mode_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     const char *mode = mode_val.as.str;
-    
+
     int flags = O_RDONLY;
     if (strcmp(mode, "w") == 0)
         flags = O_WRONLY | O_CREAT | O_TRUNC;
@@ -3692,9 +4172,9 @@ L_FILE_OPEN: // OP_FILE_OPEN - Open file (path, mode -> fd)
         flags = O_RDWR;
     else if (strcmp(mode, "w+") == 0)
         flags = O_RDWR | O_CREAT | O_TRUNC;
-    
+
     int fd = open(path, flags, 0666);
-    
+
     value_free(path_val);
     value_free(mode_val);
     vm_push(vm, value_make_int_si(fd));
@@ -3705,7 +4185,7 @@ L_FILE_READ: // OP_FILE_READ - Read from file (fd, size -> string)
 {
     Value size_val = vm_pop(vm);
     Value fd_val = vm_pop(vm);
-    
+
     if (fd_val.type != VAL_INT || size_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: fread() expects (int, int)\n");
@@ -3713,13 +4193,13 @@ L_FILE_READ: // OP_FILE_READ - Read from file (fd, size -> string)
         value_free(size_val);
         exit(1);
     }
-    
+
     int fd = (int)fd_val.as.int64;
     int size = (int)size_val.as.int64;
-    
+
     char *buffer;
     int total_read = 0;
-    
+
     if (size < 0)
     {
         // Read all
@@ -3744,7 +4224,7 @@ L_FILE_READ: // OP_FILE_READ - Read from file (fd, size -> string)
         if (total_read < 0) total_read = 0;
         buffer[total_read] = '\0';
     }
-    
+
     value_free(fd_val);
     value_free(size_val);
     vm_push(vm, value_make_str(buffer));
@@ -3755,7 +4235,7 @@ L_FILE_WRITE: // OP_FILE_WRITE - Write to file (fd, data -> bytes_written)
 {
     Value data_val = vm_pop(vm);
     Value fd_val = vm_pop(vm);
-    
+
     if (fd_val.type != VAL_INT || data_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: fwrite() expects (int, string)\n");
@@ -3763,11 +4243,11 @@ L_FILE_WRITE: // OP_FILE_WRITE - Write to file (fd, data -> bytes_written)
         value_free(data_val);
         exit(1);
     }
-    
+
     int fd = (int)fd_val.as.int64;
     const char *data = data_val.as.str;
     int bytes_written = write(fd, data, strlen(data));
-    
+
     value_free(fd_val);
     value_free(data_val);
     vm_push(vm, value_make_int_si(bytes_written));
@@ -3777,17 +4257,17 @@ L_FILE_WRITE: // OP_FILE_WRITE - Write to file (fd, data -> bytes_written)
 L_FILE_CLOSE: // OP_FILE_CLOSE - Close file (fd -> void)
 {
     Value fd_val = vm_pop(vm);
-    
+
     if (fd_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: fclose() expects int\n");
         value_free(fd_val);
         exit(1);
     }
-    
+
     int fd = (int)fd_val.as.int64;
     close(fd);
-    
+
     value_free(fd_val);
     DISPATCH();
 }
@@ -3795,18 +4275,18 @@ L_FILE_CLOSE: // OP_FILE_CLOSE - Close file (fd -> void)
 L_FILE_EXISTS: // OP_FILE_EXISTS - Check if file/directory exists (path -> bool)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: exists() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     struct stat st;
     bool exists = (stat(path, &st) == 0);
-    
+
     value_free(path_val);
     vm_push(vm, value_make_bool(exists));
     DISPATCH();
@@ -3815,18 +4295,18 @@ L_FILE_EXISTS: // OP_FILE_EXISTS - Check if file/directory exists (path -> bool)
 L_FILE_ISFILE: // OP_FILE_ISFILE - Check if path is a file (path -> bool)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: isfile() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     struct stat st;
     bool is_file = (stat(path, &st) == 0 && S_ISREG(st.st_mode));
-    
+
     value_free(path_val);
     vm_push(vm, value_make_bool(is_file));
     DISPATCH();
@@ -3835,18 +4315,18 @@ L_FILE_ISFILE: // OP_FILE_ISFILE - Check if path is a file (path -> bool)
 L_FILE_ISDIR: // OP_FILE_ISDIR - Check if path is a directory (path -> bool)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: isdir() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     struct stat st;
     bool is_dir = (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
-    
+
     value_free(path_val);
     vm_push(vm, value_make_bool(is_dir));
     DISPATCH();
@@ -3855,48 +4335,48 @@ L_FILE_ISDIR: // OP_FILE_ISDIR - Check if path is a directory (path -> bool)
 L_FILE_LISTDIR: // OP_FILE_LISTDIR - List directory contents (path -> list)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: listdir() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     DIR *dir = opendir(path);
-    
+
     if (!dir)
     {
         value_free(path_val);
         vm_push(vm, value_make_list()); // Return empty list on error
         DISPATCH();
     }
-    
+
     List *list = malloc(sizeof(List));
     list->capacity = 16;
     list->length = 0;
     list->items = malloc(sizeof(Value) * list->capacity);
-    
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL)
     {
         // Skip . and ..
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
-        
+
         if (list->length >= list->capacity)
         {
             list->capacity *= 2;
             list->items = realloc(list->items, sizeof(Value) * list->capacity);
         }
-        
+
         list->items[list->length++] = value_make_str(strdup(entry->d_name));
     }
-    
+
     closedir(dir);
     value_free(path_val);
-    
+
     Value result;
     result.type = VAL_LIST;
     result.as.list = list;
@@ -3907,17 +4387,17 @@ L_FILE_LISTDIR: // OP_FILE_LISTDIR - List directory contents (path -> list)
 L_FILE_MKDIR: // OP_FILE_MKDIR - Create directory (path -> void)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: mkdir() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     mkdir(path, 0755);
-    
+
     value_free(path_val);
     DISPATCH();
 }
@@ -3925,21 +4405,21 @@ L_FILE_MKDIR: // OP_FILE_MKDIR - Create directory (path -> void)
 L_FILE_MAKEDIRS: // OP_FILE_MAKEDIRS - Create directory and parents (path -> void)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: makedirs() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     char *path_copy = strdup(path);
     char *p = path_copy;
-    
+
     // Skip leading /
     if (*p == '/') p++;
-    
+
     while (*p)
     {
         if (*p == '/')
@@ -3951,7 +4431,7 @@ L_FILE_MAKEDIRS: // OP_FILE_MAKEDIRS - Create directory and parents (path -> voi
         p++;
     }
     mkdir(path_copy, 0755);
-    
+
     free(path_copy);
     value_free(path_val);
     DISPATCH();
@@ -3960,17 +4440,17 @@ L_FILE_MAKEDIRS: // OP_FILE_MAKEDIRS - Create directory and parents (path -> voi
 L_FILE_REMOVE: // OP_FILE_REMOVE - Remove file (path -> void)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: remove() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     unlink(path);
-    
+
     value_free(path_val);
     DISPATCH();
 }
@@ -3978,17 +4458,17 @@ L_FILE_REMOVE: // OP_FILE_REMOVE - Remove file (path -> void)
 L_FILE_RMDIR: // OP_FILE_RMDIR - Remove directory (path -> void)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: rmdir() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     rmdir(path);
-    
+
     value_free(path_val);
     DISPATCH();
 }
@@ -3997,7 +4477,7 @@ L_FILE_RENAME: // OP_FILE_RENAME - Rename/move file (old_path, new_path -> void)
 {
     Value new_path_val = vm_pop(vm);
     Value old_path_val = vm_pop(vm);
-    
+
     if (old_path_val.type != VAL_STR || new_path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: rename() expects (string, string)\n");
@@ -4005,11 +4485,11 @@ L_FILE_RENAME: // OP_FILE_RENAME - Rename/move file (old_path, new_path -> void)
         value_free(new_path_val);
         exit(1);
     }
-    
+
     const char *old_path = old_path_val.as.str;
     const char *new_path = new_path_val.as.str;
     rename(old_path, new_path);
-    
+
     value_free(old_path_val);
     value_free(new_path_val);
     DISPATCH();
@@ -4018,23 +4498,23 @@ L_FILE_RENAME: // OP_FILE_RENAME - Rename/move file (old_path, new_path -> void)
 L_FILE_GETSIZE: // OP_FILE_GETSIZE - Get file size (path -> int)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: getsize() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     struct stat st;
     int64_t size = 0;
-    
+
     if (stat(path, &st) == 0)
     {
         size = st.st_size;
     }
-    
+
     value_free(path_val);
     vm_push(vm, value_make_int_si(size));
     DISPATCH();
@@ -4057,17 +4537,17 @@ L_FILE_GETCWD: // OP_FILE_GETCWD - Get current working directory (-> string)
 L_FILE_CHDIR: // OP_FILE_CHDIR - Change working directory (path -> void)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: chdir() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     chdir(path);
-    
+
     value_free(path_val);
     DISPATCH();
 }
@@ -4075,17 +4555,17 @@ L_FILE_CHDIR: // OP_FILE_CHDIR - Change working directory (path -> void)
 L_FILE_ABSPATH: // OP_FILE_ABSPATH - Get absolute path (path -> string)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: abspath() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     char resolved[PATH_MAX];
-    
+
     if (realpath(path, resolved) != NULL)
     {
         value_free(path_val);
@@ -4102,19 +4582,19 @@ L_FILE_ABSPATH: // OP_FILE_ABSPATH - Get absolute path (path -> string)
 L_FILE_BASENAME: // OP_FILE_BASENAME - Get basename (path -> string)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: basename() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     char *path_copy = strdup(path);
     char *base = basename(path_copy);
     char *result = strdup(base);
-    
+
     free(path_copy);
     value_free(path_val);
     vm_push(vm, value_make_str(result));
@@ -4124,19 +4604,19 @@ L_FILE_BASENAME: // OP_FILE_BASENAME - Get basename (path -> string)
 L_FILE_DIRNAME: // OP_FILE_DIRNAME - Get directory name (path -> string)
 {
     Value path_val = vm_pop(vm);
-    
+
     if (path_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: dirname() expects string\n");
         value_free(path_val);
         exit(1);
     }
-    
+
     const char *path = path_val.as.str;
     char *path_copy = strdup(path);
     char *dir = dirname(path_copy);
     char *result = strdup(dir);
-    
+
     free(path_copy);
     value_free(path_val);
     vm_push(vm, value_make_str(result));
@@ -4146,14 +4626,14 @@ L_FILE_DIRNAME: // OP_FILE_DIRNAME - Get directory name (path -> string)
 L_FILE_JOIN: // OP_FILE_JOIN - Join paths (list -> string)
 {
     Value list_val = vm_pop(vm);
-    
+
     if (list_val.type != VAL_LIST)
     {
         fprintf(stderr, "Runtime error: pathjoin() expects list\n");
         value_free(list_val);
         exit(1);
     }
-    
+
     List *list = list_val.as.list;
     if (list->length == 0)
     {
@@ -4161,7 +4641,7 @@ L_FILE_JOIN: // OP_FILE_JOIN - Join paths (list -> string)
         vm_push(vm, value_make_str(strdup("")));
         DISPATCH();
     }
-    
+
     // Calculate total length needed
     size_t total_len = 0;
     for (int i = 0; i < list->length; i++)
@@ -4172,10 +4652,10 @@ L_FILE_JOIN: // OP_FILE_JOIN - Join paths (list -> string)
         }
     }
     total_len += list->length; // For path separators and null terminator
-    
+
     char *result = malloc(total_len);
     result[0] = '\0';
-    
+
     for (int i = 0; i < list->length; i++)
     {
         if (list->items[i].type == VAL_STR)
@@ -4187,7 +4667,7 @@ L_FILE_JOIN: // OP_FILE_JOIN - Join paths (list -> string)
             strcat(result, list->items[i].as.str);
         }
     }
-    
+
     value_free(list_val);
     vm_push(vm, value_make_str(result));
     DISPATCH();
@@ -4197,7 +4677,7 @@ L_SOCKET_CREATE: // OP_SOCKET_CREATE - Create socket (family, type -> sock_id)
 {
     Value type_val = vm_pop(vm);
     Value family_val = vm_pop(vm);
-    
+
     if (family_val.type != VAL_STR || type_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: socket() expects (string, string)\n");
@@ -4205,24 +4685,24 @@ L_SOCKET_CREATE: // OP_SOCKET_CREATE - Create socket (family, type -> sock_id)
         value_free(type_val);
         exit(1);
     }
-    
+
     const char *family_str = family_val.as.str;
     const char *type_str = type_val.as.str;
-    
+
     int family = AF_INET;
     if (strcasecmp(family_str, "inet6") == 0)
         family = AF_INET6;
     else if (strcasecmp(family_str, "unix") == 0)
         family = AF_UNIX;
-    
+
     int type = SOCK_STREAM;
     if (strcasecmp(type_str, "dgram") == 0)
         type = SOCK_DGRAM;
     else if (strcasecmp(type_str, "raw") == 0)
         type = SOCK_RAW;
-    
+
     int sock = socket(family, type, 0);
-    
+
     value_free(family_val);
     value_free(type_val);
     vm_push(vm, value_make_int_si(sock));
@@ -4234,7 +4714,7 @@ L_SOCKET_CONNECT: // OP_SOCKET_CONNECT - Connect socket (sock_id, host, port -> 
     Value port_val = vm_pop(vm);
     Value host_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT || host_val.type != VAL_STR || port_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: connect() expects (int, string, int)\n");
@@ -4243,18 +4723,18 @@ L_SOCKET_CONNECT: // OP_SOCKET_CONNECT - Connect socket (sock_id, host, port -> 
         value_free(port_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     const char *host = host_val.as.str;
     int port = (int)port_val.as.int64;
-    
+
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, host, &addr.sin_addr);
-    
+
     connect(sock, (struct sockaddr*)&addr, sizeof(addr));
-    
+
     value_free(sock_val);
     value_free(host_val);
     value_free(port_val);
@@ -4266,7 +4746,7 @@ L_SOCKET_BIND: // OP_SOCKET_BIND - Bind socket (sock_id, host, port -> void)
     Value port_val = vm_pop(vm);
     Value host_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT || host_val.type != VAL_STR || port_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: bind() expects (int, string, int)\n");
@@ -4275,18 +4755,18 @@ L_SOCKET_BIND: // OP_SOCKET_BIND - Bind socket (sock_id, host, port -> void)
         value_free(port_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     const char *host = host_val.as.str;
     int port = (int)port_val.as.int64;
-    
+
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, host, &addr.sin_addr);
-    
+
     bind(sock, (struct sockaddr*)&addr, sizeof(addr));
-    
+
     value_free(sock_val);
     value_free(host_val);
     value_free(port_val);
@@ -4297,7 +4777,7 @@ L_SOCKET_LISTEN: // OP_SOCKET_LISTEN - Listen on socket (sock_id, backlog -> voi
 {
     Value backlog_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT || backlog_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: listen() expects (int, int)\n");
@@ -4305,12 +4785,12 @@ L_SOCKET_LISTEN: // OP_SOCKET_LISTEN - Listen on socket (sock_id, backlog -> voi
         value_free(backlog_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     int backlog = (int)backlog_val.as.int64;
-    
+
     listen(sock, backlog);
-    
+
     value_free(sock_val);
     value_free(backlog_val);
     DISPATCH();
@@ -4319,17 +4799,17 @@ L_SOCKET_LISTEN: // OP_SOCKET_LISTEN - Listen on socket (sock_id, backlog -> voi
 L_SOCKET_ACCEPT: // OP_SOCKET_ACCEPT - Accept connection (sock_id -> client_sock_id)
 {
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: accept() expects int\n");
         value_free(sock_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     int client = accept(sock, NULL, NULL);
-    
+
     value_free(sock_val);
     vm_push(vm, value_make_int_si(client));
     DISPATCH();
@@ -4339,7 +4819,7 @@ L_SOCKET_SEND: // OP_SOCKET_SEND - Send data (sock_id, data -> bytes_sent)
 {
     Value data_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT || data_val.type != VAL_STR)
     {
         fprintf(stderr, "Runtime error: send() expects (int, string)\n");
@@ -4347,11 +4827,11 @@ L_SOCKET_SEND: // OP_SOCKET_SEND - Send data (sock_id, data -> bytes_sent)
         value_free(data_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     const char *data = data_val.as.str;
     int sent = send(sock, data, strlen(data), 0);
-    
+
     value_free(sock_val);
     value_free(data_val);
     vm_push(vm, value_make_int_si(sent));
@@ -4362,7 +4842,7 @@ L_SOCKET_RECV: // OP_SOCKET_RECV - Receive data (sock_id, size -> string)
 {
     Value size_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT || size_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: recv() expects (int, int)\n");
@@ -4370,15 +4850,15 @@ L_SOCKET_RECV: // OP_SOCKET_RECV - Receive data (sock_id, size -> string)
         value_free(size_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     int size = (int)size_val.as.int64;
-    
+
     char *buffer = malloc(size + 1);
     int received = recv(sock, buffer, size, 0);
     if (received < 0) received = 0;
     buffer[received] = '\0';
-    
+
     value_free(sock_val);
     value_free(size_val);
     vm_push(vm, value_make_str(buffer));
@@ -4388,17 +4868,17 @@ L_SOCKET_RECV: // OP_SOCKET_RECV - Receive data (sock_id, size -> string)
 L_SOCKET_CLOSE: // OP_SOCKET_CLOSE - Close socket (sock_id -> void)
 {
     Value sock_val = vm_pop(vm);
-    
+
     if (sock_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: sclose() expects int\n");
         value_free(sock_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     close(sock);
-    
+
     value_free(sock_val);
     DISPATCH();
 }
@@ -4409,8 +4889,8 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
     Value option_val = vm_pop(vm);
     Value level_val = vm_pop(vm);
     Value sock_val = vm_pop(vm);
-    
-    if (sock_val.type != VAL_INT || level_val.type != VAL_STR || 
+
+    if (sock_val.type != VAL_INT || level_val.type != VAL_STR ||
         option_val.type != VAL_STR || value_val.type != VAL_INT)
     {
         fprintf(stderr, "Runtime error: setsockopt() expects (int, string, string, int)\n");
@@ -4420,18 +4900,18 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
         value_free(value_val);
         exit(1);
     }
-    
+
     int sock = (int)sock_val.as.int64;
     const char *level_str = level_val.as.str;
     const char *option_str = option_val.as.str;
     int value = (int)value_val.as.int64;
-    
+
     int level = SOL_SOCKET;
     if (strcasecmp(level_str, "IPPROTO_TCP") == 0)
         level = IPPROTO_TCP;
     else if (strcasecmp(level_str, "IPPROTO_IP") == 0)
         level = IPPROTO_IP;
-    
+
     int option = SO_REUSEADDR;
     if (strcasecmp(option_str, "SO_KEEPALIVE") == 0)
         option = SO_KEEPALIVE;
@@ -4441,9 +4921,9 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
         option = SO_RCVBUF;
     else if (strcasecmp(option_str, "SO_SNDBUF") == 0)
         option = SO_SNDBUF;
-    
+
     setsockopt(sock, level, option, &value, sizeof(value));
-    
+
     value_free(sock_val);
     value_free(level_val);
     value_free(option_val);
@@ -4980,32 +5460,32 @@ L_LOAD2_CMP_NE: // OP_LOAD2_CMP_NE
 L_PY_IMPORT: // OP_PY_IMPORT - Import a Python module (module_name -> module_object)
 {
     Value module_name_val = vm_pop(vm);
-    
+
     if (module_name_val.type != VAL_STR) {
         fprintf(stderr, "Runtime error: py_import() expects a string module name\n");
         value_free(module_name_val);
         exit(1);
     }
-    
+
     const char *module_name = module_name_val.as.str;
-    
+
     // Import the module
     PyObject *pName = PyUnicode_DecodeFSDefault(module_name);
     PyObject *pModule = PyImport_Import(pName);
     Py_DECREF(pName);
-    
+
     if (pModule == NULL) {
         PyErr_Print();
         fprintf(stderr, "Runtime error: Failed to import Python module: %s\n", module_name);
         value_free(module_name_val);
         exit(1);
     }
-    
+
     // Return module as PyObject value
     Value result;
     result.type = VAL_PYOBJECT;
     result.as.pyobj = pModule;
-    
+
     value_free(module_name_val);
     vm_push(vm, result);
     DISPATCH();
@@ -5014,24 +5494,24 @@ L_PY_IMPORT: // OP_PY_IMPORT - Import a Python module (module_name -> module_obj
 L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1, ..., argN, num_args -> result)
 {
     Value num_args_val = vm_pop(vm);
-    
+
     if (num_args_val.type != VAL_INT) {
         fprintf(stderr, "Runtime error: py_call() num_args must be an integer\n");
         value_free(num_args_val);
         exit(1);
     }
-    
+
     int num_args = (int)num_args_val.as.int64;
-    
+
     // Collect arguments
     Value args[num_args];
     for (int i = num_args - 1; i >= 0; i--) {
         args[i] = vm_pop(vm);
     }
-    
+
     Value func_name_val = vm_pop(vm);
     Value module_name_val = vm_pop(vm);
-    
+
     if (module_name_val.type != VAL_STR || func_name_val.type != VAL_STR) {
         fprintf(stderr, "Runtime error: py_call() expects string module and function names\n");
         for (int i = 0; i < num_args; i++) value_free(args[i]);
@@ -5040,15 +5520,15 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
         value_free(num_args_val);
         exit(1);
     }
-    
+
     const char *module_name = module_name_val.as.str;
     const char *func_name = func_name_val.as.str;
-    
+
     // Import module
     PyObject *pName = PyUnicode_DecodeFSDefault(module_name);
     PyObject *pModule = PyImport_Import(pName);
     Py_DECREF(pName);
-    
+
     if (pModule == NULL) {
         PyErr_Print();
         fprintf(stderr, "Runtime error: Failed to import Python module: %s\n", module_name);
@@ -5058,10 +5538,10 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
         value_free(num_args_val);
         exit(1);
     }
-    
+
     // Get function
     PyObject *pFunc = PyObject_GetAttrString(pModule, func_name);
-    
+
     if (pFunc == NULL || !PyCallable_Check(pFunc)) {
         if (PyErr_Occurred()) PyErr_Print();
         fprintf(stderr, "Runtime error: Cannot find or call function: %s.%s\n", module_name, func_name);
@@ -5073,20 +5553,20 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
         value_free(num_args_val);
         exit(1);
     }
-    
+
     // Convert arguments to Python objects
     PyObject *pArgs = PyTuple_New(num_args);
     for (int i = 0; i < num_args; i++) {
         PyObject *pValue = fr_value_to_python(args[i]);
         PyTuple_SetItem(pArgs, i, pValue);
     }
-    
+
     // Call the function
     PyObject *pResult = PyObject_CallObject(pFunc, pArgs);
     Py_DECREF(pArgs);
     Py_DECREF(pFunc);
     Py_DECREF(pModule);
-    
+
     if (pResult == NULL) {
         PyErr_Print();
         fprintf(stderr, "Runtime error: Python function call failed: %s.%s\n", module_name, func_name);
@@ -5096,11 +5576,11 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
         value_free(num_args_val);
         exit(1);
     }
-    
+
     // Convert result back to fr Value
     Value result = python_to_fr_value(pResult);
     Py_DECREF(pResult);
-    
+
     // Cleanup
     for (int i = 0; i < num_args; i++) {
         value_free(args[i]);
@@ -5108,7 +5588,7 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
     value_free(func_name_val);
     value_free(module_name_val);
     value_free(num_args_val);
-    
+
     vm_push(vm, result);
     DISPATCH();
 }
@@ -5117,27 +5597,27 @@ L_PY_GETATTR: // OP_PY_GETATTR - Get attribute from Python object (obj, attr_nam
 {
     Value attr_name_val = vm_pop(vm);
     Value obj_val = vm_pop(vm);
-    
+
     if (attr_name_val.type != VAL_STR) {
         fprintf(stderr, "Runtime error: py_getattr() attribute name must be a string\n");
         value_free(attr_name_val);
         value_free(obj_val);
         exit(1);
     }
-    
+
     if (obj_val.type != VAL_PYOBJECT) {
         fprintf(stderr, "Runtime error: py_getattr() expects a Python object\n");
         value_free(attr_name_val);
         value_free(obj_val);
         exit(1);
     }
-    
+
     const char *attr_name = attr_name_val.as.str;
     PyObject *pObj = obj_val.as.pyobj;
-    
+
     // Get attribute
     PyObject *pAttr = PyObject_GetAttrString(pObj, attr_name);
-    
+
     if (pAttr == NULL) {
         if (PyErr_Occurred()) PyErr_Print();
         fprintf(stderr, "Runtime error: Attribute not found: %s\n", attr_name);
@@ -5145,39 +5625,95 @@ L_PY_GETATTR: // OP_PY_GETATTR - Get attribute from Python object (obj, attr_nam
         value_free(obj_val);
         exit(1);
     }
-    
+
     // Convert to fr value
     Value result = python_to_fr_value(pAttr);
     Py_DECREF(pAttr);
-    
+
     value_free(attr_name_val);
     value_free(obj_val);
-    
+
     vm_push(vm, result);
     DISPATCH();
 }
 
-L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
+L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name, value -> none)
+{
+    Value value_val = vm_pop(vm);
+    Value attr_name_val = vm_pop(vm);
+    Value obj_val = vm_pop(vm);
+
+    if (attr_name_val.type != VAL_STR) {
+        fprintf(stderr, "Runtime error: py_setattr() attribute name must be a string\n");
+        value_free(value_val);
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+
+    if (obj_val.type != VAL_PYOBJECT) {
+        fprintf(stderr, "Runtime error: py_setattr() expects a Python object\n");
+        value_free(value_val);
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+
+    const char *attr_name = attr_name_val.as.str;
+    PyObject *pObj = obj_val.as.pyobj;
+
+    // Convert fr value to Python object
+    PyObject *pValue = fr_value_to_python(value_val);
+    if (pValue == NULL) {
+        fprintf(stderr, "Runtime error: Failed to convert value to Python object\n");
+        value_free(value_val);
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+
+    // Set attribute
+    int result = PyObject_SetAttrString(pObj, attr_name, pValue);
+    Py_DECREF(pValue);
+
+    if (result == -1) {
+        if (PyErr_Occurred()) PyErr_Print();
+        fprintf(stderr, "Runtime error: Failed to set attribute: %s\n", attr_name);
+        value_free(value_val);
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+
+    value_free(value_val);
+    value_free(attr_name_val);
+    value_free(obj_val);
+    
+    // Push void value (since setattr returns None)
+    Value void_val = {.type = VAL_VOID};
+    vm_push(vm, void_val);
+    DISPATCH();
+}L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
 {
     Value num_args_val = vm_pop(vm);
-    
+
     if (num_args_val.type != VAL_INT) {
         fprintf(stderr, "Runtime error: py_call_method() num_args must be an integer\n");
         value_free(num_args_val);
         exit(1);
     }
-    
+
     int num_args = (int)num_args_val.as.int64;
-    
+
     // Collect arguments
     Value args[num_args];
     for (int i = num_args - 1; i >= 0; i--) {
         args[i] = vm_pop(vm);
     }
-    
+
     Value method_name_val = vm_pop(vm);
     Value obj_val = vm_pop(vm);
-    
+
     if (method_name_val.type != VAL_STR) {
         fprintf(stderr, "Runtime error: py_call_method() method name must be a string\n");
         for (int i = 0; i < num_args; i++) value_free(args[i]);
@@ -5186,7 +5722,7 @@ L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, meth
         value_free(num_args_val);
         exit(1);
     }
-    
+
     if (obj_val.type != VAL_PYOBJECT) {
         fprintf(stderr, "Runtime error: py_call_method() expects a Python object\n");
         for (int i = 0; i < num_args; i++) value_free(args[i]);
@@ -5195,13 +5731,13 @@ L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, meth
         value_free(num_args_val);
         exit(1);
     }
-    
+
     const char *method_name = method_name_val.as.str;
     PyObject *pObj = obj_val.as.pyobj;
-    
+
     // Get method
     PyObject *pMethod = PyObject_GetAttrString(pObj, method_name);
-    
+
     if (pMethod == NULL || !PyCallable_Check(pMethod)) {
         if (PyErr_Occurred()) PyErr_Print();
         fprintf(stderr, "Runtime error: Method not found or not callable: %s\n", method_name);
@@ -5212,19 +5748,19 @@ L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, meth
         value_free(num_args_val);
         exit(1);
     }
-    
+
     // Convert arguments to Python objects
     PyObject *pArgs = PyTuple_New(num_args);
     for (int i = 0; i < num_args; i++) {
         PyObject *pValue = fr_value_to_python(args[i]);
         PyTuple_SetItem(pArgs, i, pValue);
     }
-    
+
     // Call the method
     PyObject *pResult = PyObject_CallObject(pMethod, pArgs);
     Py_DECREF(pArgs);
     Py_DECREF(pMethod);
-    
+
     if (pResult == NULL) {
         if (PyErr_Occurred()) PyErr_Print();
         fprintf(stderr, "Runtime error: Python method call failed: %s\n", method_name);
@@ -5234,11 +5770,11 @@ L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, meth
         value_free(num_args_val);
         exit(1);
     }
-    
+
     // Convert result back to fr Value
     Value result_val = python_to_fr_value(pResult);
     Py_DECREF(pResult);
-    
+
     // Cleanup
     for (int i = 0; i < num_args; i++) {
         value_free(args[i]);
@@ -5246,7 +5782,7 @@ L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, meth
     value_free(method_name_val);
     value_free(obj_val);
     value_free(num_args_val);
-    
+
     vm_push(vm, result_val);
     DISPATCH();
 }
@@ -5262,11 +5798,11 @@ int main(int argc, char **argv)
     }
     VM vm;
     vm_init(&vm);
-    
+
     // Store program arguments (skip program name and bytecode file)
     vm.prog_argc = argc - 2;  // Number of arguments after the bytecode file
     vm.prog_argv = (argc > 2) ? &argv[2] : NULL;  // Pointer to first program argument
-    
+
     if (!vm_load_bytecode(&vm, argv[1]))
     {
         return 1;

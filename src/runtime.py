@@ -307,7 +307,6 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
             var_value = vars[value].get('value')
             return var_value if var_value is not None else value
         return value
-
     # Function call
     if 'func' in node:
         func = node['func']
@@ -320,9 +319,16 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
             obj = eval_expr_node(func['value'])
             method_name = func['attr']
 
-            # If obj is a variable name, look it up
-            if isinstance(obj, str) and obj in vars:
-                obj = vars[obj].get('value')
+            # If obj is a variable name, check if it's a module alias first
+            if isinstance(obj, str):
+                if obj in py_imports:
+                    # This is a module function call: ui.Window() where ui is an imported module
+                    # Convert to py_call
+                    from builtin_funcs import funcs as builtin_funcs
+                    py_call_func = builtin_funcs['py_call']['func']
+                    return py_call_func(obj, method_name, *[eval_expr_node(arg) for arg in args]) # type: ignore
+                elif obj in vars:
+                    obj = vars[obj].get('value')
 
             if not hasattr(obj, '__dict__') and not hasattr(obj, method_name):
                 raise RuntimeError(f"Object has no method '{method_name}'")
@@ -600,12 +606,40 @@ def _execute_node_index_assign(node: dict):
 def _execute_node_field_assign(node: dict):
     """Handle struct field assignment: obj.field = value"""
     target_name = node['target']
+    
+    # Check if it's a Python module import alias
+    if target_name in py_imports:
+        # Setting attribute on a Python module
+        from builtin_funcs import funcs as builtin_funcs
+        py_call_func = builtin_funcs['py_call']['func']
+        field_name = node['field']
+        value = eval_expr(node['value'])
+        # Use setattr to set the module attribute
+        import sys
+        import_info = py_imports[target_name]
+        module_name = import_info['module']
+        
+        # Import the module to get reference
+        if module_name not in sys.modules:
+            __import__(module_name)
+        module = sys.modules[module_name]
+        setattr(module, field_name, value)
+        return
+    
     if target_name not in vars:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
     
     target = vars[target_name]['value']
+    target_type = vars[target_name]['type']
     field_name = node['field']
     value = eval_expr(node['value'])
+    
+    # Handle pyobject types using py_setattr
+    if target_type == 'pyobject':
+        from builtin_funcs import funcs as builtin_funcs
+        py_setattr_func = cast(Any, builtin_funcs['py_setattr']['func'])
+        py_setattr_func(target, field_name, value)
+        return
     
     if isinstance(target, dict) and field_name in target:
         target[field_name] = value
@@ -707,6 +741,13 @@ def run_scope(ast: AstType, level=0):
     result = None
     
     for node in ast:
+        # Handle call expressions from AST first (e.g. method calls like obj.method())
+        # These don't have a 'type' key, just 'func' and 'args'
+        if 'func' in node and 'args' in node and 'type' not in node:
+            # Execute the expression but discard the result since this is used as a statement
+            result = eval_expr(node)
+            continue
+            
         node_type = node['type']
         
         # Handle each node type

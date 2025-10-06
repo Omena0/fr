@@ -18,16 +18,97 @@ class BytecodeOptimizer:
         # Pass 1: Combine common patterns (does INC_LOCAL conversion)
         lines = self.combine_patterns(lines)
 
-        # Pass 2: Optimize variable copies (LOAD+STORE -> COPY_LOCAL_REF)
+        # Pass 2: Merge consecutive constant instructions
+        lines = self.merge_constants(lines)
+
+        # Pass 3: Optimize variable copies (LOAD+STORE -> COPY_LOCAL_REF)
         lines = self.optimize_variable_copies(lines)
 
-        # Pass 3: Remove redundant LOAD/STORE pairs
+        # Pass 4: Remove redundant LOAD/STORE pairs
         lines = self.remove_redundant_loads(lines)
 
-        # Pass 4: Remove dead stores
+        # Pass 5: Remove dead stores
         lines = self.remove_dead_stores(lines)
 
         return '\n'.join(lines)
+
+    def merge_constants(self, lines: List[str]) -> List[str]:
+        """
+        Merge consecutive constant instructions into multi-arg versions.
+        E.g., CONST_I64 1, CONST_I64 2 -> CONST_I64 1 2
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+
+            # Check for consecutive CONST_I64 instructions
+            if line.startswith('CONST_I64 '):
+                constants = [line.split('CONST_I64 ', 1)[1]]
+                j = i + 1
+                
+                # Collect consecutive CONST_I64 instructions
+                while j < len(lines) and lines[j].strip().startswith('CONST_I64 '):
+                    constants.append(lines[j].strip().split('CONST_I64 ', 1)[1])
+                    j += 1
+                
+                # Only merge if we have 2 or more
+                if len(constants) >= 2:
+                    result.append(f"{indent}CONST_I64 {' '.join(constants)}")
+                    i = j
+                    continue
+
+            # Check for consecutive CONST_F64 instructions
+            if line.startswith('CONST_F64 '):
+                constants = [line.split('CONST_F64 ', 1)[1]]
+                j = i + 1
+                
+                while j < len(lines) and lines[j].strip().startswith('CONST_F64 '):
+                    constants.append(lines[j].strip().split('CONST_F64 ', 1)[1])
+                    j += 1
+                
+                if len(constants) >= 2:
+                    result.append(f"{indent}CONST_F64 {' '.join(constants)}")
+                    i = j
+                    continue
+
+            # Check for consecutive CONST_BOOL instructions
+            if line.startswith('CONST_BOOL '):
+                constants = [line.split('CONST_BOOL ', 1)[1]]
+                j = i + 1
+                
+                while j < len(lines) and lines[j].strip().startswith('CONST_BOOL '):
+                    constants.append(lines[j].strip().split('CONST_BOOL ', 1)[1])
+                    j += 1
+                
+                if len(constants) >= 2:
+                    result.append(f"{indent}CONST_BOOL {' '.join(constants)}")
+                    i = j
+                    continue
+
+            # Check for consecutive CONST_STR instructions
+            # Note: These need special handling due to quoted strings
+            if line.startswith('CONST_STR "'):
+                constants = []
+                j = i
+                
+                while j < len(lines) and lines[j].strip().startswith('CONST_STR "'):
+                    # Extract the quoted string (everything after 'CONST_STR ')
+                    const_str = lines[j].strip()[10:]  # len('CONST_STR ') = 10
+                    constants.append(const_str)
+                    j += 1
+                
+                if len(constants) >= 2:
+                    result.append(f"{indent}CONST_STR {' '.join(constants)}")
+                    i = j
+                    continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
 
     def optimize_variable_copies(self, lines: List[str]) -> List[str]:
         """
@@ -52,15 +133,9 @@ class BytecodeOptimizer:
 
                 # Don't optimize if it's the same variable (handled by other pass)
                 if src_var != dst_var:
-                    # Check if this is safe: look ahead to see if dst is used before being reassigned
-                    # For simplicity, use COPY_LOCAL_REF for common safe pattern: shifting values
-                    # (like a=b, b=c in fibonacci)
-                    
-                    # Simple heuristic: if the next few instructions don't modify src,
-                    # and dst is only used after being reassigned, it's safe
-                    is_safe = self._is_copy_ref_safe(lines, i+2, src_var, dst_var)
-                    
-                    if is_safe:
+                    if is_safe := self._is_copy_ref_safe(
+                        lines, i + 2, src_var, dst_var
+                    ):
                         result.append(f"{indent}COPY_LOCAL_REF {src_var} {dst_var}")
                     else:
                         result.append(f"{indent}COPY_LOCAL {src_var} {dst_var}")
@@ -79,15 +154,19 @@ class BytecodeOptimizer:
         """
         for i in range(start_idx, min(start_idx + lookahead, len(lines))):
             line = lines[i].strip()
-            
+
             # If we hit a label or control flow, be conservative
             if line.startswith('LABEL ') or line.startswith('JUMP'):
                 return False
-            
+
             # If dst is stored to again, it's safe (old alias is replaced)
-            if line.startswith(f'STORE {dst_var}') or line.startswith(f'COPY_LOCAL_REF ') and dst_var in line:
+            if (
+                line.startswith(f'STORE {dst_var}')
+                or line.startswith('COPY_LOCAL_REF ')
+                and dst_var in line
+            ):
                 return True
-            
+
             # If dst is loaded for an operation, we need to copy (not safe for ref)
             if line.startswith(f'LOAD {dst_var}'):
                 # Check if next instruction modifies it
@@ -96,11 +175,11 @@ class BytecodeOptimizer:
                     # If it's used in arithmetic, we need deep copy
                     if any(next_line.startswith(op) for op in ['ADD', 'SUB', 'MUL', 'DIV', 'MOD']):
                         return False
-            
+
             # If src is modified, the alias becomes invalid
             if line.startswith(f'STORE {src_var}'):
                 return False
-        
+
         # Default: be conservative
         return False
 
@@ -179,6 +258,20 @@ class BytecodeOptimizer:
                     i += 4
                     continue
 
+            # Pattern: Multiple ADD_CONST_I64 -> ADD_CONST_I64 with multiple values
+            if line.startswith('ADD_CONST_I64 '):
+                constants = [line.split('ADD_CONST_I64 ', 1)[1]]
+                j = i + 1
+                
+                while j < len(lines) and lines[j].strip().startswith('ADD_CONST_I64 '):
+                    constants.append(lines[j].strip().split('ADD_CONST_I64 ', 1)[1])
+                    j += 1
+                
+                if len(constants) >= 2:
+                    result.append(f"{indent}ADD_CONST_I64 {' '.join(constants)}")
+                    i = j
+                    continue
+
             # Pattern: CONST_I64 N, ADD_I64 -> ADD_CONST_I64 N
             if (i + 1 < len(lines) and
                 line.startswith('CONST_I64 ') and
@@ -219,6 +312,56 @@ class BytecodeOptimizer:
                 i += 2
                 continue
 
+            # Pattern: CONST_BOOL N, AND -> AND_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_BOOL ') and
+                lines[i+1].strip() == 'AND'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}AND_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_BOOL N, OR -> OR_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_BOOL ') and
+                lines[i+1].strip() == 'OR'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}OR_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, AND_I64 -> AND_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'AND_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}AND_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, OR_I64 -> OR_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'OR_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}OR_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, XOR_I64 -> XOR_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'XOR_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}XOR_CONST_I64 {const_val}")
+                i += 2
+                continue
+
             # Pattern: LOAD N, LOAD N -> LOAD N, DUP
             if (i + 1 < len(lines) and
                 line.startswith('LOAD ') and
@@ -228,8 +371,7 @@ class BytecodeOptimizer:
                 var2 = lines[i+1].strip().split()[1]
 
                 if var1 == var2:
-                    result.append(lines[i])
-                    result.append(f"{indent}DUP")
+                    result.extend((lines[i], f"{indent}DUP"))
                     i += 2
                     continue
 
@@ -341,7 +483,7 @@ class BytecodeOptimizer:
                 while j < len(lines) and lines[j].strip().startswith('LOAD '):
                     loads.append(lines[j].strip().split()[1])
                     j += 1
-                
+
                 # Check if this is exactly 2 LOADs followed by a fusable operation
                 fusable_ops = {'ADD_I64', 'SUB_I64', 'MUL_I64', 'CMP_LT', 'CMP_GT', 'CMP_LE', 'CMP_GE', 'CMP_EQ', 'CMP_NE'}
                 if len(loads) == 2 and j < len(lines) and lines[j].strip() in fusable_ops:
@@ -359,11 +501,11 @@ class BytecodeOptimizer:
             if stripped_line.startswith('LOAD ') and len(stripped_line.split()) == 3:  # LOAD with exactly 2 args
                 parts = stripped_line.split()
                 var1, var2 = parts[1], parts[2]
-                
+
                 # Check what operation follows
                 if i + 1 < len(lines):
                     next_op = lines[i+1].strip()
-                    
+
                     if next_op == 'ADD_I64':
                         result.append(f"{indent}LOAD2_ADD_I64 {var1} {var2}")
                         i += 2
@@ -414,7 +556,7 @@ class BytecodeOptimizer:
                     dst = lines[j+1].strip().split()[1]
                     pairs.append((src, dst))
                     j += 2
-                
+
                 # If we found 2 or more pairs, use FUSED_LOAD_STORE
                 if len(pairs) >= 2:
                         # Build the fused instruction

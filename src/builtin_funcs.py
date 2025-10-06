@@ -252,15 +252,9 @@ def _py_call(module_name: str, func_name: str, *args):
         if module_name in runtime_module.py_imports:
             import_info = runtime_module.py_imports[module_name]
             if import_info.get('type') == 'name':
-                # For "from module import name", use the actual module and imported name
-                actual_module = import_info['module']
                 import_name = import_info['name']
-                module_name = actual_module
                 func_name = import_name
-            else:
-                # For "import module as alias", resolve alias to actual module
-                module_name = import_info['module']
-    
+            module_name = import_info['module']
     # Import module if not already cached
     if module_name not in _python_modules:
         _py_import(module_name)
@@ -329,6 +323,16 @@ def _py_getattr(obj, attr_name: str):
         raise RuntimeError(f"Object has no attribute '{attr_name}'") from e
     except Exception as e:
         raise RuntimeError(f"Error accessing attribute '{attr_name}': {e}") from e
+
+def _py_setattr(obj, attr_name: str, value):
+    """Set an attribute on a Python object"""
+    try:
+        setattr(obj, attr_name, value)
+        return None
+    except AttributeError as e:
+        raise RuntimeError(f"Cannot set attribute '{attr_name}' on object") from e
+    except Exception as e:
+        raise RuntimeError(f"Error setting attribute '{attr_name}': {e}") from e
 
 def _py_call_method(obj, method_name: str, *args):
     """Call a method on a Python object"""
@@ -925,6 +929,14 @@ funcs:dict[ # Holy type annotations
         "args": {},  # Variable arguments: (object, attribute_name)
         "func": _py_getattr,
         "return_type": "any",
+        "can_eval": False,
+        "variadic": True
+    },
+    'py_setattr': {
+        "type": "builtin",
+        "args": {},  # Variable arguments: (object, attribute_name, value)
+        "func": _py_setattr,
+        "return_type": "none",
         "can_eval": False,
         "variadic": True
     },

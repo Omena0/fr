@@ -1057,6 +1057,17 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
         if word in funcs and stream.peek_char(1) == '(':
             return parse_func_call(stream, word)
 
+        # Handle expression statements like obj.method() or obj.attr.method()
+        elif '.' in word and stream.peek_char(1) == '(':
+            # This is a method call on an object - parse the full expression
+            full_expr = word + stream.consume_until('\n').strip()
+            parsed = parse_expr(full_expr)
+            # If it's a call expression (has 'func' key), return it as a statement
+            if isinstance(parsed, dict) and 'func' in parsed:
+                return parsed
+            # Otherwise, this might be an error
+            raise SyntaxError(stream.format_error(f'Invalid expression statement'))
+
         elif stream.peek(1) == '[':
             stream.consume('[')
             index_expr = stream.consume_until(']')
