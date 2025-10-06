@@ -611,7 +611,6 @@ def _execute_node_field_assign(node: dict):
     if target_name in py_imports:
         # Setting attribute on a Python module
         from builtin_funcs import funcs as builtin_funcs
-        py_call_func = builtin_funcs['py_call']['func']
         field_name = node['field']
         value = eval_expr(node['value'])
         # Use setattr to set the module attribute
