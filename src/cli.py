@@ -219,7 +219,7 @@ def main():
         print("                                    -c: Force C backend compilation")
         print("                                   -py: Force Python backend runtime")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
-        print("  fr compile <source.fr> [-o out.bc] - Compile to bytecode")
+        print("  fr compile <ast.json|ast.bin> [-o out.bc] - Compile AST to bytecode")
         print("  fr run <file>                   - Run file (auto-detect type)")
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")
