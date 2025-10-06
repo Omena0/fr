@@ -1,0 +1,13 @@
+// !
+
+py_import math
+py_import random
+
+void main() {
+    int rand_val = py_call("random", "randint", 1, 10)
+    if (rand_val >= 1) {
+        if (rand_val <= 10) {
+            println("")
+        }
+    }
+}

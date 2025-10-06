@@ -1,0 +1,16 @@
+// !date: 2025-10-06
+// !time: 12:30:45
+
+py_import datetime
+
+void main() {
+    pyobject dt = py_call("datetime", "datetime", 2025, 10, 6, 12, 30, 45)
+    
+    pyobject date_part = dt.date()
+    string date_str = date_part.isoformat()
+    println("date: " + date_str)
+    
+    pyobject time_part = dt.time()
+    string time_str = time_part.isoformat()
+    println("time: " + time_str)
+}

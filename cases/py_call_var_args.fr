@@ -1,0 +1,13 @@
+// !test1: 1
+// !test2: 2
+
+py_import math
+
+void main() {
+    float val = 1.5
+    int result1 = py_call("math", "floor", val)
+    println("test1: " + str(result1))
+    
+    int result2 = py_call("math", "ceil", val)
+    println("test2: " + str(result2))
+}

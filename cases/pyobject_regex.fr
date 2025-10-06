@@ -1,0 +1,22 @@
+// !True
+// !False
+
+py_import re
+
+void main() {
+    pyobject pattern = py_call("re", "compile", "[0-9]+")
+    
+    pyobject match1 = py_call_method(pattern, "match", "123abc")
+    if (match1) {
+        println("True")
+    } else {
+        println("False")
+    }
+    
+    pyobject match2 = py_call_method(pattern, "match", "abc123")
+    if (match2) {
+        println("True")
+    } else {
+        println("False")
+    }
+}

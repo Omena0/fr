@@ -1,0 +1,15 @@
+// !3.0
+// !4.0
+// !5.0
+
+py_import math
+
+void main() {
+    for (i in 0..3) {
+        for (j in 0..1) {
+            float val = float((i + 3) * (i + 3))
+            float result = py_call("math", "sqrt", val)
+            println(str(result))
+        }
+    }
+}

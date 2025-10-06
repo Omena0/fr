@@ -1,0 +1,9 @@
+// !StringIO
+
+py_import io
+
+void main() {
+    pyobject string_io = py_call("io", "StringIO")
+    string class_name = py_getattr(py_getattr(string_io, "__class__"), "__name__")
+    println(class_name)
+}

@@ -18,6 +18,10 @@ builtin_func_names = set(funcs.keys())
 # Lock for thread-safe access to global state during parallel test execution
 _runtime_lock = threading.Lock()
 
+# Track Python imports for alias resolution
+# Maps alias/name -> {'module': str, 'type': 'module'|'name', 'name': str (optional)}
+py_imports: dict[str, dict[str, Any]] = {}
+
 # Constants for magic strings
 NODE_TYPE_STRUCT_DEF = 'struct_def'
 NODE_TYPE_BUILTIN = 'builtin'
@@ -36,6 +40,7 @@ NODE_TYPE_RETURN = 'return'
 NODE_TYPE_INDEX_ASSIGN = 'index_assign'
 NODE_TYPE_FIELD_ASSIGN = 'field_assign'
 NODE_TYPE_STRING = 'string'
+NODE_TYPE_PY_IMPORT = 'py_import'
 
 # Control flow exceptions for break/continue
 class BreakException(Exception):
@@ -60,9 +65,7 @@ def is_ast_node(obj: Any) -> bool:
 def extract_value(node: Any) -> Any:
     """Extract the actual value from an AST node or return the value as-is"""
     if isinstance(node, dict):
-        if 'value' in node:
-            return node['value']
-        return node
+        return node['value'] if 'value' in node else node
     return node
 
 def ensure_int(value: Any, context: str = "value") -> int:
@@ -72,22 +75,19 @@ def ensure_int(value: Any, context: str = "value") -> int:
     if isinstance(value, (float, str, bool)):
         try:
             return int(value)
-        except (ValueError, TypeError):
-            raise RuntimeError(f"{context} must be numeric, got {type(value).__name__}")
+        except (ValueError, TypeError) as e:
+            raise RuntimeError(
+                f"{context} must be numeric, got {type(value).__name__}"
+            ) from e
     raise RuntimeError(f"{context} must be numeric, not {type(value).__name__}")
 
 def _create_struct_instance(struct_def: dict, args: list) -> dict:
     """Create an instance of a struct from constructor arguments"""
     fields = struct_def['fields']
-    instance = {}
-    
-    for i, field in enumerate(fields):
-        if i < len(args):
-            instance[field['name']] = extract_value(args[i])
-        else:
-            instance[field['name']] = None
-    
-    return instance
+    return {
+        field['name']: extract_value(args[i]) if i < len(args) else None
+        for i, field in enumerate(fields)
+    }
 
 def _process_function_arg(arg: Any, old_vars: dict) -> Any:
     """Process a single function argument, extracting its value"""
@@ -130,6 +130,7 @@ def _bind_function_args(func_args: list, arg_values: list):
             }
 
 def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
+    # sourcery skip: avoid-builtin-shadow
     from parser import cast_args
     global vars, runtime
     old_vars = vars
@@ -157,24 +158,23 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
 
     # Bind function arguments to the scope
     if isinstance(func.get('args'), list):
-        _bind_function_args(func['args'], processed_args)
+        _bind_function_args(cast(list, func['args']), processed_args)
 
     # Execute builtin or user-defined function
     if func['type'] == NODE_TYPE_BUILTIN and callable(func['func']):
         out = func['func'](*processed_args)
-        vars = old_vars
-        return out
     else:
         func_body = func['func']
         if not isinstance(func_body, list):
             raise RuntimeError('Invalid function definition.')
-        
+
         if not all(isinstance(item, dict) for item in func_body):
             raise RuntimeError('Invalid function body.')
 
         out = run_scope(cast(AstType, func_body), level+1)
-        vars = old_vars
-        return out
+
+    vars = old_vars
+    return out
 
 class CompiletimeEvalException(Exception): ...
 
@@ -183,13 +183,13 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
     # Ensure index is numeric
     if not isinstance(index, int):
         index = ensure_int(index, "Index")
-    
+
     if isinstance(target, (list, str)):
         try:
             return target[index]
         except (IndexError, TypeError) as e:
-            raise RuntimeError(f"Index error: {e}")
-    
+            raise RuntimeError(f"Index error: {e}") from e
+
     raise RuntimeError(f"Cannot index into type {type(target).__name__}")
 
 def _handle_list_indexing(node: dict) -> Any:
@@ -208,21 +208,38 @@ def _handle_list_indexing(node: dict) -> Any:
     return _get_indexed_value(target, index)
 
 def _handle_field_access(node: dict) -> Any:
-    """Handle struct field access: obj.field"""
+    """Handle struct field access or Python object attribute access: obj.field"""
     target = eval_expr_node(node['value'])
     field_name = node['attr']
-    
+
     # If target is a variable name, look it up
     if isinstance(target, str) and target in vars:
         obj = vars[target].get('value')
+
+        # Check if it's a Python object
+        if hasattr(obj, '__dict__') or hasattr(obj, field_name):
+            # Python object - use getattr
+            try:
+                return getattr(obj, field_name)
+            except AttributeError as e:
+                raise RuntimeError(f"Python object has no attribute '{field_name}'") from e
+
+        # Struct field access
         if isinstance(obj, dict) and field_name in obj:
             return obj[field_name]
         raise RuntimeError(f"Object '{target}' has no field '{field_name}'")
-    
+
+    # If target is a Python object directly, access the attribute
+    if hasattr(target, '__dict__') or hasattr(target, field_name):
+        try:
+            return getattr(target, field_name)
+        except AttributeError as exc:
+            raise RuntimeError(f"Python object has no attribute '{field_name}'") from exc
+
     # If target is already an object (dict), access the field
     if isinstance(target, dict) and field_name in target:
         return target[field_name]
-    
+
     raise RuntimeError(f"Cannot access field '{field_name}' on {target}")
 
 def _handle_fstring(node: dict) -> str:
@@ -247,23 +264,23 @@ def _handle_unary_op(node: dict) -> Any:
     """Handle unary operations (-, +, not)"""
     operand = eval_expr_node(node.get('operand', {}))
     op = node['op']
-    
-    if op == 'USub':
-        if isinstance(operand, (int, float)):
-            return -operand
-        raise RuntimeError(f"Cannot negate {type(operand).__name__}")
+
+    if op == 'Not':
+        return not operand
+
     elif op == 'UAdd':
         if isinstance(operand, (int, float)):
             return +operand
         raise RuntimeError(f"Cannot apply unary + to {type(operand).__name__}")
-    elif op == 'Not':
-        return not operand
-    
+    elif op == 'USub':
+        if isinstance(operand, (int, float)):
+            return -operand
+        raise RuntimeError(f"Cannot negate {type(operand).__name__}")
     return operand
 
 def eval_expr_node(node) -> int|float|bool|str|None|Any:
     from parser import get_type
-    
+
     if not isinstance(node, dict):
         return node
 
@@ -280,7 +297,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         return _handle_list_indexing(node)
 
     # F-string (JoinedStr node)
-    if 'values' in node and not ('left' in node or 'op' in node):
+    if 'values' in node and 'left' not in node and 'op' not in node:
         return _handle_fstring(node)
 
     # Variable reference
@@ -295,7 +312,28 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     if 'func' in node:
         func = node['func']
         args = node['args']
-        
+
+        # Check if this is a method call (obj.method())
+        if isinstance(func, dict) and 'attr' in func and 'value' in func:
+            # This is a method call: obj.method(args)
+            # Get the object
+            obj = eval_expr_node(func['value'])
+            method_name = func['attr']
+
+            # If obj is a variable name, look it up
+            if isinstance(obj, str) and obj in vars:
+                obj = vars[obj].get('value')
+
+            if not hasattr(obj, '__dict__') and not hasattr(obj, method_name):
+                raise RuntimeError(f"Object has no method '{method_name}'")
+
+            # Python object - call method directly
+            method = getattr(obj, method_name)
+            if not callable(method):
+                raise RuntimeError(f"'{method_name}' is not a callable method")
+            evaluated_args = [eval_expr_node(arg) for arg in args]
+            return method(*evaluated_args)
+        # Regular function call
         # Prepare arguments
         new_args = []
         for arg in args:
@@ -309,7 +347,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
                 arg = eval_expr_node(arg)
                 arg = {"value": arg, "type": get_type(arg)}
             new_args.append({"value": arg['value'], "type": get_type(arg['value'])})
-        
+
         # Get function name
         func_id = func.get('id') if isinstance(func, dict) else func
         if isinstance(func_id, str):
@@ -319,7 +357,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     # Binary expression (left op right)
     if 'left' in node:
         return eval_expr(node)
-    
+
     # Boolean operations (And, Or) with multiple values
     if 'op' in node and 'values' in node and node['op'] in ('And', 'Or'):
         return eval_expr(node)
@@ -344,7 +382,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     if isinstance(node, dict):
         # Check if it looks like a struct instance (no AST keys like 'func', 'op', 'args', etc.)
         ast_keys = {'func', 'op', 'ops', 'left', 'right', 'args', 'type', 'id', 'attr', 'slice', 'value', 'values'}
-        if not any(key in node for key in ast_keys):
+        if all(key not in node for key in ast_keys):
             # Looks like a struct instance - return as-is
             return node
         if 'mods' in node:
@@ -381,18 +419,17 @@ def eval_expr_calc(left, op, right):
     elif op == 'BitOr':
         return left | right
 
-    # Math
-    elif op == 'Add' or op == '+':
+    elif op in ['Add', '+']:
         return left + right
-    elif op == 'Sub' or op == '-':
+    elif op in ['Sub', '-']:
         return left - right
-    elif op == 'Mult' or op == '*':
+    elif op in ['Mult', '*']:
         return left * right
-    elif op == 'Div' or op == '/':
+    elif op in ['Div', '/']:
         return left / right
-    elif op == 'Pow' or op == '**':
+    elif op in ['Pow', '**']:
         return left** right
-    elif op == 'Mod' or op == '%':
+    elif op in ['Mod', '%']:
         return left % right
     else:
         raise RuntimeError(f'Invalid operator: {op}')
@@ -423,15 +460,12 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
         ops = [expr['op']]
         if 'operand' in expr:
             return _handle_unary_op(expr)
-        else:
-            left = eval_expr_node(expr['values'][0])
-            comps = expr['values'][1:]
-    # Handle comparison chains
+        left = eval_expr_node(expr['values'][0])
+        comps = expr['values'][1:]
     elif 'ops' in expr:
         left = eval_expr_node(expr['left'])
         ops = expr['ops']
         comps = expr['comparators']
-    # Handle binary operations
     elif 'op' in expr:
         left = eval_expr_node(expr['left'])
         ops = [expr['op']]
@@ -442,7 +476,7 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
     # Evaluate comparison/operation chain
     for op, comp in zip(ops, comps):
         comp = eval_expr_node(comp)
-        
+
         # Resolve variable references
         if isinstance(left, str) and left in vars:
             left_old = left
@@ -455,9 +489,9 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
 
         try:
             left = eval_expr_calc(left, op, comp)
-        except:
+        except Exception as e:
             if isinstance(left, str):
-                raise SyntaxError(f'{left} is not defined.')
+                raise SyntaxError(f'{left} is not defined.') from e
 
     return left
 
@@ -490,6 +524,35 @@ def _execute_node_struct_def(node: dict):
         "type": NODE_TYPE_STRUCT_DEF,
         "fields": node['fields']
     }
+
+def _execute_node_py_import(node: dict):
+    """Handle py_import node"""
+    module_name = node.get('module', '')
+    alias = node.get('alias')
+    name = node.get('name')
+    
+    if not module_name:
+        return
+    
+    # Call the py_import builtin to import the module
+    run_func('py_import', [module_name])
+    
+    # Track the import for alias resolution
+    if name:
+        # "from module py_import name" or "from module py_import name as alias"
+        key = alias if alias else name
+        py_imports[key] = {
+            'module': module_name,
+            'type': 'name',
+            'name': name
+        }
+    else:
+        # "py_import module" or "py_import module as alias"
+        key = alias if alias else module_name
+        py_imports[key] = {
+            'module': module_name,
+            'type': 'module'
+        }
 
 def _execute_node_var(node: dict):
     """Handle variable declaration node"""
@@ -553,23 +616,20 @@ def _execute_node_if(node: dict) -> Any:
     """Handle if/elif/else statement"""
     if eval_expr(node['condition']):
         return run_scope(node['scope'])
-    
+
     # Try elif branches
     if node['elifs']:
         for elif_node in node['elifs']:
             if eval_expr(elif_node['condition']):
                 return run_scope(elif_node['scope'])
-    
+
     # Execute else if present
-    if node['else']:
-        return run_scope(node['else'])
-    
-    return None
+    return run_scope(node['else']) if node['else'] else None
 
 def _execute_node_switch(node: dict) -> Any:
     """Handle switch statement"""
     switch_value = eval_expr(node['expr'])
-    
+
     # Try to match against each case
     for case in node['cases']:
         for case_val_node in case['values']:
@@ -577,12 +637,9 @@ def _execute_node_switch(node: dict) -> Any:
             if switch_value == case_val:
                 # Execute the case body and return immediately
                 return run_scope(case['body'])
-    
+
     # Execute default if no match
-    if node['default']:
-        return run_scope(node['default'])
-    
-    return None
+    return run_scope(node['default']) if node['default'] else None
 
 def _execute_node_for(node: dict, level: int):
     """Handle for loop with range"""
@@ -657,6 +714,8 @@ def run_scope(ast: AstType, level=0):
             _execute_node_function(node, level)
         elif node_type == NODE_TYPE_STRUCT_DEF:
             _execute_node_struct_def(node)
+        elif node_type == NODE_TYPE_PY_IMPORT:
+            _execute_node_py_import(node)
         elif node_type == NODE_TYPE_VAR:
             _execute_node_var(node)
         elif node_type == NODE_TYPE_INDEX_ASSIGN:
@@ -697,11 +756,13 @@ def run_scope(ast: AstType, level=0):
 def run(ast:AstType):
     # Use lock to prevent race conditions in parallel test execution
     with _runtime_lock:
-        global vars, runtime, funcs
+        global vars, runtime, funcs, py_imports
         
         runtime = True
         # Reset vars to clear any state from previous runs (critical for parallel test execution)
         vars.clear()
+        # Reset py_imports to clear any import aliases from previous runs
+        py_imports.clear()
         # Reset funcs to only include builtin functions (remove user-defined functions from previous runs)
         # Remove any functions that are not in the original builtin set
         user_func_names = [name for name in funcs.keys() if name not in builtin_func_names]

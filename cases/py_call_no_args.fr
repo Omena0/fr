@@ -1,0 +1,11 @@
+// !success
+
+py_import os
+
+void main() {
+    string result = py_call("os", "getcwd")
+    int len_val = len(result)
+    if (len_val > 0) {
+        println("success")
+    }
+}

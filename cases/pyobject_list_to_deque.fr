@@ -1,0 +1,9 @@
+// !5
+
+py_import collections
+
+void main() {
+    pyobject deque_obj = py_call("collections", "deque", [1, 2, 3, 4, 5])
+    int length = py_call_method(deque_obj, "__len__")
+    println(str(length))
+}

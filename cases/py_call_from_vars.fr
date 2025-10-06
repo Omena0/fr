@@ -1,0 +1,10 @@
+// !result: 8.0
+
+py_import math
+
+void main() {
+    float x = 2.0
+    float y = 3.0
+    float result = py_call("math", "pow", x, y)
+    println("result: " + str(result))
+}

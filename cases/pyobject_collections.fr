@@ -1,0 +1,16 @@
+// !deque([1, 2, 3, 4, 5])
+
+py_import collections
+
+void main() {
+    pyobject deque_obj = py_call("collections", "deque")
+    
+    py_call_method(deque_obj, "append", 1)
+    py_call_method(deque_obj, "append", 2)
+    py_call_method(deque_obj, "append", 3)
+    py_call_method(deque_obj, "append", 4)
+    py_call_method(deque_obj, "append", 5)
+    
+    string result = py_call_method(deque_obj, "__str__")
+    println(result)
+}

@@ -1,0 +1,10 @@
+// !sum: 7.0
+
+py_import math
+
+void main() {
+    float a = py_call("math", "sqrt", 9.0)
+    float b = py_call("math", "sqrt", 16.0)
+    float sum = a + b
+    println("sum: " + str(sum))
+}

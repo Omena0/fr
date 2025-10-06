@@ -1,0 +1,15 @@
+// !1
+
+py_import datetime
+
+void main() {
+    pyobject date1 = py_call("datetime", "date", 2025, 10, 6)
+    pyobject date2 = py_call("datetime", "date", 2025, 10, 7)
+    
+    int result = py_call_method(date1, "__lt__", date2)
+    if (result) {
+        println("1")
+    } else {
+        println("0")
+    }
+}

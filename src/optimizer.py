@@ -37,6 +37,8 @@ class BytecodeOptimizer:
         result = []
         i = 0
 
+        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
+
         while i < len(lines):
             line = lines[i].strip()
 
@@ -58,7 +60,6 @@ class BytecodeOptimizer:
                     # and dst is only used after being reassigned, it's safe
                     is_safe = self._is_copy_ref_safe(lines, i+2, src_var, dst_var)
                     
-                    indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                     if is_safe:
                         result.append(f"{indent}COPY_LOCAL_REF {src_var} {dst_var}")
                     else:
@@ -142,6 +143,8 @@ class BytecodeOptimizer:
         result = []
         i = 0
 
+        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
+
         while i < len(lines):
             line = lines[i].strip()
 
@@ -157,7 +160,6 @@ class BytecodeOptimizer:
 
                 if load_var == store_var:
                     # Replace with optimized INC instruction
-                    indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                     result.append(f"{indent}INC_LOCAL {load_var}")
                     i += 4
                     continue
@@ -173,7 +175,6 @@ class BytecodeOptimizer:
                 store_var = lines[i+3].strip().split()[1]
 
                 if load_var == store_var:
-                    indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                     result.append(f"{indent}DEC_LOCAL {load_var}")
                     i += 4
                     continue
@@ -184,7 +185,6 @@ class BytecodeOptimizer:
                 lines[i+1].strip() == 'ADD_I64'):
 
                 const_val = line.split()[1]
-                indent = '  ' if not lines[i].startswith('CONST') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}ADD_CONST_I64 {const_val}")
                 i += 2
                 continue
@@ -195,7 +195,6 @@ class BytecodeOptimizer:
                 lines[i+1].strip() == 'SUB_I64'):
 
                 const_val = line.split()[1]
-                indent = '  ' if not lines[i].startswith('CONST') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}SUB_CONST_I64 {const_val}")
                 i += 2
                 continue
@@ -206,7 +205,6 @@ class BytecodeOptimizer:
                 lines[i+1].strip() == 'MUL_I64'):
 
                 const_val = line.split()[1]
-                indent = '  ' if not lines[i].startswith('CONST') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}MUL_CONST_I64 {const_val}")
                 i += 2
                 continue
@@ -217,7 +215,6 @@ class BytecodeOptimizer:
                 lines[i+1].strip() == 'DIV_I64'):
 
                 const_val = line.split()[1]
-                indent = '  ' if not lines[i].startswith('CONST') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}DIV_CONST_I64 {const_val}")
                 i += 2
                 continue
@@ -232,7 +229,6 @@ class BytecodeOptimizer:
 
                 if var1 == var2:
                     result.append(lines[i])
-                    indent = '  ' if not lines[i+1].startswith('LOAD') else lines[i+1][:len(lines[i+1]) - len(lines[i+1].lstrip())]
                     result.append(f"{indent}DUP")
                     i += 2
                     continue
@@ -244,7 +240,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'ADD_I64'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_ADD_I64 {var1} {var2}")
                 i += 3
                 continue
@@ -256,7 +251,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'SUB_I64'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_SUB_I64 {var1} {var2}")
                 i += 3
                 continue
@@ -268,7 +262,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'MUL_I64'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_MUL_I64 {var1} {var2}")
                 i += 3
                 continue
@@ -280,7 +273,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_LT'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_LT {var1} {var2}")
                 i += 3
                 continue
@@ -292,7 +284,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_GT'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_GT {var1} {var2}")
                 i += 3
                 continue
@@ -304,7 +295,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_LE'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_LE {var1} {var2}")
                 i += 3
                 continue
@@ -316,7 +306,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_GE'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_GE {var1} {var2}")
                 i += 3
                 continue
@@ -328,7 +317,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_EQ'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_EQ {var1} {var2}")
                 i += 3
                 continue
@@ -340,7 +328,6 @@ class BytecodeOptimizer:
                 lines[i+2].strip() == 'CMP_NE'):
                 var1 = line.split()[1]
                 var2 = lines[i+1].strip().split()[1]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 result.append(f"{indent}LOAD2_CMP_NE {var1} {var2}")
                 i += 3
                 continue
@@ -362,7 +349,6 @@ class BytecodeOptimizer:
                     pass
                 elif len(loads) >= 2:
                     # Combine multiple LOADs
-                    indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                     result.append(f"{indent}LOAD {' '.join(loads)}")
                     i = j
                     continue
@@ -373,7 +359,6 @@ class BytecodeOptimizer:
             if stripped_line.startswith('LOAD ') and len(stripped_line.split()) == 3:  # LOAD with exactly 2 args
                 parts = stripped_line.split()
                 var1, var2 = parts[1], parts[2]
-                indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
                 
                 # Check what operation follows
                 if i + 1 < len(lines):
@@ -432,8 +417,7 @@ class BytecodeOptimizer:
                 
                 # If we found 2 or more pairs, use FUSED_LOAD_STORE
                 if len(pairs) >= 2:
-                    indent = '  ' if not lines[i].startswith('LOAD') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-                    # Build the fused instruction
+                        # Build the fused instruction
                     args = ' '.join(f"{src} {dst}" for src, dst in pairs)
                     result.append(f"{indent}FUSED_LOAD_STORE {args}")
                     i = j
@@ -452,10 +436,10 @@ class BytecodeOptimizer:
                     src = lines[j+1].strip().split()[1]
                     pairs.append((dst, src))
                     j += 2
-                
+
                 # If we found 2 or more pairs, use FUSED_STORE_LOAD
                 if len(pairs) >= 2:
-                    indent = '  ' if not lines[i].startswith('STORE') else lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('STORE') else '  '
                     # Build the fused instruction
                     args = ' '.join(f"{dst} {src}" for dst, src in pairs)
                     result.append(f"{indent}FUSED_STORE_LOAD {args}")

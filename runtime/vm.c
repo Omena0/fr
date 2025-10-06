@@ -34,6 +34,10 @@
 #include <libgen.h>
 #include <limits.h>
 
+// Python C API for embedding Python interpreter
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
 // Helper function to unescape string literals from bytecode
 char* unescape_string(const char* str) {
     if (!str) return strdup("");
@@ -87,7 +91,8 @@ typedef enum
     VAL_BOOL,
     VAL_VOID,
     VAL_LIST,   // List/Array type
-    VAL_STRUCT  // Struct/Object type
+    VAL_STRUCT, // Struct/Object type
+    VAL_PYOBJECT // Python object type (PyObject*)
 } ValueType;
 
 // List structure
@@ -119,6 +124,7 @@ typedef struct Value
         bool boolean;
         List *list;     // List pointer
         Struct *struct_val; // Struct pointer
+        PyObject *pyobj;    // Python object pointer
     } as;
 } Value;
 // Variable storage
@@ -292,6 +298,12 @@ typedef enum
     OP_SOCKET_RECV,       // Receive data (sock_id, size -> string)
     OP_SOCKET_CLOSE,      // Close socket (sock_id -> void)
     OP_SOCKET_SETSOCKOPT, // Set socket option (sock_id, level, option, value -> void)
+    
+    // Python library integration
+    OP_PY_IMPORT,         // Import a Python module (module_name -> module_object)
+    OP_PY_CALL,           // Call a Python function (module_name, func_name, arg1, ..., argN, num_args -> result)
+    OP_PY_GETATTR,        // Get attribute from Python object (obj, attr_name -> value)
+    OP_PY_CALL_METHOD,    // Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
 } OpCode;
 
 // Instruction structure
@@ -567,6 +579,11 @@ void value_free(Value v)
         free(v.as.struct_val->fields);
         free(v.as.struct_val);
     }
+    else if (v.type == VAL_PYOBJECT && v.as.pyobj)
+    {
+        // Decrement Python object reference count
+        Py_XDECREF(v.as.pyobj);
+    }
 }
 Value value_copy(Value v)
 {
@@ -611,6 +628,15 @@ Value value_copy(Value v)
         {
             result.as.struct_val->fields[i] = value_copy(v.as.struct_val->fields[i]);
         }
+        return result;
+    }
+    else if (v.type == VAL_PYOBJECT)
+    {
+        // Increment reference count for Python object
+        Value result;
+        result.type = VAL_PYOBJECT;
+        result.as.pyobj = v.as.pyobj;
+        Py_XINCREF(result.as.pyobj);
         return result;
     }
     return v; // Other types are simple values
@@ -662,6 +688,14 @@ void vm_init(VM *vm)
     vm->struct_count = 0;
     vm->prog_argc = 0;
     vm->prog_argv = NULL;
+    
+    // Initialize Python interpreter
+    if (!Py_IsInitialized()) {
+        Py_Initialize();
+        // Add current directory to Python path
+        PyRun_SimpleString("import sys");
+        PyRun_SimpleString("sys.path.insert(0, '.')");
+    }
 }
 // Free VM resources
 void vm_free(VM *vm)
@@ -693,6 +727,11 @@ void vm_free(VM *vm)
         {
             free(vm->code[i].operand.str_val);
         }
+    }
+    
+    // Finalize Python interpreter
+    if (Py_IsInitialized()) {
+        Py_Finalize();
     }
 }
 // Stack operations - inline for performance
@@ -754,6 +793,19 @@ void value_print(Value val)
         // Print struct in a simple format (can be improved)
         printf("<struct>");
         break;
+    case VAL_PYOBJECT:
+        // Print Python object using str()
+        if (val.as.pyobj) {
+            PyObject *str_obj = PyObject_Str(val.as.pyobj);
+            if (str_obj) {
+                const char *str_val = PyUnicode_AsUTF8(str_obj);
+                if (str_val) {
+                    printf("%s", str_val);
+                }
+                Py_DECREF(str_obj);
+            }
+        }
+        break;
     }
 }
 // Convert value to string
@@ -808,6 +860,25 @@ Value value_to_string(Value val)
     }
     case VAL_STRUCT:
         result.as.str = strdup("<struct>");
+        break;
+    case VAL_PYOBJECT:
+        // Convert Python object to string using str()
+        if (val.as.pyobj) {
+            PyObject *str_obj = PyObject_Str(val.as.pyobj);
+            if (str_obj) {
+                const char *str_val = PyUnicode_AsUTF8(str_obj);
+                if (str_val) {
+                    result.as.str = strdup(str_val);
+                } else {
+                    result.as.str = strdup("<pyobject>");
+                }
+                Py_DECREF(str_obj);
+            } else {
+                result.as.str = strdup("<pyobject>");
+            }
+        } else {
+            result.as.str = strdup("<pyobject>");
+        }
         break;
     }
     return result;
@@ -1122,6 +1193,85 @@ static inline Value value_compare(Value a, Value b, OpCode op)
     }
     return value_make_bool(result);
 }
+
+// Python <-> fr Value conversion functions
+PyObject* fr_value_to_python(Value val) {
+    switch (val.type) {
+        case VAL_INT:
+            return PyLong_FromLong(val.as.int64);
+        case VAL_BIGINT:
+            // Convert GMP bigint to Python int
+            {
+                char *str = mpz_get_str(NULL, 10, *val.as.bigint);
+                PyObject *result = PyLong_FromString(str, NULL, 10);
+                free(str);
+                return result;
+            }
+        case VAL_F64:
+            return PyFloat_FromDouble(val.as.f64);
+        case VAL_STR:
+            return PyUnicode_FromString(val.as.str);
+        case VAL_BOOL:
+            return PyBool_FromLong(val.as.boolean ? 1 : 0);
+        case VAL_LIST: {
+            PyObject *list = PyList_New(val.as.list->length);
+            for (int i = 0; i < val.as.list->length; i++) {
+                PyList_SetItem(list, i, fr_value_to_python(val.as.list->items[i]));
+            }
+            return list;
+        }
+        case VAL_PYOBJECT:
+            // Just increment reference and return
+            Py_XINCREF(val.as.pyobj);
+            return val.as.pyobj;
+        case VAL_VOID:
+        default:
+            Py_RETURN_NONE;
+    }
+}
+
+Value python_to_fr_value(PyObject *obj) {
+    if (obj == NULL || obj == Py_None) {
+        return value_make_void();
+    } else if (PyLong_Check(obj)) {
+        long val = PyLong_AsLong(obj);
+        if (val == -1 && PyErr_Occurred()) {
+            // Number too large for long, convert to bigint
+            PyErr_Clear();
+            PyObject *str_obj = PyObject_Str(obj);
+            const char *str = PyUnicode_AsUTF8(str_obj);
+            Value result = value_make_bigint(str);
+            Py_DECREF(str_obj);
+            return result;
+        }
+        return value_make_int_si(val);
+    } else if (PyFloat_Check(obj)) {
+        return value_make_f64(PyFloat_AsDouble(obj));
+    } else if (PyUnicode_Check(obj)) {
+        const char *str = PyUnicode_AsUTF8(obj);
+        return value_make_str(str ? str : "");
+    } else if (PyBool_Check(obj)) {
+        return value_make_bool(obj == Py_True);
+    } else if (PyList_Check(obj)) {
+        Value list_val = value_make_list();
+        Py_ssize_t size = PyList_Size(obj);
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyList_GetItem(obj, i);
+            Value fr_item = python_to_fr_value(item);
+            list_append(list_val.as.list, fr_item);
+            value_free(fr_item);
+        }
+        return list_val;
+    } else {
+        // Store as Python object
+        Value result;
+        result.type = VAL_PYOBJECT;
+        result.as.pyobj = obj;
+        Py_XINCREF(obj);
+        return result;
+    }
+}
+
 // Find function by name
 Function *vm_find_function(VM *vm,
                            const char *name)
@@ -1569,6 +1719,15 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_STR_JOIN;
             else if (strcmp(token, "STR_REPLACE") == 0)
                 inst.op = OP_STR_REPLACE;
+            // Python library integration
+            else if (strcmp(token, "PY_IMPORT") == 0)
+                inst.op = OP_PY_IMPORT;
+            else if (strcmp(token, "PY_CALL") == 0)
+                inst.op = OP_PY_CALL;
+            else if (strcmp(token, "PY_GETATTR") == 0)
+                inst.op = OP_PY_GETATTR;
+            else if (strcmp(token, "PY_CALL_METHOD") == 0)
+                inst.op = OP_PY_CALL_METHOD;
             else if (strcmp(token, "POP") == 0)
                 inst.op = OP_POP;
             else if (strcmp(token, "DUP") == 0)
@@ -1997,6 +2156,10 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_SOCKET_RECV] = &&L_SOCKET_RECV,
         [OP_SOCKET_CLOSE] = &&L_SOCKET_CLOSE,
         [OP_SOCKET_SETSOCKOPT] = &&L_SOCKET_SETSOCKOPT,
+        [OP_PY_IMPORT] = &&L_PY_IMPORT,
+        [OP_PY_CALL] = &&L_PY_CALL,
+        [OP_PY_GETATTR] = &&L_PY_GETATTR,
+        [OP_PY_CALL_METHOD] = &&L_PY_CALL_METHOD,
     };
 #define DISPATCH() goto *dispatch_table[vm->code[vm->pc++].op]
     DISPATCH();
@@ -4811,6 +4974,280 @@ L_LOAD2_CMP_NE: // OP_LOAD2_CMP_NE
         vm_push(vm, result);
     }
 
+    DISPATCH();
+}
+
+L_PY_IMPORT: // OP_PY_IMPORT - Import a Python module (module_name -> module_object)
+{
+    Value module_name_val = vm_pop(vm);
+    
+    if (module_name_val.type != VAL_STR) {
+        fprintf(stderr, "Runtime error: py_import() expects a string module name\n");
+        value_free(module_name_val);
+        exit(1);
+    }
+    
+    const char *module_name = module_name_val.as.str;
+    
+    // Import the module
+    PyObject *pName = PyUnicode_DecodeFSDefault(module_name);
+    PyObject *pModule = PyImport_Import(pName);
+    Py_DECREF(pName);
+    
+    if (pModule == NULL) {
+        PyErr_Print();
+        fprintf(stderr, "Runtime error: Failed to import Python module: %s\n", module_name);
+        value_free(module_name_val);
+        exit(1);
+    }
+    
+    // Return module as PyObject value
+    Value result;
+    result.type = VAL_PYOBJECT;
+    result.as.pyobj = pModule;
+    
+    value_free(module_name_val);
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1, ..., argN, num_args -> result)
+{
+    Value num_args_val = vm_pop(vm);
+    
+    if (num_args_val.type != VAL_INT) {
+        fprintf(stderr, "Runtime error: py_call() num_args must be an integer\n");
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    int num_args = (int)num_args_val.as.int64;
+    
+    // Collect arguments
+    Value args[num_args];
+    for (int i = num_args - 1; i >= 0; i--) {
+        args[i] = vm_pop(vm);
+    }
+    
+    Value func_name_val = vm_pop(vm);
+    Value module_name_val = vm_pop(vm);
+    
+    if (module_name_val.type != VAL_STR || func_name_val.type != VAL_STR) {
+        fprintf(stderr, "Runtime error: py_call() expects string module and function names\n");
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(func_name_val);
+        value_free(module_name_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    const char *module_name = module_name_val.as.str;
+    const char *func_name = func_name_val.as.str;
+    
+    // Import module
+    PyObject *pName = PyUnicode_DecodeFSDefault(module_name);
+    PyObject *pModule = PyImport_Import(pName);
+    Py_DECREF(pName);
+    
+    if (pModule == NULL) {
+        PyErr_Print();
+        fprintf(stderr, "Runtime error: Failed to import Python module: %s\n", module_name);
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(func_name_val);
+        value_free(module_name_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    // Get function
+    PyObject *pFunc = PyObject_GetAttrString(pModule, func_name);
+    
+    if (pFunc == NULL || !PyCallable_Check(pFunc)) {
+        if (PyErr_Occurred()) PyErr_Print();
+        fprintf(stderr, "Runtime error: Cannot find or call function: %s.%s\n", module_name, func_name);
+        Py_XDECREF(pFunc);
+        Py_DECREF(pModule);
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(func_name_val);
+        value_free(module_name_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    // Convert arguments to Python objects
+    PyObject *pArgs = PyTuple_New(num_args);
+    for (int i = 0; i < num_args; i++) {
+        PyObject *pValue = fr_value_to_python(args[i]);
+        PyTuple_SetItem(pArgs, i, pValue);
+    }
+    
+    // Call the function
+    PyObject *pResult = PyObject_CallObject(pFunc, pArgs);
+    Py_DECREF(pArgs);
+    Py_DECREF(pFunc);
+    Py_DECREF(pModule);
+    
+    if (pResult == NULL) {
+        PyErr_Print();
+        fprintf(stderr, "Runtime error: Python function call failed: %s.%s\n", module_name, func_name);
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(func_name_val);
+        value_free(module_name_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    // Convert result back to fr Value
+    Value result = python_to_fr_value(pResult);
+    Py_DECREF(pResult);
+    
+    // Cleanup
+    for (int i = 0; i < num_args; i++) {
+        value_free(args[i]);
+    }
+    value_free(func_name_val);
+    value_free(module_name_val);
+    value_free(num_args_val);
+    
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_PY_GETATTR: // OP_PY_GETATTR - Get attribute from Python object (obj, attr_name -> value)
+{
+    Value attr_name_val = vm_pop(vm);
+    Value obj_val = vm_pop(vm);
+    
+    if (attr_name_val.type != VAL_STR) {
+        fprintf(stderr, "Runtime error: py_getattr() attribute name must be a string\n");
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+    
+    if (obj_val.type != VAL_PYOBJECT) {
+        fprintf(stderr, "Runtime error: py_getattr() expects a Python object\n");
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+    
+    const char *attr_name = attr_name_val.as.str;
+    PyObject *pObj = obj_val.as.pyobj;
+    
+    // Get attribute
+    PyObject *pAttr = PyObject_GetAttrString(pObj, attr_name);
+    
+    if (pAttr == NULL) {
+        if (PyErr_Occurred()) PyErr_Print();
+        fprintf(stderr, "Runtime error: Attribute not found: %s\n", attr_name);
+        value_free(attr_name_val);
+        value_free(obj_val);
+        exit(1);
+    }
+    
+    // Convert to fr value
+    Value result = python_to_fr_value(pAttr);
+    Py_DECREF(pAttr);
+    
+    value_free(attr_name_val);
+    value_free(obj_val);
+    
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
+{
+    Value num_args_val = vm_pop(vm);
+    
+    if (num_args_val.type != VAL_INT) {
+        fprintf(stderr, "Runtime error: py_call_method() num_args must be an integer\n");
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    int num_args = (int)num_args_val.as.int64;
+    
+    // Collect arguments
+    Value args[num_args];
+    for (int i = num_args - 1; i >= 0; i--) {
+        args[i] = vm_pop(vm);
+    }
+    
+    Value method_name_val = vm_pop(vm);
+    Value obj_val = vm_pop(vm);
+    
+    if (method_name_val.type != VAL_STR) {
+        fprintf(stderr, "Runtime error: py_call_method() method name must be a string\n");
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(method_name_val);
+        value_free(obj_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    if (obj_val.type != VAL_PYOBJECT) {
+        fprintf(stderr, "Runtime error: py_call_method() expects a Python object\n");
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(method_name_val);
+        value_free(obj_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    const char *method_name = method_name_val.as.str;
+    PyObject *pObj = obj_val.as.pyobj;
+    
+    // Get method
+    PyObject *pMethod = PyObject_GetAttrString(pObj, method_name);
+    
+    if (pMethod == NULL || !PyCallable_Check(pMethod)) {
+        if (PyErr_Occurred()) PyErr_Print();
+        fprintf(stderr, "Runtime error: Method not found or not callable: %s\n", method_name);
+        Py_XDECREF(pMethod);
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(method_name_val);
+        value_free(obj_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    // Convert arguments to Python objects
+    PyObject *pArgs = PyTuple_New(num_args);
+    for (int i = 0; i < num_args; i++) {
+        PyObject *pValue = fr_value_to_python(args[i]);
+        PyTuple_SetItem(pArgs, i, pValue);
+    }
+    
+    // Call the method
+    PyObject *pResult = PyObject_CallObject(pMethod, pArgs);
+    Py_DECREF(pArgs);
+    Py_DECREF(pMethod);
+    
+    if (pResult == NULL) {
+        if (PyErr_Occurred()) PyErr_Print();
+        fprintf(stderr, "Runtime error: Python method call failed: %s\n", method_name);
+        for (int i = 0; i < num_args; i++) value_free(args[i]);
+        value_free(method_name_val);
+        value_free(obj_val);
+        value_free(num_args_val);
+        exit(1);
+    }
+    
+    // Convert result back to fr Value
+    Value result_val = python_to_fr_value(pResult);
+    Py_DECREF(pResult);
+    
+    // Cleanup
+    for (int i = 0; i < num_args; i++) {
+        value_free(args[i]);
+    }
+    value_free(method_name_val);
+    value_free(obj_val);
+    value_free(num_args_val);
+    
+    vm_push(vm, result_val);
     DISPATCH();
 }
 

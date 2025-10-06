@@ -1,0 +1,15 @@
+// !obj1: test1
+// !obj2: test2
+
+py_import io
+
+void main() {
+    pyobject obj1 = py_call("io", "StringIO", "test1")
+    pyobject obj2 = py_call("io", "StringIO", "test2")
+    
+    string val1 = py_call_method(obj1, "getvalue")
+    string val2 = py_call_method(obj2, "getvalue")
+    
+    println("obj1: " + val1)
+    println("obj2: " + val2)
+}

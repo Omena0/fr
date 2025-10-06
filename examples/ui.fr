@@ -1,0 +1,6 @@
+// Frscript Ui-engine integration
+py_import engine as ui
+
+void main() {
+    
+}

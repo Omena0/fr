@@ -1,0 +1,13 @@
+// !4.0
+
+py_import math
+
+float helper() {
+    float result = py_call("math", "sqrt", 16.0)
+    return result
+}
+
+void main() {
+    float val = helper()
+    println(str(val))
+}

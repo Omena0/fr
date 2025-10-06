@@ -1,0 +1,8 @@
+// !256.0
+
+py_import math
+
+void main() {
+    float pow_result = py_call("math", "pow", 2.0, 8.0)
+    println(str(pow_result))
+}

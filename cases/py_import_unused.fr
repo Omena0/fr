@@ -1,0 +1,15 @@
+// !math: 5.0
+// !json: [1, 2, 3]
+
+py_import math
+py_import json
+py_import os
+py_import sys
+
+void main() {
+    float math_result = py_call("math", "sqrt", 25.0)
+    println("math: " + str(math_result))
+    
+    string json_result = py_call("json", "dumps", [1, 2, 3])
+    println("json: " + json_result)
+}

@@ -1,0 +1,17 @@
+// !sqrt: 10.0
+// !json: "test"
+// !done
+
+py_import math
+py_import random
+py_import json
+
+void main() {
+    float sqrt_val = py_call("math", "sqrt", 100.0)
+    println("sqrt: " + str(sqrt_val))
+    
+    string json_result = py_call("json", "dumps", "test")
+    println("json: " + json_result)
+    
+    println("done")
+}

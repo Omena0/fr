@@ -1,0 +1,8 @@
+// !result: 3
+
+py_import math
+
+void main() {
+    int result = py_call("math", "trunc", 3.99)
+    println("result: " + str(result))
+}
