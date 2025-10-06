@@ -118,9 +118,8 @@ class BytecodeOptimizer:
         result = []
         i = 0
 
-        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
-
         while i < len(lines):
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
             line = lines[i].strip()
 
             # Pattern: LOAD x, STORE y
@@ -222,9 +221,8 @@ class BytecodeOptimizer:
         result = []
         i = 0
 
-        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
-
         while i < len(lines):
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('LOAD') else '  '
             line = lines[i].strip()
 
             # Pattern: LOAD N, CONST_I64 1, ADD_I64, STORE N -> INC_LOCAL N

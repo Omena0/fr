@@ -76,10 +76,32 @@ char* unescape_string(const char* str) {
 #define MAX_LABELS 512
 #define MAX_CALL_STACK 256
 #define MAX_STRING_LEN 4096
+
 // Forward declarations
 typedef struct Value Value;
 typedef struct List List;
 typedef struct Struct Struct;
+
+// Safe multi-value structures (avoid type-punning)
+typedef struct {
+    int count;
+    int64_t values[];  // Flexible array member
+} MultiInt64;
+
+typedef struct {
+    int count;
+    double values[];  // Flexible array member
+} MultiF64;
+
+typedef struct {
+    int count;
+    char *values[];  // Flexible array member
+} MultiStr;
+
+typedef struct {
+    int count;
+    int values[];  // Flexible array member
+} MultiInt;
 
 // Value types
 typedef enum
@@ -1489,15 +1511,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple CONST_I64 - use CONST_I64_MULTI
+                    // Multiple CONST_I64 - use CONST_I64_MULTI with safe struct
                     inst.op = OP_CONST_I64_MULTI;
-                    int64_t *args = malloc((count + 1) * sizeof(int64_t));
-                    args[0] = count;
+                    MultiInt64 *multi = malloc(sizeof(MultiInt64) + count * sizeof(int64_t));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = values[j];
+                        multi->values[j] = values[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "CONST_F64") == 0)
@@ -1528,16 +1550,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple CONST_F64 - use CONST_F64_MULTI
+                    // Multiple CONST_F64 - use CONST_F64_MULTI with safe struct
                     inst.op = OP_CONST_F64_MULTI;
-                    double *args = malloc((count + 1) * sizeof(double));
-                    // Store count as int64 at the start (cast for alignment)
-                    *((int64_t*)args) = count;
+                    MultiF64 *multi = malloc(sizeof(MultiF64) + count * sizeof(double));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = values[j];
+                        multi->values[j] = values[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "CONST_STR") == 0)
@@ -1602,15 +1623,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple CONST_STR - use CONST_STR_MULTI
+                    // Multiple CONST_STR - use CONST_STR_MULTI with safe struct
                     inst.op = OP_CONST_STR_MULTI;
-                    char **args = malloc((count + 1) * sizeof(char*));
-                    *((int64_t*)args) = count; // Store count at start
+                    MultiStr *multi = malloc(sizeof(MultiStr) + count * sizeof(char*));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = strings[j];
+                        multi->values[j] = strings[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "CONST_BOOL") == 0)
@@ -1644,15 +1665,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple CONST_BOOL - use CONST_BOOL_MULTI
+                    // Multiple CONST_BOOL - use CONST_BOOL_MULTI with safe struct
                     inst.op = OP_CONST_BOOL_MULTI;
-                    int *args = malloc((count + 1) * sizeof(int));
-                    args[0] = count;
+                    MultiInt *multi = malloc(sizeof(MultiInt) + count * sizeof(int));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = values[j];
+                        multi->values[j] = values[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "LOAD") == 0)
@@ -1682,15 +1703,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple LOAD - use LOAD_MULTI (store indices in ptr)
+                    // Multiple LOAD - use LOAD_MULTI with safe struct
                     inst.op = OP_LOAD_MULTI;
-                    int *args = malloc((count + 1) * sizeof(int));
-                    args[0] = count;
+                    MultiInt *multi = malloc(sizeof(MultiInt) + count * sizeof(int));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = indices[j];
+                        multi->values[j] = indices[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "STORE") == 0)
@@ -1969,15 +1990,15 @@ bool vm_load_bytecode(VM *vm,
                 }
                 else
                 {
-                    // Multiple values - use multi instruction
+                    // Multiple values - use multi instruction with safe struct
                     inst.op = OP_ADD_CONST_I64_MULTI;
-                    int64_t *args = malloc(sizeof(int64_t) * (count + 1));
-                    args[0] = count;
+                    MultiInt64 *multi = malloc(sizeof(MultiInt64) + count * sizeof(int64_t));
+                    multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        args[j + 1] = values[j];
+                        multi->values[j] = values[j];
                     }
-                    inst.operand.ptr = args;
+                    inst.operand.ptr = multi;
                 }
             }
             else if (strcmp(token, "SUB_CONST_I64") == 0)
@@ -2077,14 +2098,13 @@ bool vm_load_bytecode(VM *vm,
                     exit(1);
                 }
 
-                // Store arguments in a dynamically allocated array
-                int *args = malloc(256 * sizeof(int));
+                // Parse arguments
+                int temp_args[256];
                 int arg_count = 0;
                 char *arg_str = strtok(rest_of_line, " ");
-                while (arg_str != NULL && arg_count < 255)
+                while (arg_str != NULL && arg_count < 256)
                 {
-                    args[arg_count + 1] = atoi(arg_str); // Start at index 1
-                    arg_count++;
+                    temp_args[arg_count++] = atoi(arg_str);
                     arg_str = strtok(NULL, " ");
                 }
 
@@ -2095,11 +2115,14 @@ bool vm_load_bytecode(VM *vm,
                     exit(1);
                 }
 
-                // Store the count in args[0]
-                args[0] = arg_count / 2; // Number of pairs
-
-                // Store the args pointer in the operand
-                inst.operand.ptr = args;
+                // Create safe struct
+                MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
+                multi->count = arg_count / 2; // Number of pairs
+                for (int j = 0; j < arg_count; j++)
+                {
+                    multi->values[j] = temp_args[j];
+                }
+                inst.operand.ptr = multi;
             }
             // Fused store/load (reverse order)
             else if (strcmp(token, "FUSED_STORE_LOAD") == 0)
@@ -2113,14 +2136,13 @@ bool vm_load_bytecode(VM *vm,
                     exit(1);
                 }
 
-                // Store arguments in a dynamically allocated array
-                int *args = malloc(256 * sizeof(int));
+                // Parse arguments
+                int temp_args[256];
                 int arg_count = 0;
                 char *arg_str = strtok(rest_of_line, " ");
-                while (arg_str != NULL && arg_count < 255)
+                while (arg_str != NULL && arg_count < 256)
                 {
-                    args[arg_count + 1] = atoi(arg_str); // Start at index 1
-                    arg_count++;
+                    temp_args[arg_count++] = atoi(arg_str);
                     arg_str = strtok(NULL, " ");
                 }
 
@@ -2131,11 +2153,14 @@ bool vm_load_bytecode(VM *vm,
                     exit(1);
                 }
 
-                // Store the count in args[0]
-                args[0] = arg_count / 2; // Number of pairs
-
-                // Store the args pointer in the operand
-                inst.operand.ptr = args;
+                // Create safe struct
+                MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
+                multi->count = arg_count / 2; // Number of pairs
+                for (int j = 0; j < arg_count; j++)
+                {
+                    multi->values[j] = temp_args[j];
+                }
+                inst.operand.ptr = multi;
             }
             // Fused LOAD2 + arithmetic instructions
             else if (strcmp(token, "LOAD2_ADD_I64") == 0)
@@ -2458,44 +2483,40 @@ L_CONST_BOOL: // OP_CONST_BOOL
 L_CONST_I64_MULTI: // OP_CONST_I64_MULTI
 {
     Instruction inst = vm->code[vm->pc - 1];
-    int64_t *args = (int64_t*)inst.operand.ptr;
-    int count = args[0];
-    for (int i = 0; i < count; i++)
+    MultiInt64 *multi = (MultiInt64*)inst.operand.ptr;
+    for (int i = 0; i < multi->count; i++)
     {
-        vm_push(vm, value_make_int_si(args[i + 1]));
+        vm_push(vm, value_make_int_si(multi->values[i]));
     }
     DISPATCH();
 }
 L_CONST_F64_MULTI: // OP_CONST_F64_MULTI
 {
     Instruction inst = vm->code[vm->pc - 1];
-    double *args = (double*)inst.operand.ptr;
-    int count = *((int64_t*)args);
-    for (int i = 0; i < count; i++)
+    MultiF64 *multi = (MultiF64*)inst.operand.ptr;
+    for (int i = 0; i < multi->count; i++)
     {
-        vm_push(vm, value_make_f64(args[i + 1]));
+        vm_push(vm, value_make_f64(multi->values[i]));
     }
     DISPATCH();
 }
 L_CONST_STR_MULTI: // OP_CONST_STR_MULTI
 {
     Instruction inst = vm->code[vm->pc - 1];
-    char **args = (char**)inst.operand.ptr;
-    int count = *((int64_t*)args);
-    for (int i = 0; i < count; i++)
+    MultiStr *multi = (MultiStr*)inst.operand.ptr;
+    for (int i = 0; i < multi->count; i++)
     {
-        vm_push(vm, value_make_str(args[i + 1]));
+        vm_push(vm, value_make_str(multi->values[i]));
     }
     DISPATCH();
 }
 L_CONST_BOOL_MULTI: // OP_CONST_BOOL_MULTI
 {
     Instruction inst = vm->code[vm->pc - 1];
-    int *args = (int*)inst.operand.ptr;
-    int count = args[0];
-    for (int i = 0; i < count; i++)
+    MultiInt *multi = (MultiInt*)inst.operand.ptr;
+    for (int i = 0; i < multi->count; i++)
     {
-        vm_push(vm, value_make_bool(args[i + 1] != 0));
+        vm_push(vm, value_make_bool(multi->values[i] != 0));
     }
     DISPATCH();
 }
@@ -3133,12 +3154,11 @@ L_ADD_CONST_I64_MULTI: // OP_ADD_CONST_I64_MULTI
     Instruction inst = vm->code[vm->pc - 1];
     {
         Value a = vm_pop(vm);
-        int64_t *args = (int64_t*)inst.operand.ptr;
-        int count = args[0];
+        MultiInt64 *multi = (MultiInt64*)inst.operand.ptr;
 
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < multi->count; i++)
         {
-            int64_t const_val = args[i + 1];
+            int64_t const_val = multi->values[i];
             if (likely(a.type == VAL_INT))
             {
                 a.as.int64 += const_val;
@@ -5198,15 +5218,14 @@ L_HALT: // OP_HALT
 L_LOAD_MULTI: // OP_LOAD_MULTI
 {
     Instruction inst = vm->code[vm->pc - 1];
-    int *args = (int *)inst.operand.ptr;
-    int count = args[0];
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
     CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
 
     // Load each variable and push onto stack
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < multi->count; i++)
     {
-        int index = args[i + 1];
+        int index = multi->values[i];
         vm_push(vm, value_copy(frame->vars.vars[index]));
     }
 
@@ -5216,16 +5235,15 @@ L_LOAD_MULTI: // OP_LOAD_MULTI
 L_FUSED_LOAD_STORE: // OP_FUSED_LOAD_STORE
 {
     Instruction inst = vm->code[vm->pc - 1];
-    int *args = (int *)inst.operand.ptr;
-    int count = args[0]; // Number of pairs
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
     CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
 
     // Process each src/dst pair
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < multi->count; i++)
     {
-        int src = args[1 + i * 2];
-        int dst = args[1 + i * 2 + 1];
+        int src = multi->values[i * 2];
+        int dst = multi->values[i * 2 + 1];
 
         // LOAD: load from src and push
         vm_push(vm, value_copy(frame->vars.vars[src]));
@@ -5242,16 +5260,15 @@ L_FUSED_LOAD_STORE: // OP_FUSED_LOAD_STORE
 L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
 {
     Instruction inst = vm->code[vm->pc - 1];
-    int *args = (int *)inst.operand.ptr;
-    int count = args[0]; // Number of pairs
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
     CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
 
     // Process each dst/src pair
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < multi->count; i++)
     {
-        int dst = args[1 + i * 2];
-        int src = args[1 + i * 2 + 1];
+        int dst = multi->values[i * 2];
+        int src = multi->values[i * 2 + 1];
 
         // STORE: pop value and store to dst
         Value val = vm_pop(vm);

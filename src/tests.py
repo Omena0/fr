@@ -153,7 +153,7 @@ def run_test_isolated(test_file, test_content):
 
 def run_single_test_wrapper(args):
     """Wrapper for parallel execution"""
-    test_path, repo_root = args
+    test_path, _ = args
     test_file = os.path.basename(test_path)
     try:
         with open(test_path, 'r') as f:

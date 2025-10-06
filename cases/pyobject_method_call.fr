@@ -1,12 +1,4 @@
 // !2025-10-06
-
-py_import datetime
-
-void main() {
-    pyobject date = py_call("datetime", "date", 2025, 10, 6)
-    string iso = date.isoformat()
-    println(iso)
-}
 py_import datetime
 
 void main() {
