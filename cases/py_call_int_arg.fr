@@ -1,0 +1,8 @@
+// !120
+
+py_import math
+
+void main() {
+    int result = py_call("math", "factorial", 5)
+    println(str(result))
+}

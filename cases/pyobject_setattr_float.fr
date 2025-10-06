@@ -1,0 +1,10 @@
+// !3.14
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.pi = 3.14
+    float result = obj.pi
+    println(str(result))
+}

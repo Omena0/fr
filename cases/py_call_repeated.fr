@@ -1,0 +1,16 @@
+// !2.0
+// !2.0
+// !2.0
+
+py_import math
+
+void main() {
+    float result1 = py_call("math", "sqrt", 4.0)
+    println(str(result1))
+    
+    float result2 = py_call("math", "sqrt", 4.0)
+    println(str(result2))
+    
+    float result3 = py_call("math", "sqrt", 4.0)
+    println(str(result3))
+}

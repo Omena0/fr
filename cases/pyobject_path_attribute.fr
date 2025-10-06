@@ -1,0 +1,9 @@
+// !tmp
+
+py_import pathlib
+
+void main() {
+    pyobject path = py_call("pathlib", "Path", "/home/user/tmp")
+    string name = py_getattr(path, "name")
+    println(name)
+}

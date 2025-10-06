@@ -1,0 +1,9 @@
+// !2025
+
+py_import datetime
+
+void main() {
+    pyobject date = py_call("datetime", "datetime", 2025, 10, 6)
+    int year = date.year
+    println(str(year))
+}

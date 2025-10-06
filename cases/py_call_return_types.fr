@@ -1,0 +1,20 @@
+// !float: 7.0
+// !int: 24
+// !string: ok
+
+py_import math
+py_import os
+
+void main() {
+    float float_result = py_call("math", "sqrt", 49.0)
+    println("float: " + str(float_result))
+    
+    int int_result = py_call("math", "factorial", 4)
+    println("int: " + str(int_result))
+    
+    string str_result = py_call("os", "getcwd")
+    int len_result = len(str_result)
+    if (len_result > 0) {
+        println("string: ok")
+    }
+}

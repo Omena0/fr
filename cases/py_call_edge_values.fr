@@ -1,0 +1,16 @@
+// !negative: -5.0
+// !positive: 5.0
+// !zero: 0.0
+
+py_import math
+
+void main() {
+    float neg = py_call("math", "fabs", -5.0)
+    println("negative: " + str(-neg))
+    
+    float pos = py_call("math", "fabs", 5.0)
+    println("positive: " + str(pos))
+    
+    float zero = py_call("math", "fabs", 0.0)
+    println("zero: " + str(zero))
+}

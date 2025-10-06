@@ -1,0 +1,14 @@
+// !before: 10\nafter: 99
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.value = 10
+    int before = obj.value
+    println("before: " + str(before))
+    
+    obj.value = 99
+    int after = obj.value
+    println("after: " + str(after))
+}

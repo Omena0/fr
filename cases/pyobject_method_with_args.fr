@@ -1,0 +1,11 @@
+// !2025-10-07
+
+py_import datetime
+
+void main() {
+    pyobject date = py_call("datetime", "date", 2025, 10, 6)
+    pyobject delta = py_call("datetime", "timedelta", 1)
+    pyobject new_date = py_call_method(date, "__add__", delta)
+    string result = py_call_method(new_date, "isoformat")
+    println(result)
+}

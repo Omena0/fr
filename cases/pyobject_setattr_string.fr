@@ -1,0 +1,10 @@
+// !test
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.text = "test"
+    string result = obj.text
+    println(result)
+}

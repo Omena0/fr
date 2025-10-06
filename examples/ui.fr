@@ -1,0 +1,12 @@
+// Frscript Ui-engine integration
+py_import engine as ui
+
+void main() {
+    pyobj window = ui.Window((338, 63))
+
+    window.title = "UI-Engine Test"
+
+    ui.Label(window, (15,5), "Hello, World!", ('Hack Nerd Font Mono', 40), max_width=999, max_height=999)
+
+    window.mainloop()
+}

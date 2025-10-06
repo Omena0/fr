@@ -1,0 +1,18 @@
+// !2025
+// !10
+// !6
+
+py_import datetime
+
+void main() {
+    pyobject date1 = py_call("datetime", "date", 2025, 10, 6)
+    pyobject date2 = py_call("datetime", "date", 2024, 5, 15)
+    
+    int year1 = py_getattr(date1, "year")
+    int month1 = py_getattr(date1, "month")
+    int day1 = py_getattr(date1, "day")
+    
+    println(str(year1))
+    println(str(month1))
+    println(str(day1))
+}

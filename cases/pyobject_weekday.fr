@@ -1,0 +1,9 @@
+// !0
+
+py_import datetime
+
+void main() {
+    pyobject date = py_call("datetime", "date", 2025, 10, 6)
+    int weekday = date.weekday()
+    println(str(weekday))
+}

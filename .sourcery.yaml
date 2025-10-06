@@ -2,3 +2,4 @@ rule_settings:
   disable:
   - path-read
   - low-code-quality
+  - remove-unnecessary-cast

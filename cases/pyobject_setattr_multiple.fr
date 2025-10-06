@@ -1,0 +1,15 @@
+// !name: test\nvalue: 123
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.name = "test"
+    obj.value = 123
+    
+    string name = obj.name
+    int value = obj.value
+    
+    println("name: " + name)
+    println("value: " + str(value))
+}

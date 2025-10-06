@@ -1,0 +1,14 @@
+// !1
+// !5
+
+py_import collections
+
+void main() {
+    pyobject deque_obj = py_call("collections", "deque", [1, 2, 3, 4, 5])
+    
+    int first = py_call_method(deque_obj, "popleft")
+    println(str(first))
+    
+    int last = py_call_method(deque_obj, "pop")
+    println(str(last))
+}

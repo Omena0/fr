@@ -1,0 +1,10 @@
+// !Hello World
+
+py_import io
+
+void main() {
+    pyobject string_io = py_call("io", "StringIO")
+    py_call_method(string_io, "write", "Hello World")
+    string result = py_call_method(string_io, "getvalue")
+    println(result)
+}

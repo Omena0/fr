@@ -1,0 +1,12 @@
+// !correct
+
+py_import math
+
+void main() {
+    float result = py_call("math", "sqrt", 16.0)
+    if (result == 4.0) {
+        println("correct")
+    } else {
+        println("wrong")
+    }
+}

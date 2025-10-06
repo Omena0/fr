@@ -1,0 +1,19 @@
+// !inner: 42\nouter: test
+
+py_import types
+
+void main() {
+    pyobject inner = py_call("types", "SimpleNamespace")
+    inner.value = 42
+    
+    pyobject outer = py_call("types", "SimpleNamespace")
+    outer.nested = inner
+    outer.name = "test"
+    
+    pyobject nested_obj = outer.nested
+    int inner_val = nested_obj.value
+    string outer_name = outer.name
+    
+    println("inner: " + str(inner_val))
+    println("outer: " + outer_name)
+}
