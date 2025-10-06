@@ -14,6 +14,6 @@ Features:
 - Really fast. Fast C runtime and parse time function evaluation, loop unrolling and inlining.
 Bytecode-level optimizations such as fused operations.
 - Batteries included. Lots of features out-of-the-box. No libraries required.
-- **File and Socket I/O**. Low-level file operations and raw socket programming with TCP/UDP/Raw sockets, IPv4/IPv6 support.
+- **File and Socket I/O**. Low-level file operations and sockets..
 - Python integration - You can use any Python libraries with Frscript.
 

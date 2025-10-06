@@ -9,6 +9,16 @@ on:
       - 'runtime/**'
       - 'requirements.txt'
       - 'setup.py'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 1.0.0) - leave empty to use commit message'
+        required: false
+        type: string
+      reason:
+        description: 'Reason for manual run'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,6 +40,15 @@ jobs:
     - name: Check if new version
       id: check
       run: |
+        # Check if manually triggered with a version
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+          VERSION="${{ inputs.version }}"
+          echo "should_publish=true" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Manual run with version: $VERSION"
+          exit 0
+        fi
+        
         # Get the latest commit message
         COMMIT_MSG=$(git log -1 --pretty=%B)
         
