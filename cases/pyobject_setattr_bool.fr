@@ -1,0 +1,14 @@
+// !True
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.flag = True
+    int result = obj.flag
+    if (result) {
+        println("True")
+    } else {
+        println("False")
+    }
+}
