@@ -9,7 +9,7 @@ AstType = list[dict[str, Any]]
 VarType = dict[str, dict[str, Any]]
 
 # Base types
-types = ['bool', 'int', 'float', 'string', 'str', 'set', 'list', 'dict', 'pyobject', 'any']
+types = ['bool', 'int', 'float', 'string', 'str', 'set', 'list', 'dict', 'pyobject', 'pyobj', 'any']
 
 # Const: Value will not change and cannot be changed
 # If the parser cannot eval the value then an exception is thrown.

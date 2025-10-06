@@ -1,0 +1,10 @@
+// !42
+
+py_import types
+
+void main() {
+    pyobj obj = py_call("types", "SimpleNamespace")
+    obj.value = 42
+    int result = obj.value
+    println(str(result))
+}

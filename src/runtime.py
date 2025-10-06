@@ -635,7 +635,7 @@ def _execute_node_field_assign(node: dict):
     value = eval_expr(node['value'])
     
     # Handle pyobject types using py_setattr
-    if target_type == 'pyobject':
+    if target_type in ('pyobject', 'pyobj'):
         from builtin_funcs import funcs as builtin_funcs
         py_setattr_func = cast(Any, builtin_funcs['py_setattr']['func'])
         py_setattr_func(target, field_name, value)

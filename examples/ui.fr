@@ -2,7 +2,7 @@
 py_import engine as ui
 
 void main() {
-    pyobject window = ui.Window((338, 63))
+    pyobj window = ui.Window((338, 63))
 
     window.title = "UI-Engine Test"
 

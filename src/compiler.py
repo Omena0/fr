@@ -118,10 +118,19 @@ class BytecodeCompiler:
             'bool': 'bool',
             'void': 'void',
             'pyobject': 'i64',  # Python objects stored as generic value
+            'pyobj': 'i64',     # Alias for pyobject
             'any': 'i64',
         }
 
         return type_map.get(type_str, 'i64')  # Default to i64
+
+    def normalize_type(self, type_str: str) -> str:
+        """Normalize type aliases to their canonical form"""
+        type_aliases = {
+            'str': 'string',
+            'pyobj': 'pyobject',
+        }
+        return type_aliases.get(type_str, type_str)
 
     def compile_expr(self, expr: Any, expr_type: str = 'i64'):
         """Compile an expression node to bytecode (pushes result to stack)"""
@@ -712,7 +721,7 @@ class BytecodeCompiler:
             var_id = self.get_var_id(name)
 
             if value_type_str := node.get('value_type', 'any'):
-                self.var_types[name] = value_type_str
+                self.var_types[name] = self.normalize_type(value_type_str)
 
             # Check if value has a nested 'value' field (happens with constants)
             if value and is_struct_instance(value):
