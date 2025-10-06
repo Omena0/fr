@@ -1,0 +1,9 @@
+// !2025-10-06 12:30:45
+
+py_import datetime
+
+void main() {
+    pyobject dt = py_call("datetime", "datetime", 2025, 10, 6, 12, 30, 45)
+    string formatted = dt.strftime("%Y-%m-%d %H:%M:%S")
+    println(formatted)
+}

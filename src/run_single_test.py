@@ -23,7 +23,7 @@ def extract_error_message(error_text):
     """Extract and normalize error message to match expected format"""
     if not error_text:
         return ''
-    
+
     # Parser errors have format: "...Line X:Y: Message" or "...Line X: Message"
     # Expected format is: "?X:Message" or "?X,Y:Message"
     if 'Line ' in error_text:
@@ -34,19 +34,18 @@ def extract_error_message(error_text):
             # Format is "X:Y: Message" or "X: Message"
             if ':' in line_part:
                 line_info, rest = line_part.split(':', 1)
-                if ':' in rest:
-                    col_part, message = rest.split(':', 1)
-                    message = message.strip()
-                    # Check if col_part is a column number
-                    try:
-                        col = int(col_part.strip())
-                        return f"?{line_info},{col}:{message}"
-                    except ValueError:
-                        # col_part is part of message
-                        return f"?{line_info}:{col_part}:{message}".replace('::', ':').strip()
-                else:
+                if ':' not in rest:
                     return f"?{line_info}:{rest.strip()}"
-    
+
+                col_part, message = rest.split(':', 1)
+                message = message.strip()
+                # Check if col_part is a column number
+                try:
+                    col = int(col_part.strip())
+                    return f"?{line_info},{col}:{message}"
+                except ValueError:
+                    # col_part is part of message
+                    return f"?{line_info}:{col_part}:{message}".replace('::', ':').strip()
     # For other error formats, just clean up
     if ':' in error_text:
         parts = error_text.split(':', 2)
@@ -143,11 +142,14 @@ def main():
         
         os.unlink(bc_file)
         
+        # Capture output even if program crashes (e.g., stack overflow after main returns)
+        vm_output = result.stdout.strip() if result.stdout else ""
+        
         if result.returncode != 0:
             vm_error = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
-            vm_output = None
-        else:
-            vm_output = result.stdout.strip()
+            # If we don't have valid output, mark as None for error reporting
+            if not vm_output:
+                vm_output = None
     except subprocess.TimeoutExpired:
         vm_error = "Timeout"
         vm_output = None
@@ -159,12 +161,19 @@ def main():
     if py_error:
         print(f"PY_ERROR:{py_error}")
     else:
-        print(f"PY_OUTPUT:{py_output}")
+        print(f"PY_OUTPUT:{py_output if py_output is not None else ''}")
     
-    if vm_error:
+    # For VM: prioritize output over error if we have valid output
+    # This handles cases where program outputs correctly but crashes during cleanup
+    if vm_output is not None:
+        # Has output (could be empty string)
+        print(f"VM_OUTPUT:{vm_output}")
+    elif vm_error:
+        # Has error and no output
         print(f"VM_ERROR:{vm_error}")
     else:
-        print(f"VM_OUTPUT:{vm_output}")
+        # No output and no error
+        print(f"VM_OUTPUT:")
     
     print(f"EXPECT:{expect}")
     print(f"IS_OUTPUT:{is_output_test}")

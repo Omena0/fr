@@ -1,0 +1,8 @@
+// !"hello"
+
+py_import json
+
+void main() {
+    string result = py_call("json", "dumps", "hello")
+    println(result)
+}

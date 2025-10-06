@@ -3,8 +3,13 @@ from typing import Any
 from math import sqrt, sin, cos, tan, floor, ceil, pi, e
 import socket as _socket
 import os as _os
+import importlib
+import sys
 
 AstType = list[dict[str, Any]]
+
+# Python module cache for py_import/py_call
+_python_modules = {}
 
 # File I/O helper functions
 def _file_open(path: str, mode: str = 'r'):
@@ -228,6 +233,138 @@ def _socket_setsockopt(sock_id: int, level: str, option: str, value):
 
     sock.setsockopt(lev, opt, int(value))
     return None
+
+# Python library integration functions
+def _py_import(module_name: str):
+    """Import a Python module and cache it"""
+    if module_name not in _python_modules:
+        try:
+            _python_modules[module_name] = importlib.import_module(module_name)
+        except ImportError as e:
+            raise RuntimeError(f"Cannot import Python module '{module_name}': {e}") from e
+    return None
+
+def _py_call(module_name: str, func_name: str, *args):
+    """Call a Python function from an imported module"""
+    # Resolve alias if needed (runtime mode only)
+    import runtime as runtime_module
+    if runtime_module.runtime and hasattr(runtime_module, 'py_imports'):
+        if module_name in runtime_module.py_imports:
+            import_info = runtime_module.py_imports[module_name]
+            if import_info.get('type') == 'name':
+                import_name = import_info['name']
+                func_name = import_name
+            module_name = import_info['module']
+    # Import module if not already cached
+    if module_name not in _python_modules:
+        _py_import(module_name)
+
+    module = _python_modules[module_name]
+
+    # Get the function
+    if not hasattr(module, func_name):
+        raise RuntimeError(f"Cannot find or call function: {module_name}.{func_name}")
+
+    func = getattr(module, func_name)
+
+    # Call the function with arguments
+    try:
+        result = func(*args)
+        # Convert Python types to fr types
+        if isinstance(result, bool):
+            return result
+        elif isinstance(result, int):
+            return result
+        elif isinstance(result, float):
+            return result
+        elif isinstance(result, str):
+            return result
+        elif isinstance(result, (list, tuple)):
+            return list(result)
+        elif isinstance(result, dict):
+            return result
+        elif result is None:
+            return None
+        else:
+            # For other types (including class instances), return as-is
+            return result
+    except Exception as e:
+        raise RuntimeError(f"Error calling {module_name}.{func_name}: {e}") from e
+
+def _py_getattr(obj, attr_name: str):
+    """Get an attribute or call a method on a Python object"""
+    try:
+        attr = getattr(obj, attr_name)
+
+        if callable(attr):
+            # Return the method itself - it will be called with py_call_method
+            return attr
+        # It's an attribute, return its value
+        result = attr
+        # Convert Python types to fr types
+        if isinstance(result, bool):
+            return result
+        elif isinstance(result, int):
+            return result
+        elif isinstance(result, float):
+            return result
+        elif isinstance(result, str):
+            return result
+        elif isinstance(result, (list, tuple)):
+            return list(result)
+        elif isinstance(result, dict):
+            return result
+        elif result is None:
+            return None
+        else:
+            # For other types (including class instances), return as-is
+            return result
+    except AttributeError as e:
+        raise RuntimeError(f"Object has no attribute '{attr_name}'") from e
+    except Exception as e:
+        raise RuntimeError(f"Error accessing attribute '{attr_name}': {e}") from e
+
+def _py_setattr(obj, attr_name: str, value):
+    """Set an attribute on a Python object"""
+    try:
+        setattr(obj, attr_name, value)
+        return None
+    except AttributeError as e:
+        raise RuntimeError(f"Cannot set attribute '{attr_name}' on object") from e
+    except Exception as e:
+        raise RuntimeError(f"Error setting attribute '{attr_name}': {e}") from e
+
+def _py_call_method(obj, method_name: str, *args):
+    """Call a method on a Python object"""
+    try:
+        method = getattr(obj, method_name)
+        if not callable(method):
+            raise RuntimeError(f"'{method_name}' is not a callable method")
+
+        result = method(*args)
+        # Convert Python types to fr types
+        if isinstance(result, bool):
+            return result
+        elif isinstance(result, int):
+            return result
+        elif isinstance(result, float):
+            return result
+        elif isinstance(result, str):
+            return result
+        elif isinstance(result, (list, tuple)):
+            return list(result)
+        elif isinstance(result, dict):
+            return result
+        elif result is None:
+            return None
+        else:
+            # For other types (including class instances), return as-is
+            return result
+    except AttributeError as e:
+        raise RuntimeError(f"Object has no method '{method_name}'") from e
+    except Exception as e:
+        raise RuntimeError(f"Error calling method '{method_name}': {e}") from e
+
 
 funcs:dict[ # Holy type annotations
     str,
@@ -769,5 +906,46 @@ funcs:dict[ # Holy type annotations
         "func": _socket_setsockopt,
         "return_type": "none",
         "can_eval": False
+    },
+    'py_import': {
+        "type": "builtin",
+        "args": {
+            "module_name": "string"
+        },
+        "func": _py_import,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'py_call': {
+        "type": "builtin",
+        "args": {},  # Variable arguments
+        "func": _py_call,
+        "return_type": "any",
+        "can_eval": False,
+        "variadic": True
+    },
+    'py_getattr': {
+        "type": "builtin",
+        "args": {},  # Variable arguments: (object, attribute_name)
+        "func": _py_getattr,
+        "return_type": "any",
+        "can_eval": False,
+        "variadic": True
+    },
+    'py_setattr': {
+        "type": "builtin",
+        "args": {},  # Variable arguments: (object, attribute_name, value)
+        "func": _py_setattr,
+        "return_type": "none",
+        "can_eval": False,
+        "variadic": True
+    },
+    'py_call_method': {
+        "type": "builtin",
+        "args": {},  # Variable arguments: (object, method_name, *args)
+        "func": _py_call_method,
+        "return_type": "any",
+        "can_eval": False,
+        "variadic": True
     }
 }

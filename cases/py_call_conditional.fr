@@ -1,0 +1,14 @@
+// !5.0
+
+py_import math
+
+void main() {
+    int condition = 1
+    float result = 0.0
+    if (condition) {
+        result = py_call("math", "sqrt", 25.0)
+    } else {
+        result = py_call("math", "sqrt", 16.0)
+    }
+    println(str(result))
+}

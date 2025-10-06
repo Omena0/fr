@@ -1,0 +1,22 @@
+// !2.0
+// !10.0
+// !done
+
+py_import math
+
+void main() {
+    int i = 0
+    while (i < 10) {
+        if (i == 2) {
+            float result = py_call("math", "sqrt", 4.0)
+            println(str(result))
+        }
+        i = i + 1
+        if (i == 10) {
+            float result = py_call("math", "sqrt", 100.0)
+            println(str(result))
+            break
+        }
+    }
+    println("done")
+}

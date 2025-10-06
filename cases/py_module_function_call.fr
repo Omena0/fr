@@ -1,0 +1,11 @@
+// !120
+// Test calling functions from imported modules using dot notation
+
+py_import math
+
+func main() {
+    // Call math.factorial() directly using module.function() syntax
+    int result = math.factorial(5)
+    
+    println(result)
+}

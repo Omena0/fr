@@ -1,0 +1,9 @@
+// !16.0
+
+py_import math
+
+void main() {
+    float inner = py_call("math", "sqrt", 16.0)
+    float outer = py_call("math", "pow", inner, 2.0)
+    println(str(outer))
+}

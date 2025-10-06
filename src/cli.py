@@ -13,7 +13,6 @@ sys.path.insert(0, str(src_dir))
 
 from binary import encode_binary, decode_binary
 from compiler import compile_ast_to_bytecode
-from utils import InputStream
 from parser import parse
 from runtime import run
 
@@ -26,10 +25,7 @@ def get_vm_path():
 
     # Try development location
     vm_path = Path(__file__).parent.parent.parent / 'runtime' / 'vm'
-    if vm_path.exists():
-        return str(vm_path)
-
-    return None
+    return str(vm_path) if vm_path.exists() else None
 
 def has_untyped_functions(ast):
     """Check if AST contains functions with untyped parameters"""
@@ -104,7 +100,6 @@ def compile_cmd(args=None):
         args = sys.argv[1:]
 
     if len(args) < 1:
-        print("Usage: fr compile <source.fr> [-o output.bc]")
         print("   or: fr compile <ast.bin|ast.json> [-o output.bc]")
         sys.exit(1)
 
@@ -117,30 +112,18 @@ def compile_cmd(args=None):
         if idx + 1 < len(args):
             output_file = args[idx + 1]
 
-    # Check if input is source code
-    if input_file.endswith('.fr') or input_file.endswith('.c'):
-        # Parse source first
-        with open(input_file) as f:
-            source = f.read()
-        stream = InputStream(source.strip())
-        try:
-            ast = parse(stream, file=input_file)
-        except SyntaxError as e:
-            print(f'Exception: {e}')
-            sys.exit(1)
-    else:
-        # Load AST
-        file_type = detect_file_type(input_file)
+    # Load AST
+    file_type = detect_file_type(input_file)
 
-        if file_type == 'json':
-            with open(input_file, 'r') as f:
-                ast = json.load(f)
-        elif file_type == 'binary_ast':
-            with open(input_file, 'rb') as f:
-                ast = decode_binary(f.read())
-        else:
-            print(f"Error: Cannot compile {input_file} - unknown format")
-            sys.exit(1)
+    if file_type == 'json':
+        with open(input_file, 'r') as f:
+            ast = json.load(f)
+    elif file_type == 'binary_ast':
+        with open(input_file, 'rb') as f:
+            ast = decode_binary(f.read())
+    else:
+        print(f"Error: Cannot compile {input_file} - unknown format")
+        sys.exit(1)
 
     try:
         bytecode = compile_ast_to_bytecode(ast)
@@ -233,13 +216,10 @@ def main():
         print()
         print("Usage:")
         print("  fr <file.fr> [-c|--compile] [-py|--python] [-O|--optimize]")
-        print("                                    - Parse and run source file")
         print("                                    -c: Force C backend compilation")
         print("                                   -py: Force Python backend runtime")
-        print("                                    -O: Enable AST optimizations")
-        print("                                        (loop unrolling, function inlining)")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
-        print("  fr compile <source.fr> [-o out.bc] - Compile to bytecode")
+        print("  fr compile <ast.json|ast.bin> [-o out.bc] - Compile AST to bytecode")
         print("  fr run <file>                   - Run file (auto-detect type)")
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")

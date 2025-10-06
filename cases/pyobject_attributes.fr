@@ -1,0 +1,17 @@
+// !year: 2025
+// !month: 10
+// !day: 6
+
+py_import datetime
+
+void main() {
+    pyobject date = py_call("datetime", "datetime", 2025, 10, 6, 12, 30, 45)
+    
+    int year = date.year
+    int month = date.month
+    int day = date.day
+    
+    println("year: " + str(year))
+    println("month: " + str(month))
+    println("day: " + str(day))
+}

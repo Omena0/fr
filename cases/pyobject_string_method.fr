@@ -1,0 +1,9 @@
+// !365 days, 0:00:00
+
+py_import datetime
+
+void main() {
+    pyobject delta = py_call("datetime", "timedelta", 365)
+    string result = py_call_method(delta, "__str__")
+    println(result)
+}

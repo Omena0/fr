@@ -1,0 +1,10 @@
+// !25.0
+
+py_import math
+
+void main() {
+    int int_val = 5
+    float float_val = 2.0
+    float result = py_call("math", "pow", float(int_val), float_val)
+    println(str(result))
+}

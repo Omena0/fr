@@ -1,0 +1,10 @@
+// !3
+
+py_import types
+
+void main() {
+    pyobject obj = py_call("types", "SimpleNamespace")
+    obj.items = [1, 2, 3]
+    int length = len(obj.items)
+    println(str(length))
+}

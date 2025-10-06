@@ -1,0 +1,8 @@
+// !10
+
+py_import math
+
+void main() {
+    int result = py_call("math", "gcd", 100, 10)
+    println(str(result))
+}

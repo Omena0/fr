@@ -1,0 +1,13 @@
+// !True
+
+py_import pathlib
+
+void main() {
+    pyobject path = py_call("pathlib", "Path", "/tmp")
+    int is_absolute = py_call_method(path, "is_absolute")
+    if (is_absolute) {
+        println("True")
+    } else {
+        println("False")
+    }
+}

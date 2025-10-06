@@ -1,0 +1,8 @@
+// !15.0
+
+py_import math
+
+void main() {
+    float result = py_call("math", "sqrt", 25.0) + 10.0
+    println(str(result))
+}

@@ -1,0 +1,15 @@
+// !Hello
+// Test expression statements with method calls on pyobjects
+
+py_import io
+
+func main() {
+    pyobject stream = py_call("io", "StringIO")
+    
+    // Call write() method as a statement expression (not capturing return value)
+    stream.write("Hello")
+    
+    // Get the value
+    string result = py_call_method(stream, "getvalue")
+    println(result)
+}
