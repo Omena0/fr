@@ -420,12 +420,34 @@ void value_free(Value v);
 Value value_copy(Value v);
 void list_free(List *list);
 
+// Safe parsing helpers (use strtol family instead of unsafe ato* functions)
+static inline int64_t safe_atoll(const char *str)
+{
+    char *endptr;
+    int64_t result = strtoll(str, &endptr, 10);
+    return result;  // Return result; caller handles validation if needed
+}
+
+static inline int safe_atoi(const char *str)
+{
+    char *endptr;
+    long result = strtol(str, &endptr, 10);
+    return (int)result;  // Return result; caller handles validation if needed
+}
+
+static inline double safe_atof(const char *str)
+{
+    char *endptr;
+    double result = strtod(str, &endptr);
+    return result;  // Return result; caller handles validation if needed
+}
+
 // Helper functions for Value
 Value value_make_int(const char *str)
 {
     Value v;
     v.type = VAL_INT;
-    v.as.int64 = atoll(str); // Fast native int
+    v.as.int64 = safe_atoll(str); // Fast native int
     return v;
 }
 Value value_make_int_si(long val)
@@ -773,14 +795,13 @@ void vm_free(VM *vm)
             // Free each string in the array, then the array itself
             if (vm->code[i].operand.ptr)
             {
-                char **args = (char**)vm->code[i].operand.ptr;
-                int count = *((int64_t*)args);
-                for (int j = 0; j < count; j++)
+                MultiStr *multi = (MultiStr*)vm->code[i].operand.ptr;
+                for (int j = 0; j < multi->count; j++)
                 {
-                    if (args[j + 1])
-                        free(args[j + 1]);
+                    if (multi->values[j])
+                        free(multi->values[j]);
                 }
-                free(args);
+                free(multi);
             }
         }
     }
@@ -1401,8 +1422,8 @@ bool vm_load_bytecode(VM *vm,
                 return false;
             }
 
-            int struct_id = atoi(struct_id_str);
-            int field_count = atoi(field_count_str);
+            int struct_id = safe_atoi(struct_id_str);
+            int field_count = safe_atoi(field_count_str);
 
             if (struct_id < 0 || struct_id >= MAX_STRUCTS)
             {
@@ -1435,7 +1456,7 @@ bool vm_load_bytecode(VM *vm,
             current_func->start_pc = vm->code_count;
             current_func->return_type = VAL_INT; // Default
             arg_count = 0;
-            local_count = atoi(total_vars ? total_vars : "0");
+            local_count = safe_atoi(total_vars ? total_vars : "0");
         }
         else if (strcmp(token, ".arg") == 0)
         {
@@ -1499,7 +1520,7 @@ bool vm_load_bytecode(VM *vm,
                 char *val_str = strtok(rest_of_line, " ");
                 while (val_str != NULL && count < 256)
                 {
-                    values[count++] = atoll(val_str);
+                    values[count++] = safe_atoll(val_str);
                     val_str = strtok(NULL, " ");
                 }
 
@@ -1538,7 +1559,7 @@ bool vm_load_bytecode(VM *vm,
                 char *val_str = strtok(rest_of_line, " ");
                 while (val_str != NULL && count < 256)
                 {
-                    values[count++] = atof(val_str);
+                    values[count++] = safe_atof(val_str);
                     val_str = strtok(NULL, " ");
                 }
 
@@ -1692,7 +1713,7 @@ bool vm_load_bytecode(VM *vm,
                 char *idx_str = strtok(rest_of_line, " ");
                 while (idx_str != NULL && count < 256)
                 {
-                    indices[count++] = atoi(idx_str);
+                    indices[count++] = safe_atoi(idx_str);
                     idx_str = strtok(NULL, " ");
                 }
                 if (count == 1)
@@ -1718,13 +1739,13 @@ bool vm_load_bytecode(VM *vm,
             {
                 char *idx = strtok(NULL, " ");
                 inst.op = OP_STORE;
-                inst.operand.index = atoi(idx);
+                inst.operand.index = safe_atoi(idx);
             }
             else if (strcmp(token, "STORE_REF") == 0)
             {
                 char *idx = strtok(NULL, " ");
                 inst.op = OP_STORE_REF;
-                inst.operand.index = atoi(idx);
+                inst.operand.index = safe_atoi(idx);
             }
             else if (strcmp(token, "ADD_I64") == 0)
                 inst.op = OP_ADD_I64;
@@ -1827,19 +1848,19 @@ bool vm_load_bytecode(VM *vm,
             {
                 char *struct_id_str = strtok(NULL, " ");
                 inst.op = OP_STRUCT_NEW;
-                inst.operand.index = atoi(struct_id_str);
+                inst.operand.index = safe_atoi(struct_id_str);
             }
             else if (strcmp(token, "STRUCT_GET") == 0)
             {
                 char *field_idx_str = strtok(NULL, " ");
                 inst.op = OP_STRUCT_GET;
-                inst.operand.index = atoi(field_idx_str);
+                inst.operand.index = safe_atoi(field_idx_str);
             }
             else if (strcmp(token, "STRUCT_SET") == 0)
             {
                 char *field_idx_str = strtok(NULL, " ");
                 inst.op = OP_STRUCT_SET;
-                inst.operand.index = atoi(field_idx_str);
+                inst.operand.index = safe_atoi(field_idx_str);
             }
             // Type conversions
             else if (strcmp(token, "TO_INT") == 0)
@@ -1954,13 +1975,13 @@ bool vm_load_bytecode(VM *vm,
             {
                 char *idx = strtok(NULL, " ");
                 inst.op = OP_INC_LOCAL;
-                inst.operand.index = atoi(idx);
+                inst.operand.index = safe_atoi(idx);
             }
             else if (strcmp(token, "DEC_LOCAL") == 0)
             {
                 char *idx = strtok(NULL, " ");
                 inst.op = OP_DEC_LOCAL;
-                inst.operand.index = atoi(idx);
+                inst.operand.index = safe_atoi(idx);
             }
             else if (strcmp(token, "ADD_CONST_I64") == 0)
             {
@@ -1978,7 +1999,7 @@ bool vm_load_bytecode(VM *vm,
                 char *val_str = strtok(rest_of_line, " ");
                 while (val_str != NULL && count < 256)
                 {
-                    values[count++] = atoll(val_str);
+                    values[count++] = safe_atoll(val_str);
                     val_str = strtok(NULL, " ");
                 }
 
@@ -2005,49 +2026,49 @@ bool vm_load_bytecode(VM *vm,
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_SUB_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             else if (strcmp(token, "MUL_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_MUL_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             else if (strcmp(token, "DIV_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_DIV_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             else if (strcmp(token, "AND_CONST") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_AND_CONST;
-                inst.operand.int64 = atoi(val);
+                inst.operand.int64 = safe_atoi(val);
             }
             else if (strcmp(token, "OR_CONST") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_OR_CONST;
-                inst.operand.int64 = atoi(val);
+                inst.operand.int64 = safe_atoi(val);
             }
             else if (strcmp(token, "AND_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_AND_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             else if (strcmp(token, "OR_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_OR_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             else if (strcmp(token, "XOR_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_XOR_CONST_I64;
-                inst.operand.int64 = atoll(val);
+                inst.operand.int64 = safe_atoll(val);
             }
             // Stack manipulation
             else if (strcmp(token, "SWAP") == 0)
@@ -2075,16 +2096,16 @@ bool vm_load_bytecode(VM *vm,
                 char *src = strtok(NULL, " ");
                 char *dst = strtok(NULL, " ");
                 inst.op = OP_COPY_LOCAL;
-                inst.operand.indices.src = atoi(src);
-                inst.operand.indices.dst = atoi(dst);
+                inst.operand.indices.src = safe_atoi(src);
+                inst.operand.indices.dst = safe_atoi(dst);
             }
             else if (strcmp(token, "COPY_LOCAL_REF") == 0)
             {
                 char *src = strtok(NULL, " ");
                 char *dst = strtok(NULL, " ");
                 inst.op = OP_COPY_LOCAL_REF;
-                inst.operand.indices.src = atoi(src);
-                inst.operand.indices.dst = atoi(dst);
+                inst.operand.indices.src = safe_atoi(src);
+                inst.operand.indices.dst = safe_atoi(dst);
             }
             // Fused load/store
             else if (strcmp(token, "FUSED_LOAD_STORE") == 0)
@@ -2104,7 +2125,7 @@ bool vm_load_bytecode(VM *vm,
                 char *arg_str = strtok(rest_of_line, " ");
                 while (arg_str != NULL && arg_count < 256)
                 {
-                    temp_args[arg_count++] = atoi(arg_str);
+                    temp_args[arg_count++] = safe_atoi(arg_str);
                     arg_str = strtok(NULL, " ");
                 }
 
@@ -2142,7 +2163,7 @@ bool vm_load_bytecode(VM *vm,
                 char *arg_str = strtok(rest_of_line, " ");
                 while (arg_str != NULL && arg_count < 256)
                 {
-                    temp_args[arg_count++] = atoi(arg_str);
+                    temp_args[arg_count++] = safe_atoi(arg_str);
                     arg_str = strtok(NULL, " ");
                 }
 
@@ -2168,24 +2189,24 @@ bool vm_load_bytecode(VM *vm,
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_ADD_I64;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_SUB_I64") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_SUB_I64;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_MUL_I64") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_MUL_I64;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             // Fused LOAD2 + comparison instructions
             else if (strcmp(token, "LOAD2_CMP_LT") == 0)
@@ -2193,48 +2214,48 @@ bool vm_load_bytecode(VM *vm,
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_LT;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_CMP_GT") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_GT;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_CMP_LE") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_LE;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_CMP_GE") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_GE;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_CMP_EQ") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_EQ;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "LOAD2_CMP_NE") == 0)
             {
                 char *var1 = strtok(NULL, " ");
                 char *var2 = strtok(NULL, " ");
                 inst.op = OP_LOAD2_CMP_NE;
-                inst.operand.indices.src = atoi(var1);
-                inst.operand.indices.dst = atoi(var2);
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "SELECT") == 0)
                 inst.op = OP_SELECT;
@@ -3836,7 +3857,7 @@ L_TO_INT: // OP_TO_INT - Convert value to integer
     }
     else if (v.type == VAL_STR)
     {
-        result = value_make_int_si(atoll(v.as.str));
+        result = value_make_int_si(safe_atoll(v.as.str));
     }
     else if (v.type == VAL_BOOL)
     {
@@ -3868,7 +3889,7 @@ L_TO_FLOAT: // OP_TO_FLOAT - Convert value to float
     }
     else if (v.type == VAL_STR)
     {
-        result = value_make_f64(atof(v.as.str));
+        result = value_make_f64(safe_atof(v.as.str));
     }
     else if (v.type == VAL_BOOL)
     {

@@ -1323,9 +1323,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 varname = parts[0].strip()
                 iterable_expr = parts[1].strip()
 
-                loop_depth -= 1
-
-                    # Check if it's a range expression (start..end) or (start..end..step)
+                # Check if it's a range expression (start..end) or (start..end..step)
                 if '..' in iterable_expr:
                     range_parts = iterable_expr.split('..')
                     if len(range_parts) < 2 or len(range_parts) > 3:
@@ -1336,6 +1334,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     step_expr = range_parts[2].strip() if len(range_parts) == 3 else None
 
                     scope = parse_scope(stream, level+1)
+                    
+                    loop_depth -= 1
+                    
                     result = {
                         "type": "for",
                         "var": varname,
@@ -1358,6 +1359,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 else:
                     # It's iterating over a list/iterable
                     scope = parse_scope(stream, level+1)
+                    
+                    loop_depth -= 1
+                    
                     return {
                         "type": "for_in",
                         "var": varname,
