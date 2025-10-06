@@ -610,7 +610,6 @@ def _execute_node_field_assign(node: dict):
     # Check if it's a Python module import alias
     if target_name in py_imports:
         # Setting attribute on a Python module
-        from builtin_funcs import funcs as builtin_funcs
         field_name = node['field']
         value = eval_expr(node['value'])
         # Use setattr to set the module attribute
