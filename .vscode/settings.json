@@ -1,4 +1,5 @@
 {
     "python.analysis.typeCheckingMode": "standard",
     "C_Cpp.errorSquiggles": "disabled",
+    "python.defaultInterpreterPath": "/home/omena0/Github/lang2/.venv/bin/python",
 }

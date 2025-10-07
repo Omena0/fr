@@ -132,7 +132,30 @@ def main():
             bc_file = f.name
             f.write(bytecode)
         
-        vm_path = 'runtime/vm'
+        # Try to find VM path
+        vm_path = None
+        # Try new package location
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec('runtime')
+            if spec and spec.origin:
+                from pathlib import Path
+                runtime_pkg_path = Path(spec.origin).parent
+                vm_candidate = runtime_pkg_path / 'vm'
+                if vm_candidate.exists():
+                    vm_path = str(vm_candidate)
+        except (ImportError, AttributeError):
+            pass
+        
+        # Fall back to development locations
+        if not vm_path:
+            from pathlib import Path
+            vm_candidate = Path('runtime/vm')
+            if vm_candidate.exists():
+                vm_path = str(vm_candidate)
+            else:
+                vm_path = 'runtime/vm'
+        
         result = subprocess.run(
             [vm_path, bc_file],
             capture_output=True,
