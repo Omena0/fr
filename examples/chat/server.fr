@@ -1,0 +1,17 @@
+
+struct Message {
+    str author
+    str text
+    int timestamp
+}
+
+struct User {
+    str username
+    str password_hash
+    int join_time
+}
+
+void main() {
+    println("Starting server..")
+
+}

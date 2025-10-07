@@ -4,6 +4,25 @@ from typing import Any, cast
 import sys
 import threading
 
+# Debug runtime support - will be set by debug_runtime module
+debug_runtime_instance = None
+
+# Track the actual current vars (updated when entering/exiting functions)
+_current_runtime_vars = vars
+
+def set_debug_runtime(runtime):
+    """Set the debug runtime instance (called from debug_runtime module)"""
+    global debug_runtime_instance
+    debug_runtime_instance = runtime
+
+def get_debug_runtime():
+    """Get the current debug runtime instance"""
+    return debug_runtime_instance
+
+def get_current_vars():
+    """Get the current variable scope (for debugging)"""
+    return _current_runtime_vars
+
 sys.setrecursionlimit(1000000000)
 sys.set_int_max_str_digits(100000000)
 
@@ -132,13 +151,12 @@ def _bind_function_args(func_args: list, arg_values: list):
 def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     # sourcery skip: avoid-builtin-shadow
     from parser import cast_args
-    global vars, runtime
+    global vars, runtime, _current_runtime_vars
     old_vars = vars
 
     # Check if this is a struct constructor call
     if name in vars and is_struct_def(vars[name]):
         return _create_struct_instance(vars[name], args)
-
     if name not in funcs:
         raise RuntimeError(f'Function "{name}" is not defined.')
 
@@ -152,9 +170,16 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     # Process all arguments to extract their values
     processed_args = [_process_function_arg(arg, old_vars) for arg in args]
 
+    # Only notify debugger for user-defined functions (not built-ins)
+    is_builtin = func['type'] == NODE_TYPE_BUILTIN
+    debug_runtime = get_debug_runtime()
+    if debug_runtime and not is_builtin:
+        debug_runtime.notify_call(name)
+
     # Only clear vars for user-defined functions, preserving struct definitions
-    if func['type'] != NODE_TYPE_BUILTIN:
+    if not is_builtin:
         vars = _preserve_struct_definitions()
+        _current_runtime_vars = vars  # Update current vars for debugger
 
     # Bind function arguments to the scope
     if isinstance(func.get('args'), list):
@@ -174,6 +199,14 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
         out = run_scope(cast(AstType, func_body), level+1)
 
     vars = old_vars
+    if not is_builtin:
+        _current_runtime_vars = vars  # Only restore if we changed it
+
+    # Notify debugger of function return (only for user-defined functions)
+    debug_runtime = get_debug_runtime()
+    if debug_runtime and not is_builtin:
+        debug_runtime.notify_return()
+
     return out
 
 class CompiletimeEvalException(Exception): ...
@@ -307,10 +340,18 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
             var_value = vars[value].get('value')
             return var_value if var_value is not None else value
         return value
-    # Function call
-    if 'func' in node:
-        func = node['func']
-        args = node['args']
+    
+    # Function call (from parse_expr - has 'func' key)
+    # OR call from f-string expansion (has 'name' key)
+    if 'func' in node or ('name' in node and 'type' in node and node['type'] == 'call'):
+        # Extract func and args based on node structure
+        if 'func' in node:
+            func = node['func']
+            args = node['args']
+        else:
+            # F-string expansion format: {type: 'call', name: 'str', args: [...]}
+            func = node['name']
+            args = node.get('args', [])
 
         # Check if this is a method call (obj.method())
         if isinstance(func, dict) and 'attr' in func and 'value' in func:
@@ -354,8 +395,16 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
                 arg = {"value": arg, "type": get_type(arg)}
             new_args.append({"value": arg['value'], "type": get_type(arg['value'])})
 
-        # Get function name
-        func_id = func.get('id') if isinstance(func, dict) else func
+        # Get function name - could be 'func' or 'name' key
+        func_id = None
+        if isinstance(func, dict):
+            func_id = func.get('id')
+        elif isinstance(func, str):
+            func_id = func
+        else:
+            # Check if node has 'name' key directly (from f-string expansion)
+            func_id = node.get('name')
+            
         if isinstance(func_id, str):
             return run_func(func_id, new_args)
         raise RuntimeError(f"Invalid function call: {func}")
@@ -546,7 +595,7 @@ def _execute_node_py_import(node: dict):
     # Track the import for alias resolution
     if name:
         # "from module py_import name" or "from module py_import name as alias"
-        key = alias if alias else name
+        key = alias or name
         py_imports[key] = {
             'module': module_name,
             'type': 'name',
@@ -554,7 +603,7 @@ def _execute_node_py_import(node: dict):
         }
     else:
         # "py_import module" or "py_import module as alias"
-        key = alias if alias else module_name
+        key = alias or module_name
         py_imports[key] = {
             'module': module_name,
             'type': 'module'
@@ -646,7 +695,9 @@ def _execute_node_field_assign(node: dict):
 
 def _execute_node_if(node: dict) -> Any:
     """Handle if/elif/else statement"""
-    if eval_expr(node['condition']):
+    condition_result = eval_expr(node['condition'])
+    
+    if condition_result:
         return run_scope(node['scope'])
 
     # Try elif branches
@@ -656,7 +707,9 @@ def _execute_node_if(node: dict) -> Any:
                 return run_scope(elif_node['scope'])
 
     # Execute else if present
-    return run_scope(node['else']) if node['else'] else None
+    if node['else']:
+        return run_scope(node['else'])
+    return None
 
 def _execute_node_switch(node: dict) -> Any:
     """Handle switch statement"""
@@ -737,17 +790,21 @@ def _execute_node_assert(node: dict):
 def run_scope(ast: AstType, level=0):
     """Execute a scope (list of AST nodes)"""
     result = None
-    
-    for node in ast:
+
+    for idx, node in enumerate(ast):
+        if debug_runtime := get_debug_runtime():
+            line = node.get('line', idx + 1) if isinstance(node, dict) else idx + 1
+            debug_runtime.notify_line(line)
+
         # Handle call expressions from AST first (e.g. method calls like obj.method())
         # These don't have a 'type' key, just 'func' and 'args'
         if 'func' in node and 'args' in node and 'type' not in node:
             # Execute the expression but discard the result since this is used as a statement
             result = eval_expr(node)
             continue
-            
+
         node_type = node['type']
-        
+
         # Handle each node type
         if node_type == NODE_TYPE_FUNCTION:
             _execute_node_function(node, level)
@@ -789,17 +846,18 @@ def run_scope(ast: AstType, level=0):
             return eval_expr(node['value'])
         else:
             raise RuntimeError(f'Unknown node type: {node_type}')
-    
+
     return result
 
 def run(ast:AstType):
     # Use lock to prevent race conditions in parallel test execution
     with _runtime_lock:
-        global vars, runtime, funcs, py_imports
+        global vars, runtime, funcs, py_imports, _current_runtime_vars
         
         runtime = True
         # Reset vars to clear any state from previous runs (critical for parallel test execution)
         vars.clear()
+        _current_runtime_vars = vars  # Initialize current vars tracking
         # Reset py_imports to clear any import aliases from previous runs
         py_imports.clear()
         # Reset funcs to only include builtin functions (remove user-defined functions from previous runs)

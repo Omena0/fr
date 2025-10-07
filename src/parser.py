@@ -28,6 +28,13 @@ builtin_func_names = set(funcs.keys())
 
 class SkipNode: ...
 
+def make_node(stream: InputStream, **kwargs) -> dict[str, Any]:
+    """Create an AST node with line number information"""
+    node = dict(kwargs)
+    if 'line' not in node:
+        node['line'] = stream.line
+    return node
+
 def is_literal(value):
     if not isinstance(value, dict):
         value = parse_literal(value)
@@ -508,14 +515,14 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     if 'const' in mods:
         return SkipNode
 
-    return {
-        "type": "function",
-        "name": name,
-        "return": type,
-        "args": args,
-        "scope": scope,
-        "mods": mods
-    }
+    return make_node(stream,
+        type="function",
+        name=name,
+        **{"return": type},
+        args=args,
+        scope=scope,
+        mods=mods
+    )
 
 def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list = []) -> dict[str, Any] | type[SkipNode]:
     """Parse a variable declaration or assignment.
@@ -534,6 +541,9 @@ def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list =
     if not stream.consume('='):
         raise SyntaxError(stream.format_error('Expected "=".'))
 
+    # Save line number before consuming the value
+    value_line = stream.line
+    
     # Parse the value expression
     value_text = stream.consume_until('\n').strip().rstrip(';')
     value = parse_expr(value_text)
@@ -558,14 +568,17 @@ def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list =
     if 'const' in mods:
         return SkipNode
 
-    # Return AST node for runtime
-    return {
-        "type": "var",
-        "name": name,
-        "value_type": var_type,
-        "value": value,
-        "mods": mods
-    }
+    # Return AST node for runtime with correct line number
+    node = make_node(stream,
+        type="var",
+        name=name,
+        value_type=var_type,
+        value=value,
+        mods=mods
+    )
+    # Override with the line where the value starts
+    node['line'] = value_line
+    return node
 
 def _is_runtime_expression(value: dict) -> bool:
     """Check if a dict represents an expression that must be evaluated at runtime."""
@@ -740,6 +753,9 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
 
 def parse_func_call(stream: InputStream, name: str) -> dict:
     """Parse a function call and optionally evaluate it at compile time."""
+    # Save line before parsing
+    call_line = stream.line
+    
     if name not in funcs:
         raise SyntaxError(stream.format_error(f'Function "{name}" is not defined.'))
 
@@ -756,18 +772,22 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
     # Try to evaluate at parse time if possible
     if _can_eval_at_parse_time(func, arg_values):
         value = _eval_func_at_parse_time(name, func, arg_values)
-        return {
-            "type": get_type(value),
-            "value": value
-        }
+        node = make_node(stream,
+            type=get_type(value),
+            value=value
+        )
+        node['line'] = call_line
+        return node
 
     # Return runtime function call node
-    return {
-        "type": "call",
-        "name": name,
-        "args": arg_values,
-        "return_type": str(func.get('return_type', 'none'))
-    }
+    node = make_node(stream,
+        type="call",
+        name=name,
+        args=arg_values,
+        return_type=str(func.get('return_type', 'none'))
+    )
+    node['line'] = call_line
+    return node
 
 def _try_unroll_for_loop(loop_node: dict, max_iterations: int = 10) -> dict | None:
     """Try to unroll a for loop if bounds are constant and iteration count is small.
@@ -881,6 +901,8 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
     # Either a variable or a function def
     if level == 0:
+        # Save line after stripping, before consuming anything
+        decl_line = stream.line
         # Check for "from <module> py_import <name>" statement
         if stream.peek_word() == 'from':
             stream.consume('from')
@@ -907,12 +929,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 stream.strip()
                 alias = stream.consume_word()
 
-            return {
-                'type': 'py_import',
-                'module': module_name,
-                'name': import_name,
-                'alias': alias
-            }
+            node = make_node(stream,
+                type='py_import',
+                module=module_name,
+                name=import_name,
+                alias=alias
+            )
+            node['line'] = decl_line
+            return node
 
         # Check for "py_import <module>" or "py_import <module> as <alias>" statement
         if stream.peek_word() == 'py_import':
@@ -930,11 +954,13 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 stream.strip()
                 alias = stream.consume_word()
 
-            return {
-                'type': 'py_import',
-                'module': module_name,
-                'alias': alias
-            }
+            node = make_node(stream,
+                type='py_import',
+                module=module_name,
+                alias=alias
+            )
+            node['line'] = decl_line
+            return node
 
         # Check for struct definition first
         if stream.peek_word() == 'struct':
@@ -983,11 +1009,13 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 'fields': fields
             }
 
-            return {
-                'type': 'struct_def',
-                'name': struct_name,
-                'fields': fields
-            }
+            node = make_node(stream,
+                type='struct_def',
+                name=struct_name,
+                fields=fields
+            )
+            node['line'] = decl_line
+            return node
 
         # Get type and name
         type = stream.consume_word()
@@ -1007,11 +1035,17 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         # Is func
         if stream.peek(1) == '(':
-            return parse_func(stream, name, type, mods)
+            node = parse_func(stream, name, type, mods)
+            if node is not SkipNode and isinstance(node, dict):
+                node['line'] = decl_line
+            return node
 
         # Is var
         elif stream.peek(1) == '=':
-            return parse_var(stream, type, name, mods)
+            node = parse_var(stream, type, name, mods)
+            if node is not SkipNode and isinstance(node, dict):
+                node['line'] = decl_line
+            return node
 
         # Augmented assignment with type - this is an error
         elif stream.peek_char(2) in ['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='] or stream.peek_char(3) in ['<<=', '>>=']:
@@ -1032,11 +1066,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             raise SyntaxError(f'Invalid syntax: {stream.orig_line(stream.line-1)}')
 
     else:
+        # Save line before consuming the first word
+        stmt_line = stream.line
         word = stream.consume_word()
 
-        # Ignore if empty
+        # Ignore if empty (comment or blank line) - consume_word() already advanced the stream
         if not word.strip():
-            return
+            #import sys; print(f'DEBUG: Skipping empty line at {stmt_line}, remaining: {repr(stream.text[:50])}', file=sys.stderr)
+            return None
 
         # Field assignment: obj.field = value (word is "obj.field")
         if '.' in word and stream.peek(1) == '=':
@@ -1046,12 +1083,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 stream.consume('=')
                 stream.strip()
                 value = stream.consume_until('\n').strip()
-                return {
-                    "type": "field_assign",
-                    "target": target,
-                    "field": field,
-                    "value": parse_expr(value)
-                }
+                node = make_node(stream,
+                    type="field_assign",
+                    target=target,
+                    field=field,
+                    value=parse_expr(value)
+                )
+                node['line'] = stmt_line
+                return node
 
         # Func call
         if word in funcs and stream.peek_char(1) == '(':
@@ -1076,12 +1115,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             if not stream.consume('='):
                 raise SyntaxError(stream.format_error('Expected "=" after index'))
             value = stream.consume_until('\n').strip()
-            return {
-                "type": "index_assign",
-                "target": word,
-                "index": parse_expr(index_expr),
-                "value": parse_expr(value)
-            }
+            node = make_node(stream,
+                type="index_assign",
+                target=word,
+                index=parse_expr(index_expr),
+                value=parse_expr(value)
+            )
+            node['line'] = stmt_line
+            return node
 
         elif stream.peek_char(1) == '=':
             # Reassignment without type def
@@ -1135,33 +1176,42 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 "mods": []
             }
 
-            return {
-                "type": "var",
-                "name": word,
-                "value_type": var_type,
-                "value": binary_expr,
-                "mods": []
-            }
+            node = make_node(stream,
+                type="var",
+                name=word,
+                value_type=var_type,
+                value=binary_expr,
+                mods=[]
+            )
+            node['line'] = stmt_line
+            return node
 
         elif word in types:
             name = stream.consume_word()
 
-            return parse_var(stream, word, name)
+            node = parse_var(stream, word, name)
+            if node is not SkipNode and isinstance(node, dict):
+                node['line'] = stmt_line
+            return node
 
         elif word == 'if':
+            # Save line before parsing
+            if_line = stream.line
+            
             args = parse_args(stream, check_comma=False)
             # Extract first argument value (ignore type)
             arg_value = args[0][0] if args else ""
             args = parse_expr(arg_value)
             scope = parse_scope(stream, level+1)
 
-            node = {
-                "type": "if",
-                "condition": args,
-                "scope": scope,
-                "elifs": [],
-                "else": {}
-            }
+            node = make_node(stream,
+                type="if",
+                condition=args,
+                scope=scope,
+                elifs=[],
+                **{"else": {}}
+            )
+            node['line'] = if_line
 
             # Check if there are any elifs or an else.
             while True:
@@ -1199,6 +1249,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             raise SyntaxError(f'?{stream.line},{stream.char}:Unexpected "{word}": {stream.orig_line()}')
 
         elif word == 'switch':
+            # Save line before parsing
+            switch_line = stream.line
+            
             args = parse_args(stream, check_comma=False)
             if len(args) != 1:
                 raise SyntaxError(stream.format_error(f'switch requires exactly 1 argument, got {len(args)}'))
@@ -1282,14 +1335,19 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 else:
                     raise SyntaxError(stream.format_error(f'Expected "case" or "default" in switch statement, got "{word}"'))
 
-            return {
-                'type': 'switch',
-                'expr': switch_expr,
-                'cases': cases,
-                'default': default_case
-            }
+            node = make_node(stream,
+                type='switch',
+                expr=switch_expr,
+                cases=cases,
+                default=default_case
+            )
+            node['line'] = switch_line
+            return node
 
         elif word == 'assert':
+            # Save line before parsing
+            assert_line = stream.line
+            
             args = parse_args(stream, False)
             if len(args) < 1 or len(args) > 2:
                 raise SyntaxError(f'assert requires 1 or 2 arguments, got {len(args)}')
@@ -1297,13 +1355,18 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             condition = parse_expr(args[0][0])
             message = parse_expr(args[1][0]) if len(args) == 2 else None
 
-            return {
-                "type": "assert",
-                "condition": condition,
-                "message": message
-            }
+            node = make_node(stream,
+                type="assert",
+                condition=condition,
+                message=message
+            )
+            node['line'] = assert_line
+            return node
 
         elif word == 'for':
+            # Save line before parsing
+            for_line = stream.line
+            
             loop_depth += 1
 
             args = parse_args(stream)
@@ -1337,13 +1400,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     
                     loop_depth -= 1
                     
-                    result = {
-                        "type": "for",
-                        "var": varname,
-                        "start": parse_expr(start_expr) if start_expr else 0,
-                        "end": parse_expr(end_expr),
-                        "scope": scope
-                    }
+                    result = make_node(stream,
+                        type="for",
+                        var=varname,
+                        start=parse_expr(start_expr) if start_expr else 0,
+                        end=parse_expr(end_expr),
+                        scope=scope
+                    )
+                    result['line'] = for_line
 
                     # Add step if provided
                     if step_expr:
@@ -1366,7 +1430,8 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                         "type": "for_in",
                         "var": varname,
                         "iterable": parse_literal(iterable_expr),
-                        "scope": scope
+                        "scope": scope,
+                        "line": for_line
                     }
             else:
                 # Old syntax: for (var, count)
@@ -1382,10 +1447,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     "var": varname,
                     "start": 0,
                     "end": parse_expr(end),
-                    "scope": scope
+                    "scope": scope,
+                    "line": for_line
                 }
 
         elif word == 'while':
+            # Save line before parsing
+            while_line = stream.line
+            
             loop_depth += 1
 
             args = parse_args(stream, False)
@@ -1396,13 +1465,18 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             loop_depth -= 1
 
-            return {
-                "type": word,
-                "condition": args,
-                "scope": scope
-            }
+            node = make_node(stream,
+                type=word,
+                condition=args,
+                scope=scope
+            )
+            node['line'] = while_line
+            return node
 
         elif word == 'break':
+            # Save line before parsing
+            break_line = stream.line
+            
             if loop_depth == 0:
                 raise SyntaxError(stream.format_error('"break" outside loop'))
 
@@ -1417,12 +1491,17 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             if break_level > loop_depth:
                 raise SyntaxError(stream.format_error(f'"break {break_level}" exceeds loop depth {loop_depth}'))
 
-            return {
-                "type": "break",
-                "level": break_level
-            }
+            node = make_node(stream,
+                type="break",
+                level=break_level
+            )
+            node['line'] = break_line
+            return node
 
         elif word == 'continue':
+            # Save line before parsing
+            continue_line = stream.line
+            
             if loop_depth == 0:
                 raise SyntaxError(stream.format_error('"continue" outside loop'))
 
@@ -1437,19 +1516,26 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             if continue_level > loop_depth:
                 raise SyntaxError(stream.format_error(f'"continue {continue_level}" exceeds loop depth {loop_depth}'))
 
-            return {
-                "type": "continue",
-                "level": continue_level
-            }
+            node = make_node(stream,
+                type="continue",
+                level=continue_level
+            )
+            node['line'] = continue_line
+            return node
 
         elif word == 'return':
+            # Save line before parsing
+            return_line = stream.line
+            
             rest = stream.consume_until('\n')
             expr = parse_expr(rest)
 
-            return {
-                "type": "return",
-                "value": expr
-            }
+            node = make_node(stream,
+                type="return",
+                value=expr
+            )
+            node['line'] = return_line
+            return node
 
         elif stream.peek_char(1) == '}':
             return
@@ -1466,7 +1552,20 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
         vars = {}
 
     if not isinstance(text, InputStream):
-        text = '\n'.join([split(i, '//')[0] for i in text.split('\n')]).strip()
+        # Remove comments but preserve line numbers by replacing comment content with spaces
+        lines = text.split('\n')
+        processed_lines = []
+        for line in lines:
+            comment_start = line.find('//')
+            if comment_start != -1:
+                # Keep text before comment, replace comment with spaces to preserve length
+                before_comment = line[:comment_start]
+                comment_part = line[comment_start:]
+                processed_lines.append(before_comment + ' ' * len(comment_part))
+            else:
+                processed_lines.append(line)
+        
+        text = '\n'.join(processed_lines)  # Don't strip - preserve line numbers!
         stream = InputStream(text)
         stream.file_path = file
     else:
@@ -1477,9 +1576,17 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
         ast:AstType = []
 
         while stream.text:
+            # Strip whitespace before checking for scope end
+            stream.strip()
+            
+            # If we hit a closing brace, we're done with this scope
+            if stream.text.startswith('}'):
+                break
+                
             node = parse_any(stream, level)
             if node is None:
-                return ast
+                # Empty line/comment, continue parsing
+                continue
 
             if node is SkipNode:
                 continue

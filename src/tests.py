@@ -154,11 +154,14 @@ def run_test_isolated(test_file, test_content):
 def run_single_test_wrapper(args):
     """Wrapper for parallel execution"""
     test_path, _repo_root = args
-    test_file = os.path.basename(test_path)
+    # Keep relative path for better readability
+    test_file = test_path.replace('cases/', '')
     try:
         with open(test_path, 'r') as f:
             content = f.read()
-        return run_test_isolated(test_file, content)
+        result = run_test_isolated(test_file, content)
+        result['file'] = test_file  # Use relative path
+        return result
     except subprocess.TimeoutExpired:
         return {
             'file': test_file,
@@ -183,8 +186,8 @@ def main():
     repo_root = Path(__file__).parent.parent
     os.chdir(repo_root)
 
-    # Load all test files
-    test_files = sorted(glob.glob('cases/*.fr'))
+    # Load all test files recursively from cases/ and subdirectories
+    test_files = sorted(glob.glob('cases/**/*.fr', recursive=True))
 
     if not test_files:
         print("Error: No test files found in cases/")

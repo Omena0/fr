@@ -15,6 +15,7 @@ from binary import encode_binary, decode_binary
 from compiler import compile_ast_to_bytecode
 from parser import parse
 from runtime import run
+from debug_runtime import run_with_debug, init_debug_runtime
 
 def get_vm_path():
     """Get path to the C VM executable"""
@@ -215,9 +216,10 @@ def main():
         print("Fr - Fast bytecode-compiled language")
         print()
         print("Usage:")
-        print("  fr <file.fr> [-c|--compile] [-py|--python] [-O|--optimize]")
+        print("  fr <file.fr> [-c|--compile] [-py|--python] [-O|--optimize] [--debug]")
         print("                                    -c: Force C backend compilation")
         print("                                   -py: Force Python backend runtime")
+        print("                                --debug: Run in debug mode (for debugger)")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <ast.json|ast.bin> [-o out.bc] - Compile AST to bytecode")
         print("  fr run <file>                   - Run file (auto-detect type)")
@@ -242,14 +244,20 @@ def main():
         # Check for backend flags
         force_c_backend = '-c' in args or '--compile' in args
         force_py_backend = '-py' in args or '--python' in args
+        debug_mode = '--debug' in args
 
         # Validate flags
         if force_c_backend and force_py_backend:
             print("Error: Cannot use both -c and -py flags", file=sys.stderr)
             sys.exit(1)
 
+        # Debug mode requires Python backend
+        if debug_mode and force_c_backend:
+            print("Error: Debug mode requires Python backend, cannot use -c flag", file=sys.stderr)
+            sys.exit(1)
+
         # Filter out flags to get program arguments
-        program_args = [arg for arg in args if arg not in ['-c', '--compile', '-py', '--python', '-O', '--optimize']]
+        program_args = [arg for arg in args if arg not in ['-c', '--compile', '-py', '--python', '-O', '--optimize', '--debug']]
 
         # Direct file execution
         file_type = detect_file_type(cmd)
@@ -269,7 +277,7 @@ def main():
                 sys.exit(1)
 
             # Determine which backend to use
-            if force_py_backend:
+            if force_py_backend or debug_mode:
                 use_c_backend = False
             else:
                 use_c_backend = force_c_backend or not has_untyped_functions(ast)
@@ -307,7 +315,12 @@ def main():
 
             if not use_c_backend:
                 try:
-                    run(ast)
+                    if debug_mode:
+                        # Run with debug runtime
+                        init_debug_runtime()
+                        run_with_debug(ast, cmd)
+                    else:
+                        run(ast)
                 except RuntimeError as e:
                     print(e)
                     sys.exit(1)
