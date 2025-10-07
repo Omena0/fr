@@ -134,6 +134,7 @@ jobs:
     - name: Build package
       env:
         PACKAGE_VERSION: ${{ needs.check-version.outputs.version }}
+        SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.check-version.outputs.version }}
       run: |
         echo "Building version $PACKAGE_VERSION"
         python -m build
