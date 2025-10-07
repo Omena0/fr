@@ -11,72 +11,9 @@ Simple bytecode compiled C-style scripting language.
 
 ## Installation
 
-### Quick Install (Recommended)
-
-The easiest way to install Frscript globally is using the installation script:
-
-```bash
-./install.sh
+```zsh
+pip install frscript
 ```
-
-This script will:
-- Check if `pipx` is available (recommended for isolated Python app installations)
-- Fall back to `pip --user` if pipx is not available
-- Install the `fr` command globally for your user
-- Provide instructions for adding to PATH if needed
-
-### Manual Installation
-
-#### Using pipx (Recommended)
-```bash
-# Install pipx if you don't have it
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
-
-# Install Frscript
-pipx install -e .
-```
-
-#### Using pip --user
-```bash
-pip3 install --user -e .
-
-# Add ~/.local/bin to your PATH if not already there
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### Verify Installation
-
-```bash
-fr --help
-```
-
-### C Runtime Build
-
-Frscript includes a high-performance C-based virtual machine that is automatically built during installation. 
-
-**Build Requirements:**
-- C compiler (gcc or clang)
-- Python development headers (`python3-dev` or `python3-devel`)
-- GMP library (`libgmp-dev` or `gmp-devel`)
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install build-essential python3-dev libgmp-dev
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S base-devel python gmp
-```
-
-If the automatic build fails during installation, you can build the C runtime manually:
-```bash
-cd runtime
-make
-```
-
-For detailed build instructions and troubleshooting, see [BUILD_GUIDE.md](BUILD_GUIDE.md).
 
 Features:
 - Launcher (`fr`)
