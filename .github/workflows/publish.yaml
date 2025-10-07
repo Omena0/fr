@@ -127,8 +127,9 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git tag -a "v$VERSION" -m "Release version $VERSION"
-        echo "Created tag v$VERSION"
+        git tag -a "v$VERSION" -m "Release version $VERSION" --force
+        echo "Created tag v$VERSION on current commit"
+        git describe --tags
     
     - name: Build package
       env:
@@ -136,6 +137,16 @@ jobs:
       run: |
         echo "Building version $PACKAGE_VERSION"
         python -m build
+        
+        # Verify the built version matches expected version
+        BUILT_VERSION=$(ls dist/*.whl | grep -oP 'frscript-\K[^-]+' | head -1)
+        echo "Built version: $BUILT_VERSION"
+        echo "Expected version: $PACKAGE_VERSION"
+        
+        if [[ "$BUILT_VERSION" != "$PACKAGE_VERSION" ]]; then
+          echo "::error::Version mismatch! Built: $BUILT_VERSION, Expected: $PACKAGE_VERSION"
+          exit 1
+        fi
     
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
