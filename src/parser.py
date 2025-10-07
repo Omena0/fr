@@ -415,7 +415,15 @@ def parse_expr(text: str):
     
     try:
         text = _normalize_operators(text)
-        expr = ast.parse(text, mode='eval').body
+        try:
+            expr = ast.parse(text, mode='eval').body
+        except SyntaxError as e:
+            # Convert Python's SyntaxError to expected format
+            error_msg = str(e)
+            if 'unterminated string literal' in error_msg:
+                raise SyntaxError('Expected \'"\'')
+            # Re-raise other syntax errors as-is
+            raise
 
         def _ast_to_dict(node):
             """Convert AST node to dictionary representation."""
