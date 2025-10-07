@@ -121,6 +121,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install build twine
     
+    - name: Set git version tag
+      env:
+        VERSION: ${{ needs.check-version.outputs.version }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -a "v$VERSION" -m "Release version $VERSION"
+        echo "Created tag v$VERSION"
+    
     - name: Build package
       env:
         PACKAGE_VERSION: ${{ needs.check-version.outputs.version }}
