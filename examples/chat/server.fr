@@ -14,4 +14,8 @@ struct User {
 void main() {
     println("Starting server..")
 
+    int sock = socket()
+
+    
+
 }

@@ -19,12 +19,29 @@ from debug_runtime import run_with_debug, init_debug_runtime
 
 def get_vm_path():
     """Get path to the C VM executable"""
-    # Try package installation location
+    # Try package installation location (installed via pip)
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('runtime')
+        if spec and spec.origin:
+            runtime_pkg_path = Path(spec.origin).parent
+            vm_path = runtime_pkg_path / 'vm'
+            if vm_path.exists() and vm_path.is_file():
+                return str(vm_path)
+    except (ImportError, AttributeError):
+        pass
+    
+    # Try relative to src (development location - sibling to src)
     vm_path = Path(__file__).parent.parent / 'runtime' / 'vm'
     if vm_path.exists():
         return str(vm_path)
-
-    # Try development location
+    
+    # Try legacy runtime directory name (backward compatibility)
+    vm_path = Path(__file__).parent.parent / 'runtime' / 'vm'
+    if vm_path.exists():
+        return str(vm_path)
+    
+    # Try one level up (alternate development structure)
     vm_path = Path(__file__).parent.parent.parent / 'runtime' / 'vm'
     return str(vm_path) if vm_path.exists() else None
 

@@ -14,5 +14,7 @@ dist/
 
 # Runtime
 runtime/vm
+runtime/vm
 *.bc
 *.o
+*.gcda
