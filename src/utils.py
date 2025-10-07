@@ -15,16 +15,34 @@ class InputStream:
         # absolute index (number of characters consumed from original)
         self.index:int = 0
 
-        # 1-based line and char (column) position of the next character in original
-        self.line:int = 1
-        self.char:int = 1
-
         # Track parent stream for proper error reporting
         self.parent_stream = parent_stream
         self.offset_in_parent = offset_in_parent
 
         # File path for error messages
         self.file_path:str|None = None
+
+        # 1-based line and char (column) position of the next character in original
+        if parent_stream:
+            # Inherit line number from parent stream
+            # Calculate line number by counting newlines in parent up to offset_in_parent
+            parent_text_before = parent_stream.original[:parent_stream.index - len(text) + offset_in_parent]
+            self.line:int = parent_text_before.count('\n') + 1
+            # Calculate character position
+            last_nl = parent_text_before.rfind('\n')
+            if last_nl == -1:
+                self.char:int = len(parent_text_before) + 1
+            else:
+                self.char:int = len(parent_text_before) - last_nl
+        else:
+            self.line:int = 1
+            self.char:int = 1
+
+    def add_line_info(self, node: dict) -> dict:
+        """Add line number information to an AST node"""
+        if isinstance(node, dict) and 'line' not in node:
+            node['line'] = self.line
+        return node
 
     def _recompute_position(self):
         # ensure index is within bounds

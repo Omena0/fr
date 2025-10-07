@@ -3,6 +3,9 @@ __pycache__
 *.pyd
 *.egg-info
 .venv
+extension/*
+extension
+
 # Build artifacts
 build/
 dist/
