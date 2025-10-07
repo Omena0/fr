@@ -18,3 +18,4 @@ runtime/vm
 *.bc
 *.o
 *.gcda
+src/_version.py
