@@ -40,3 +40,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 src = ["*.c"]
 runtime = ["*.c", "*.h", "Makefile", "vm"]
+
+[tool.setuptools_scm]
+write_to = "src/_version.py"
+fallback_version = "0.0.0"
