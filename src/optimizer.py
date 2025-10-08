@@ -15,8 +15,11 @@ class BytecodeOptimizer:
         """Apply all optimization passes to bytecode"""
         lines = bytecode.strip().split('\n')
 
-        # Pass 1: Combine common patterns (does INC_LOCAL conversion)
+        # Pass 1: Combine common patterns (does INC_LOCAL conversion and fused operations)
         lines = self.combine_patterns(lines)
+
+        # Pass 1.5: Merge CONST + STORE initialization patterns
+        lines = self.merge_const_store_init(lines)
 
         # Pass 2: Merge consecutive constant instructions
         lines = self.merge_constants(lines)
@@ -27,10 +30,110 @@ class BytecodeOptimizer:
         # Pass 4: Remove redundant LOAD/STORE pairs
         lines = self.remove_redundant_loads(lines)
 
-        # Pass 5: Remove dead stores
+        # Pass 5: Optimize negation patterns
+        lines = self.optimize_negation(lines)
+
+        # Pass 6: Optimize jump chains and redundant jumps
+        lines = self.optimize_jumps(lines)
+
+        # Pass 7: Remove dead stores
         lines = self.remove_dead_stores(lines)
 
         return '\n'.join(lines)
+
+    def merge_const_store_init(self, lines: List[str]) -> List[str]:
+        """
+        Optimize CONST + STORE patterns into STORE_CONST_*.
+        E.g., CONST_I64 0, STORE 1 -> STORE_CONST_I64 1 0
+        Multiple pairs: STORE_CONST_I64 slot1 val1 slot2 val2 ...
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+
+            # Pattern: CONST_I64 X followed by STORE Y
+            if (i + 1 < len(lines) and 
+                line.startswith('CONST_I64 ') and 
+                lines[i+1].strip().startswith('STORE ')):
+                
+                pairs = []
+                j = i
+                
+                # Collect consecutive CONST_I64 + STORE pairs
+                while (j + 1 < len(lines) and 
+                       lines[j].strip().startswith('CONST_I64 ') and 
+                       lines[j+1].strip().startswith('STORE ')):
+                    const_val = lines[j].strip().split('CONST_I64 ', 1)[1]
+                    store_slot = lines[j+1].strip().split('STORE ', 1)[1]
+                    pairs.append((store_slot, const_val))
+                    j += 2
+                
+                if len(pairs) >= 1:
+                    args = []
+                    for slot, val in pairs:
+                        args.extend([slot, val])
+                    result.append(f"{indent}STORE_CONST_I64 {' '.join(args)}")
+                    i = j
+                    continue
+
+            # Pattern: CONST_F64 X followed by STORE Y
+            if (i + 1 < len(lines) and 
+                line.startswith('CONST_F64 ') and 
+                lines[i+1].strip().startswith('STORE ')):
+                
+                pairs = []
+                j = i
+                
+                while (j + 1 < len(lines) and 
+                       lines[j].strip().startswith('CONST_F64 ') and 
+                       lines[j+1].strip().startswith('STORE ')):
+                    const_val = lines[j].strip().split('CONST_F64 ', 1)[1]
+                    store_slot = lines[j+1].strip().split('STORE ', 1)[1]
+                    pairs.append((store_slot, const_val))
+                    j += 2
+                
+                if len(pairs) >= 1:
+                    args = []
+                    for slot, val in pairs:
+                        args.extend([slot, val])
+                    result.append(f"{indent}STORE_CONST_F64 {' '.join(args)}")
+                    i = j
+                    continue
+
+            # Pattern: CONST_BOOL X followed by STORE Y
+            if (i + 1 < len(lines) and 
+                line.startswith('CONST_BOOL ') and 
+                lines[i+1].strip().startswith('STORE ')):
+                
+                pairs = []
+                j = i
+                
+                while (j + 1 < len(lines) and 
+                       lines[j].strip().startswith('CONST_BOOL ') and 
+                       lines[j+1].strip().startswith('STORE ')):
+                    const_val = lines[j].strip().split('CONST_BOOL ', 1)[1]
+                    store_slot = lines[j+1].strip().split('STORE ', 1)[1]
+                    pairs.append((store_slot, const_val))
+                    j += 2
+                
+                if len(pairs) >= 1:
+                    args = []
+                    for slot, val in pairs:
+                        args.extend([slot, val])
+                    result.append(f"{indent}STORE_CONST_BOOL {' '.join(args)}")
+                    i = j
+                    continue
+
+            # Pattern: CONST_STR X followed by STORE Y
+            # Strings are complex with quoting, skip for now
+            
+            result.append(lines[i])
+            i += 1
+
+        return result
 
     def merge_constants(self, lines: List[str]) -> List[str]:
         """
@@ -310,6 +413,57 @@ class BytecodeOptimizer:
                 i += 2
                 continue
 
+            # Pattern: CONST_I64 N, MOD_I64 -> MOD_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'MOD_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}MOD_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Float constant operations
+            # Pattern: CONST_F64 N, ADD_F64 -> ADD_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'ADD_F64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}ADD_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, SUB_F64 -> SUB_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'SUB_F64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}SUB_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, MUL_F64 -> MUL_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'MUL_F64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}MUL_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, DIV_F64 -> DIV_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'DIV_F64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}DIV_CONST_F64 {const_val}")
+                i += 2
+                continue
+
             # Pattern: CONST_BOOL N, AND -> AND_CONST N
             if (i + 1 < len(lines) and
                 line.startswith('CONST_BOOL ') and
@@ -472,6 +626,129 @@ class BytecodeOptimizer:
                 i += 3
                 continue
 
+            # NEW: Pattern: LOAD a, LOAD b, DIV_I64 -> LOAD2_DIV_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'DIV_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_DIV_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, MOD_I64 -> LOAD2_MOD_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'MOD_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_MOD_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # Float LOAD2 operations
+            # NEW: Pattern: LOAD a, LOAD b, ADD_F64 -> LOAD2_ADD_F64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'ADD_F64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_ADD_F64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, SUB_F64 -> LOAD2_SUB_F64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'SUB_F64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_SUB_F64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, MUL_F64 -> LOAD2_MUL_F64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'MUL_F64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_MUL_F64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, DIV_F64 -> LOAD2_DIV_F64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'DIV_F64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_DIV_F64 {var1} {var2}")
+                i += 3
+                continue
+
+            # Bitwise LOAD2 operations
+            # NEW: Pattern: LOAD a, LOAD b, AND_I64 -> LOAD2_AND_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'AND_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_AND_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, OR_I64 -> LOAD2_OR_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'OR_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_OR_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, XOR_I64 -> LOAD2_XOR_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'XOR_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_XOR_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, SHL_I64 -> LOAD2_SHL_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'SHL_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_SHL_I64 {var1} {var2}")
+                i += 3
+                continue
+
+            # NEW: Pattern: LOAD a, LOAD b, SHR_I64 -> LOAD2_SHR_I64 a b
+            if (i + 2 < len(lines) and
+                line.startswith('LOAD ') and
+                lines[i+1].strip().startswith('LOAD ') and
+                lines[i+2].strip() == 'SHR_I64'):
+                var1 = line.split()[1]
+                var2 = lines[i+1].strip().split()[1]
+                result.append(f"{indent}LOAD2_SHR_I64 {var1} {var2}")
+                i += 3
+                continue
+
             # Pattern: Multiple consecutive LOAD instructions -> LOAD with multiple args
             # Look for sequences of LOAD instructions
             # BUT: Don't combine 2 LOADs if followed by fusable operation (let LOAD2+OP handle it)
@@ -504,6 +781,7 @@ class BytecodeOptimizer:
                 if i + 1 < len(lines):
                     next_op = lines[i+1].strip()
 
+                    # Integer arithmetic
                     if next_op == 'ADD_I64':
                         result.append(f"{indent}LOAD2_ADD_I64 {var1} {var2}")
                         i += 2
@@ -516,6 +794,16 @@ class BytecodeOptimizer:
                         result.append(f"{indent}LOAD2_MUL_I64 {var1} {var2}")
                         i += 2
                         continue
+                    elif next_op == 'DIV_I64':
+                        result.append(f"{indent}LOAD2_DIV_I64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'MOD_I64':
+                        result.append(f"{indent}LOAD2_MOD_I64 {var1} {var2}")
+                        i += 2
+                        continue
+
+                    # Comparisons
                     elif next_op == 'CMP_LT':
                         result.append(f"{indent}LOAD2_CMP_LT {var1} {var2}")
                         i += 2
@@ -538,6 +826,46 @@ class BytecodeOptimizer:
                         continue
                     elif next_op == 'CMP_NE':
                         result.append(f"{indent}LOAD2_CMP_NE {var1} {var2}")
+                        i += 2
+                        continue
+
+                    # Float arithmetic
+                    elif next_op == 'ADD_F64':
+                        result.append(f"{indent}LOAD2_ADD_F64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'SUB_F64':
+                        result.append(f"{indent}LOAD2_SUB_F64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'MUL_F64':
+                        result.append(f"{indent}LOAD2_MUL_F64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'DIV_F64':
+                        result.append(f"{indent}LOAD2_DIV_F64 {var1} {var2}")
+                        i += 2
+                        continue
+
+                    # Bitwise operations
+                    elif next_op == 'AND_I64':
+                        result.append(f"{indent}LOAD2_AND_I64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'OR_I64':
+                        result.append(f"{indent}LOAD2_OR_I64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'XOR_I64':
+                        result.append(f"{indent}LOAD2_XOR_I64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'SHL_I64':
+                        result.append(f"{indent}LOAD2_SHL_I64 {var1} {var2}")
+                        i += 2
+                        continue
+                    elif next_op == 'SHR_I64':
+                        result.append(f"{indent}LOAD2_SHR_I64 {var1} {var2}")
                         i += 2
                         continue
 
@@ -564,7 +892,7 @@ class BytecodeOptimizer:
                     continue
 
             # Pattern: Multiple STORE dst, LOAD src pairs -> FUSED_STORE_LOAD
-            # Look for sequences of STORE/LOAD pairs
+            # Look for sequences of STORE/LOAD pairs, with optional trailing STORE
             if line.startswith('STORE ') and i + 1 < len(lines) and lines[i+1].strip().startswith('LOAD '):
                 # Found first pair, look for more consecutive pairs
                 pairs = []
@@ -577,11 +905,19 @@ class BytecodeOptimizer:
                     pairs.append((dst, src))
                     j += 2
 
-                # If we found 2 or more pairs, use FUSED_STORE_LOAD
-                if len(pairs) >= 2:
+                # Check for trailing STORE (without following LOAD)
+                trailing_store = None
+                if j < len(lines) and lines[j].strip().startswith('STORE '):
+                    trailing_store = lines[j].strip().split()[1]
+                    j += 1
+
+                # If we found 2 or more pairs (or 1+ pairs with trailing store), use FUSED_STORE_LOAD
+                if len(pairs) >= 2 or (len(pairs) >= 1 and trailing_store):
                     indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('STORE') else '  '
                     # Build the fused instruction
                     args = ' '.join(f"{dst} {src}" for dst, src in pairs)
+                    if trailing_store:
+                        args += f" {trailing_store}"
                     result.append(f"{indent}FUSED_STORE_LOAD {args}")
                     i = j
                     continue
@@ -609,4 +945,83 @@ class BytecodeOptimizer:
         # For now, just return as-is (dead store elimination is complex with control flow)
         # TODO: Implement proper liveness analysis
         return lines
+
+    def optimize_negation(self, lines: List[str]) -> List[str]:
+        """Optimize negation patterns to use NEG instruction"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if line else '  '
+
+            # Pattern: CONST_I64 -1, MUL_I64 -> NEG
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 -1') and
+                lines[i+1].strip() == 'MUL_I64'):
+                result.append(f"{indent}NEG")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 0, SWAP, SUB_I64 -> NEG
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 0') and
+                lines[i+1].strip() == 'SWAP' and
+                lines[i+2].strip() == 'SUB_I64'):
+                result.append(f"{indent}NEG")
+                i += 3
+                continue
+
+            # Pattern: CONST_F64 -1, MUL_F64 -> NEG
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 -1') and
+                lines[i+1].strip() == 'MUL_F64'):
+                result.append(f"{indent}NEG")
+                i += 2
+                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_jumps(self, lines: List[str]) -> List[str]:
+        """Optimize jump chains and remove redundant jumps"""
+        # Build label map
+        label_map = {}
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('LABEL '):
+                label_name = stripped.split()[1]
+                label_map[label_name] = i
+
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if line else '  '
+
+            # Pattern: JUMP label immediately followed by LABEL label -> just LABEL
+            if (i + 1 < len(lines) and
+                line.startswith('JUMP ') and
+                lines[i+1].strip().startswith('LABEL ')):
+                
+                jump_target = line.split()[1]
+                label_name = lines[i+1].strip().split()[1]
+                
+                if jump_target == label_name:
+                    # Skip the JUMP, keep the LABEL
+                    i += 1
+                    continue
+
+            # Pattern: JUMP_IF_FALSE/TRUE followed immediately by unconditional JUMP
+            # Can sometimes be optimized to invert the condition
+            # This is complex and context-dependent, skip for now
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
 

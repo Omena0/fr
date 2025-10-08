@@ -106,6 +106,27 @@ typedef struct {
     int values[];  // Flexible array member
 } MultiInt;
 
+// Structures for STORE_CONST instructions (slot/value pairs)
+typedef struct {
+    int count;  // Number of pairs
+    int64_t pairs[];  // Interleaved: slot1, val1, slot2, val2, ...
+} StoreConstI64;
+
+typedef struct {
+    int count;  // Number of pairs
+    int64_t pairs[];  // Interleaved: slot1 (int), val1 (double bits), slot2, val2, ...
+} StoreConstF64;
+
+typedef struct {
+    int count;  // Number of pairs
+    int64_t pairs[];  // Interleaved: slot1, val1 (0 or 1), slot2, val2, ...
+} StoreConstBool;
+
+typedef struct {
+    int count;  // Number of pairs
+    char *pairs[];  // Interleaved: slot1 (cast to char*), str1, slot2, str2, ...
+} StoreConstStr;
+
 // Value types
 typedef enum
 {
@@ -173,6 +194,10 @@ typedef enum
     OP_CONST_BOOL_MULTI, // Push multiple bool constants
     OP_LOAD,
     OP_STORE,
+    OP_STORE_CONST_I64,  // Store int constants directly to slots without using stack (STORE_CONST_I64 slot1 val1 slot2 val2 ...)
+    OP_STORE_CONST_F64,  // Store float constants directly to slots without using stack (STORE_CONST_F64 slot1 val1 slot2 val2 ...)
+    OP_STORE_CONST_BOOL, // Store bool constants directly to slots without using stack (STORE_CONST_BOOL slot1 val1 slot2 val2 ...)
+    OP_STORE_CONST_STR,  // Store string constants directly to slots without using stack (STORE_CONST_STR slot1 val1 slot2 val2 ...)
     OP_ADD_I64,
     OP_SUB_I64,
     OP_MUL_I64,
@@ -2035,6 +2060,115 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_STORE;
                 inst.operand.index = safe_atoi(idx);
             }
+            else if (strcmp(token, "STORE_CONST_I64") == 0)
+            {
+                // STORE_CONST_I64 slot1 val1 slot2 val2 ...
+                // Parse pairs of (slot, value) - count pairs, allocate, then parse again
+                int64_t temp_pairs[128];  // Temporary storage
+                int pair_count = 0;
+
+                char *arg;
+                while ((arg = strtok(NULL, " ")) != NULL && pair_count < 128)
+                {
+                    temp_pairs[pair_count++] = safe_atoll(arg);
+                }
+
+                if (pair_count == 0 || pair_count % 2 != 0)
+                {
+                    fprintf(stderr, "Error: STORE_CONST_I64 requires even number of arguments (slot/value pairs)\n");
+                    exit(1);
+                }
+
+                StoreConstI64 *multi = malloc(sizeof(StoreConstI64) + pair_count * sizeof(int64_t));
+                multi->count = pair_count / 2;
+                memcpy(multi->pairs, temp_pairs, pair_count * sizeof(int64_t));
+
+                inst.op = OP_STORE_CONST_I64;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "STORE_CONST_F64") == 0)
+            {
+                // STORE_CONST_F64 slot1 val1 slot2 val2 ...
+                int64_t temp_pairs[128];
+                int pair_count = 0;
+
+                char *arg;
+                int idx = 0;
+                while ((arg = strtok(NULL, " ")) != NULL && idx < 128)
+                {
+                    if (idx % 2 == 0) {
+                        // Slot index
+                        temp_pairs[idx] = safe_atoi(arg);
+                    } else {
+                        // Float value - store as bits
+                        double val = atof(arg);
+                        memcpy(&temp_pairs[idx], &val, sizeof(double));
+                    }
+                    idx++;
+                }
+                pair_count = idx;
+
+                if (pair_count == 0 || pair_count % 2 != 0)
+                {
+                    fprintf(stderr, "Error: STORE_CONST_F64 requires even number of arguments (slot/value pairs)\n");
+                    exit(1);
+                }
+
+                StoreConstF64 *multi = malloc(sizeof(StoreConstF64) + pair_count * sizeof(int64_t));
+                multi->count = pair_count / 2;
+                memcpy(multi->pairs, temp_pairs, pair_count * sizeof(int64_t));
+
+                inst.op = OP_STORE_CONST_F64;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "STORE_CONST_BOOL") == 0)
+            {
+                // STORE_CONST_BOOL slot1 val1 slot2 val2 ...
+                int64_t temp_pairs[128];
+                int pair_count = 0;
+
+                char *arg;
+                int idx = 0;
+                while ((arg = strtok(NULL, " ")) != NULL && idx < 128)
+                {
+                    if (idx % 2 == 0) {
+                        // Slot
+                        temp_pairs[idx] = safe_atoi(arg);
+                    } else {
+                        // Bool value
+                        if (strcmp(arg, "true") == 0) {
+                            temp_pairs[idx] = 1;
+                        } else if (strcmp(arg, "false") == 0) {
+                            temp_pairs[idx] = 0;
+                        } else {
+                            temp_pairs[idx] = safe_atoi(arg);
+                        }
+                    }
+                    idx++;
+                }
+                pair_count = idx;
+
+                if (pair_count == 0 || pair_count % 2 != 0)
+                {
+                    fprintf(stderr, "Error: STORE_CONST_BOOL requires even number of arguments (slot/value pairs)\n");
+                    exit(1);
+                }
+
+                StoreConstBool *multi = malloc(sizeof(StoreConstBool) + pair_count * sizeof(int64_t));
+                multi->count = pair_count / 2;
+                memcpy(multi->pairs, temp_pairs, pair_count * sizeof(int64_t));
+
+                inst.op = OP_STORE_CONST_BOOL;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "STORE_CONST_STR") == 0)
+            {
+                // STORE_CONST_STR slot1 "val1" slot2 "val2" ...
+                // For now, skip this optimization - strings are complex
+                // Just treat it as unsupported and don't merge
+                fprintf(stderr, "Error: STORE_CONST_STR not yet implemented\n");
+                exit(1);
+            }
             else if (strcmp(token, "STORE_REF") == 0)
             {
                 char *idx = strtok(NULL, " ");
@@ -2513,7 +2647,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             // Fused store/load (reverse order)
             else if (strcmp(token, "FUSED_STORE_LOAD") == 0)
             {
-                // FUSED_STORE_LOAD dst1 src1 dst2 src2 ...
+                // FUSED_STORE_LOAD dst1 src1 dst2 src2 ... [dstN]
+                // Can have pairs plus optional trailing store
                 inst.op = OP_FUSED_STORE_LOAD;
                 char *rest_of_line = strtok(NULL, "\n");
                 if (rest_of_line == NULL)
@@ -2532,16 +2667,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     arg_str = strtok(NULL, " ");
                 }
 
-                // Arguments should be in pairs (dst/src)
-                if (arg_count % 2 != 0)
-                {
-                    fprintf(stderr, "Error: FUSED_STORE_LOAD requires pairs of dst/src\n");
-                    exit(1);
-                }
-
                 // Create safe struct
                 MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
-                multi->count = arg_count / 2; // Number of pairs
+                multi->count = arg_count; // Total number of arguments (not pairs)
                 for (int j = 0; j < arg_count; j++)
                 {
                     multi->values[j] = temp_args[j];
@@ -2712,6 +2840,10 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_CONST_BOOL_MULTI] = &&L_CONST_BOOL_MULTI,
         [OP_LOAD] = &&L_LOAD,
         [OP_STORE] = &&L_STORE,
+        [OP_STORE_CONST_I64] = &&L_STORE_CONST_I64,
+        [OP_STORE_CONST_F64] = &&L_STORE_CONST_F64,
+        [OP_STORE_CONST_BOOL] = &&L_STORE_CONST_BOOL,
+        [OP_STORE_CONST_STR] = &&L_STORE_CONST_STR,
         [OP_ADD_I64] = &&L_ADD_I64,
         [OP_SUB_I64] = &&L_SUB_I64,
         [OP_MUL_I64] = &&L_MUL_I64,
@@ -2954,6 +3086,71 @@ L_STORE_REF: // OP_STORE_REF
         current_frame->vars.vars[inst.operand.index] = v;
         DISPATCH();
     }
+}
+L_STORE_CONST_I64: // OP_STORE_CONST_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    StoreConstI64 *multi = (StoreConstI64 *)inst.operand.ptr;
+    
+    // Process each slot/value pair
+    for (int i = 0; i < multi->count; i++)
+    {
+        int slot = (int)multi->pairs[i * 2];
+        int64_t val = multi->pairs[i * 2 + 1];
+        
+        value_free(current_frame->vars.vars[slot]);
+        current_frame->vars.vars[slot] = value_make_int_si(val);
+    }
+    DISPATCH();
+}
+L_STORE_CONST_F64: // OP_STORE_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    StoreConstF64 *multi = (StoreConstF64 *)inst.operand.ptr;
+    
+    // Process each slot/value pair
+    for (int i = 0; i < multi->count; i++)
+    {
+        int slot = (int)multi->pairs[i * 2];
+        double val;
+        memcpy(&val, &multi->pairs[i * 2 + 1], sizeof(double));
+        
+        value_free(current_frame->vars.vars[slot]);
+        current_frame->vars.vars[slot] = value_make_f64(val);
+    }
+    DISPATCH();
+}
+L_STORE_CONST_BOOL: // OP_STORE_CONST_BOOL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    StoreConstBool *multi = (StoreConstBool *)inst.operand.ptr;
+    
+    // Process each slot/value pair
+    for (int i = 0; i < multi->count; i++)
+    {
+        int slot = (int)multi->pairs[i * 2];
+        int val = (int)multi->pairs[i * 2 + 1];
+        
+        value_free(current_frame->vars.vars[slot]);
+        current_frame->vars.vars[slot] = value_make_bool(val);
+    }
+    DISPATCH();
+}
+L_STORE_CONST_STR: // OP_STORE_CONST_STR
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    StoreConstStr *multi = (StoreConstStr *)inst.operand.ptr;
+    
+    // Process each slot/value pair
+    for (int i = 0; i < multi->count; i++)
+    {
+        int slot = (int)(intptr_t)multi->pairs[i * 2];
+        char *str = multi->pairs[i * 2 + 1];
+        
+        value_free(current_frame->vars.vars[slot]);
+        current_frame->vars.vars[slot] = value_make_str(str);
+    }
+    DISPATCH();
 }
 L_ADD_I64: // OP_ADD_I64
 {
@@ -5738,11 +5935,12 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
-    // Process each dst/src pair
-    for (int i = 0; i < multi->count; i++)
+    // Process pairs of dst/src, with optional trailing store
+    int i = 0;
+    while (i + 1 < multi->count)
     {
-        int dst = multi->values[i * 2];
-        int src = multi->values[i * 2 + 1];
+        int dst = multi->values[i];
+        int src = multi->values[i + 1];
 
         // STORE: pop value and store to dst
         Value val = vm_pop(vm);
@@ -5757,6 +5955,17 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
         } else {
             vm_push(vm, value_copy(v));
         }
+
+        i += 2;
+    }
+
+    // Handle trailing store if present (odd number of args)
+    if (i < multi->count)
+    {
+        int dst = multi->values[i];
+        Value val = vm_pop(vm);
+        value_free(current_frame->vars.vars[dst]);
+        current_frame->vars.vars[dst] = val;
     }
 
     DISPATCH();
