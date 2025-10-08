@@ -839,8 +839,8 @@ static inline void value_copy_ref(Value *src, Value *dst)
 void vm_init(VM *vm);
 void vm_free(VM *vm);
 
-static inline Value vm_pop(VM *vm);
-static inline void vm_push(VM *vm, Value value);
+static inline Value vm_pop(VM *vm) __attribute__((always_inline));
+static inline void vm_push(VM *vm, Value value) __attribute__((always_inline));
 
 void vm_run(VM *vm) __attribute__((hot));
 bool vm_load_bytecode(VM *vm,const char *filename);
@@ -1098,7 +1098,10 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
     exit(1);
 }
 
-// Stack operations - inline for performance
+// Stack operations - inline for performance with always_inline hint
+static inline void vm_push(VM *vm, Value value) __attribute__((always_inline));
+static inline Value vm_pop(VM *vm) __attribute__((always_inline));
+
 static inline void vm_push(VM *vm, Value value)
 {
     if (unlikely(vm->stack_top >= MAX_STACK))
@@ -2693,8 +2696,12 @@ __attribute__((hot)) void vm_run(VM *vm) {
     vm->call_stack_top = 1;
     vm->pc = entry->start_pc;
     vm->running = true;
-    // Main interpreter loop - optimized with register variables and inline operations
-    static const void *dispatch_table[] = {
+    
+    // Cache current call frame to reduce pointer arithmetic overhead
+    register CallFrame *current_frame = &vm->call_stack[0];
+    
+    // Main interpreter loop - optimized with aligned dispatch table for cache efficiency
+    static const void *dispatch_table[] __attribute__((aligned(64))) = {
         [OP_CONST_I64] = &&L_CONST_I64,
         [OP_CONST_F64] = &&L_CONST_F64,
         [OP_CONST_STR] = &&L_CONST_STR,
@@ -2912,9 +2919,15 @@ L_LOAD: // OP_LOAD
 {
     Instruction inst = vm->code[vm->pc - 1];
     {
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
-        Value v = value_copy(frame->vars.vars[inst.operand.index]);
-        vm_push(vm, v);
+        Value v = current_frame->vars.vars[inst.operand.index];
+        // Fast path for immutable types - avoid expensive copy
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
+            vm_push(vm, v);
+        } else {
+            // Slow path for mutable types - deep copy required
+            vm_push(vm, value_copy(v));
+        }
         DISPATCH();
     }
 }
@@ -2922,10 +2935,9 @@ L_STORE: // OP_STORE
 {
     Instruction inst = vm->code[vm->pc - 1];
     {
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         Value v = vm_pop(vm);
-        value_free(frame->vars.vars[inst.operand.index]);
-        frame->vars.vars[inst.operand.index] = v;
+        value_free(current_frame->vars.vars[inst.operand.index]);
+        current_frame->vars.vars[inst.operand.index] = v;
         DISPATCH();
     }
 }
@@ -2934,13 +2946,12 @@ L_STORE_REF: // OP_STORE_REF
     Instruction inst = vm->code[vm->pc - 1];
     {
         // Store a reference/pointer to stack top value instead of copying
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         Value v = vm_pop(vm);
-        value_free(frame->vars.vars[inst.operand.index]);
+        value_free(current_frame->vars.vars[inst.operand.index]);
         // Create an alias that points to the source variable
         // We need to find which variable holds this value
         // For now, just do a shallow copy - optimizer will use this for safe cases
-        frame->vars.vars[inst.operand.index] = v;
+        current_frame->vars.vars[inst.operand.index] = v;
         DISPATCH();
     }
 }
@@ -3207,6 +3218,8 @@ L_CALL: // OP_CALL
             frame->vars.vars[i] = arg;
         }
         vm->pc = func->start_pc;
+        // Update cached frame pointer
+        current_frame = frame;
         DISPATCH();
     }
 }
@@ -3228,6 +3241,8 @@ L_RETURN: // OP_RETURN
             value_free(frame->vars.vars[i]);
         }
         vm->pc = frame->return_pc;
+        // Update cached frame pointer to caller's frame
+        current_frame = &vm->call_stack[vm->call_stack_top - 1];
         vm_push(vm, ret_val);
     }
 
@@ -3250,6 +3265,8 @@ L_RETURN_VOID: // OP_RETURN_VOID
             value_free(frame->vars.vars[i]);
         }
         vm->pc = frame->return_pc;
+        // Update cached frame pointer to caller's frame
+        current_frame = &vm->call_stack[vm->call_stack_top - 1];
     }
 
     DISPATCH();
@@ -3385,15 +3402,8 @@ L_INC_LOCAL: // OP_INC_LOCAL
 {
     Instruction inst = vm->code[vm->pc - 1];
     {
-        if (vm->call_stack_top <= 0)
-        {
-            fprintf(stderr, "No active call frame\n");
-            exit(1);
-        }
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         int var_id = inst.operand.index;
-        Value *
-            var = &frame->vars.vars[var_id];
+        Value *var = &current_frame->vars.vars[var_id];
         if (likely(var->type == VAL_INT))
         {
             var->as.int64++;
@@ -3409,15 +3419,8 @@ L_DEC_LOCAL: // OP_DEC_LOCAL
 {
     Instruction inst = vm->code[vm->pc - 1];
     {
-        if (vm->call_stack_top <= 0)
-        {
-            fprintf(stderr, "No active call frame\n");
-            exit(1);
-        }
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         int var_id = inst.operand.index;
-        Value *
-            var = &frame->vars.vars[var_id];
+        Value *var = &current_frame->vars.vars[var_id];
         if (likely(var->type == VAL_INT))
         {
             var->as.int64--;
@@ -3958,11 +3961,10 @@ L_COPY_LOCAL: // OP_COPY_LOCAL
     Instruction inst = vm->code[vm->pc - 1];
     {
         // Copy local variable without using stack - deep copy
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         int src_idx = inst.operand.indices.src;
         int dst_idx = inst.operand.indices.dst;
-        value_free(frame->vars.vars[dst_idx]);
-        frame->vars.vars[dst_idx] = value_copy(frame->vars.vars[src_idx]);
+        value_free(current_frame->vars.vars[dst_idx]);
+        current_frame->vars.vars[dst_idx] = value_copy(current_frame->vars.vars[src_idx]);
         DISPATCH();
     }
 }
@@ -3972,11 +3974,10 @@ L_COPY_LOCAL_REF: // OP_COPY_LOCAL_REF
     {
         // Alias local variable - pointer copy (no deep copy)
         // This is safe when dst won't be modified before src is reassigned
-        CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
         int src_idx = inst.operand.indices.src;
         int dst_idx = inst.operand.indices.dst;
-        value_free(frame->vars.vars[dst_idx]);
-        value_copy_ref(&frame->vars.vars[src_idx], &frame->vars.vars[dst_idx]);
+        value_free(current_frame->vars.vars[dst_idx]);
+        value_copy_ref(&current_frame->vars.vars[src_idx], &current_frame->vars.vars[dst_idx]);
         DISPATCH();
     }
 }
@@ -5686,13 +5687,18 @@ L_LOAD_MULTI: // OP_LOAD_MULTI
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
-
     // Load each variable and push onto stack
     for (int i = 0; i < multi->count; i++)
     {
         int index = multi->values[i];
-        vm_push(vm, value_copy(frame->vars.vars[index]));
+        Value v = current_frame->vars.vars[index];
+        // Fast path for immutable types
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
+            vm_push(vm, v);
+        } else {
+            vm_push(vm, value_copy(v));
+        }
     }
 
     DISPATCH();
@@ -5703,8 +5709,6 @@ L_FUSED_LOAD_STORE: // OP_FUSED_LOAD_STORE
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
-
     // Process each src/dst pair
     for (int i = 0; i < multi->count; i++)
     {
@@ -5712,12 +5716,18 @@ L_FUSED_LOAD_STORE: // OP_FUSED_LOAD_STORE
         int dst = multi->values[i * 2 + 1];
 
         // LOAD: load from src and push
-        vm_push(vm, value_copy(frame->vars.vars[src]));
+        Value v = current_frame->vars.vars[src];
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
+            vm_push(vm, v);
+        } else {
+            vm_push(vm, value_copy(v));
+        }
 
         // STORE: pop value and store to dst
         Value val = vm_pop(vm);
-        value_free(frame->vars.vars[dst]);
-        frame->vars.vars[dst] = val;
+        value_free(current_frame->vars.vars[dst]);
+        current_frame->vars.vars[dst] = val;
     }
 
     DISPATCH();
@@ -5728,8 +5738,6 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
-
     // Process each dst/src pair
     for (int i = 0; i < multi->count; i++)
     {
@@ -5738,11 +5746,17 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
 
         // STORE: pop value and store to dst
         Value val = vm_pop(vm);
-        value_free(frame->vars.vars[dst]);
-        frame->vars.vars[dst] = val;
+        value_free(current_frame->vars.vars[dst]);
+        current_frame->vars.vars[dst] = val;
 
         // LOAD: load from src and push
-        vm_push(vm, value_copy(frame->vars.vars[src]));
+        Value v = current_frame->vars.vars[src];
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
+            vm_push(vm, v);
+        } else {
+            vm_push(vm, value_copy(v));
+        }
     }
 
     DISPATCH();
@@ -5752,12 +5766,11 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
 L_LOAD2_ADD_I64: // OP_LOAD2_ADD_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src; // First index
     int idx2 = inst.operand.indices.dst; // Second index
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     // Always use value_add to handle overflow detection
     Value result = value_add(a, b);
@@ -5769,12 +5782,11 @@ L_LOAD2_ADD_I64: // OP_LOAD2_ADD_I64
 L_LOAD2_SUB_I64: // OP_LOAD2_SUB_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     // Always use value_sub to handle overflow detection
     Value result = value_sub(a, b);
@@ -5786,12 +5798,11 @@ L_LOAD2_SUB_I64: // OP_LOAD2_SUB_I64
 L_LOAD2_MUL_I64: // OP_LOAD2_MUL_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     // Always use value_mul to handle overflow detection
     Value result = value_mul(a, b);
@@ -5804,12 +5815,11 @@ L_LOAD2_MUL_I64: // OP_LOAD2_MUL_I64
 L_LOAD2_CMP_LT: // OP_LOAD2_CMP_LT
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     // Fast path for int64 comparison
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
@@ -5828,12 +5838,11 @@ L_LOAD2_CMP_LT: // OP_LOAD2_CMP_LT
 L_LOAD2_CMP_GT: // OP_LOAD2_CMP_GT
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
@@ -5851,12 +5860,11 @@ L_LOAD2_CMP_GT: // OP_LOAD2_CMP_GT
 L_LOAD2_CMP_LE: // OP_LOAD2_CMP_LE
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
@@ -5874,12 +5882,11 @@ L_LOAD2_CMP_LE: // OP_LOAD2_CMP_LE
 L_LOAD2_CMP_GE: // OP_LOAD2_CMP_GE
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
@@ -5897,12 +5904,11 @@ L_LOAD2_CMP_GE: // OP_LOAD2_CMP_GE
 L_LOAD2_CMP_EQ: // OP_LOAD2_CMP_EQ
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
@@ -5920,12 +5926,11 @@ L_LOAD2_CMP_EQ: // OP_LOAD2_CMP_EQ
 L_LOAD2_CMP_NE: // OP_LOAD2_CMP_NE
 {
     Instruction inst = vm->code[vm->pc - 1];
-    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
     int idx1 = inst.operand.indices.src;
     int idx2 = inst.operand.indices.dst;
 
-    Value a = frame->vars.vars[idx1];
-    Value b = frame->vars.vars[idx2];
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
 
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
