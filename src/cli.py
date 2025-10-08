@@ -14,7 +14,7 @@ sys.path.insert(0, str(src_dir))
 from binary import encode_binary, decode_binary
 from compiler import compile_ast_to_bytecode
 from parser import parse
-from runtime import run
+from runtime import run, format_runtime_exception
 from debug_runtime import run_with_debug, init_debug_runtime
 
 def get_vm_path():
@@ -144,7 +144,7 @@ def compile_cmd(args=None):
         sys.exit(1)
 
     try:
-        bytecode = compile_ast_to_bytecode(ast)
+        bytecode, _line_map = compile_ast_to_bytecode(ast)
 
         with open(output_file, 'w') as f:
             f.write(bytecode)
@@ -301,7 +301,7 @@ def main():
 
             if use_c_backend:
                 try:
-                    bytecode = compile_ast_to_bytecode(ast)
+                    bytecode, line_map = compile_ast_to_bytecode(ast)
 
                     import tempfile
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
@@ -309,8 +309,20 @@ def main():
                         temp_bc = f.name
 
                     if vm_path := get_vm_path():
-                        # Pass program arguments to the VM
-                        result = subprocess.run([vm_path, temp_bc] + program_args)
+                        # Prepare debug info for stdin
+                        import json
+                        debug_info = json.dumps({
+                            'file': cmd,
+                            'source': source,
+                            'line_map': line_map
+                        })
+                        
+                        # Pass program arguments to the VM with --debug-info flag
+                        result = subprocess.run(
+                            [vm_path, '--debug-info', temp_bc] + program_args,
+                            input=debug_info,
+                            text=True
+                        )
                         os.unlink(temp_bc)
                         sys.exit(result.returncode)
                     else:
@@ -337,9 +349,9 @@ def main():
                         init_debug_runtime()
                         run_with_debug(ast, cmd)
                     else:
-                        run(ast)
+                        run(ast, file=cmd, source=source)
                 except RuntimeError as e:
-                    print(e)
+                    print(f'Exception: {format_runtime_exception(e)}')
                     sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")

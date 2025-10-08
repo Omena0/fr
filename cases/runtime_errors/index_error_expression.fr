@@ -1,0 +1,6 @@
+// ?5,22:Index error: list index out of range: 5 (length: 3)
+
+void main() {
+    list data = [10, 20, 30]
+    int result = data[0] + data[5]
+}

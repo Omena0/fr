@@ -15,9 +15,9 @@ def run_test_isolated(test_file, test_content):
     repo_root = Path(__file__).parent.parent
     helper_script = repo_root / 'src' / 'run_single_test.py'
 
-    # Run the helper script with test content via stdin
+    # Run the helper script with test content via stdin and filename as argument
     result = subprocess.run(
-        [sys.executable, str(helper_script)],
+        [sys.executable, str(helper_script), test_file],
         input=test_content,
         capture_output=True,
         text=True,

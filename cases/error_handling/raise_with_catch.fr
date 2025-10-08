@@ -1,0 +1,13 @@
+// !Caught custom error\nProgram continues
+
+int main() {
+    try {
+        raise "ValueError" "Caught custom error"
+        println("After raise (should not print)")
+    } except "ValueError" {
+        println("Caught custom error")
+    }
+    
+    println("Program continues")
+    return 0
+}

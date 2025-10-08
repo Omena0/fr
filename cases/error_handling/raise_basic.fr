@@ -1,0 +1,12 @@
+// !Caught RuntimeError
+
+int main() {
+    try {
+        raise "RuntimeError" "Custom error raised!"
+        println("After raise (should not print)")
+    } except "RuntimeError" {
+        println("Caught RuntimeError")
+    }
+    
+    return 0
+}

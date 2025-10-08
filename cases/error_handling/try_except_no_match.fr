@@ -1,0 +1,13 @@
+// ?7,29:float division by zero
+
+int main() {
+    try {
+        println("Before error")
+        float x = 10.0 / 0.0
+        println("After error")
+    } except "ValueError" {
+        println("Caught ValueError (should not print)")
+    }
+
+    return 0
+}

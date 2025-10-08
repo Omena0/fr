@@ -1,0 +1,10 @@
+// !100 (length: 1)
+
+void helper() {
+    list nums = [42]
+    int x = nums[100]
+}
+
+void main() {
+    helper()
+}

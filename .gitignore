@@ -5,6 +5,7 @@ __pycache__
 .venv
 extension/*
 extension
+changes.txt
 
 # Build artifacts
 build/
