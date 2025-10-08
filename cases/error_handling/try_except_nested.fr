@@ -1,0 +1,17 @@
+// !Outer try\nInner try\nOuter except caught it!
+
+int main() {
+    try {
+        println("Outer try")
+        try {
+            println("Inner try")
+            float x = 10.0 / 0.0
+        } except "ValueError" {
+            println("Inner except (should not match)")
+        }
+    } except "ZeroDivisionError" {
+        println("Outer except caught it!")
+    }
+    
+    return 0
+}

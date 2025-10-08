@@ -1481,6 +1481,39 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             node['line'] = while_line
             return node
 
+        elif word == 'try':
+            # Save line before parsing
+            try_line = stream.line
+            
+            # Parse try block
+            try_scope = parse_scope(stream, level+1)
+            
+            # Expect 'except' keyword
+            stream.strip()
+            if not stream.consume('except'):
+                raise SyntaxError(stream.format_error('Expected "except" after try block'))
+            
+            # Parse exception type in quotes
+            stream.strip()
+            if stream.peek(1) != '"':
+                raise SyntaxError(stream.format_error('Expected exception type in quotes after "except"'))
+            
+            stream.consume('"')
+            exc_type = stream.consume_until('"')
+            stream.consume('"')
+            
+            # Parse except block
+            except_scope = parse_scope(stream, level+1)
+            
+            node = make_node(stream,
+                type="try",
+                try_scope=try_scope,
+                exc_type=exc_type,
+                except_scope=except_scope
+            )
+            node['line'] = try_line
+            return node
+
         elif word == 'break':
             # Save line before parsing
             break_line = stream.line
@@ -1543,6 +1576,47 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 value=expr
             )
             node['line'] = return_line
+            return node
+
+        elif word == 'raise':
+            # Save line and char position before parsing
+            raise_line = stream.line
+            raise_char = stream.char - len('raise')
+            
+            # Parse raise statement: raise "ExceptionType" "message"
+            # or: raise "ExceptionType"
+            # or: raise (re-raise current exception)
+            rest = stream.consume_until('\n').strip()
+            
+            exc_type = None
+            message = None
+            
+            if rest:
+                # Parse exception type (must be a string literal)
+                if rest[0] == '"':
+                    # Find the closing quote
+                    end_quote = rest.find('"', 1)
+                    if end_quote == -1:
+                        raise SyntaxError(stream.format_error('Unterminated string in raise statement'))
+                    exc_type = rest[1:end_quote]
+                    rest = rest[end_quote + 1:].strip()
+                    
+                    # Parse optional message
+                    if rest and rest[0] == '"':
+                        end_quote = rest.find('"', 1)
+                        if end_quote == -1:
+                            raise SyntaxError(stream.format_error('Unterminated string in raise statement'))
+                        message = rest[1:end_quote]
+                else:
+                    raise SyntaxError(stream.format_error('raise statement requires a string literal for exception type'))
+            
+            node = make_node(stream,
+                type="raise",
+                exc_type=exc_type,
+                message=message
+            )
+            node['line'] = raise_line
+            node['char'] = raise_char
             return node
 
         elif stream.peek_char(1) == '}':
@@ -1638,15 +1712,22 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                 line_num = stream.line + line_num
         else:
             line_num = stream.line
+            # Get the actual character position from the stream if not specified
+            if char is None:
+                char = stream.char
 
         line = stream.orig_line(line_num-1)
 
         if char is not None and char < 0:
             char = len(line)+char
+        
+        # Default to position 0 if still None
+        if char is None:
+            char = 0
 
         # Format the error message with location info
-        location = f'{file}:{line_num}:{char or len(line)}' if file else f'Line {line_num}:{char or len(line)}'
-        error_msg = f'Syntax Error\n  File "{file}" line {line_num} in {current_func}\n      {line}\n      {' '*(char or len(line)) + '^'}\n    {location}: {error_text}'
+        location = f'{file}:{line_num}:{char}' if file else f'Line {line_num}:{char}'
+        error_msg = f'Syntax Error\n  File "{file}" line {line_num} in {current_func}\n      {line}\n      {' '*char + '^'}\n    {location}: {error_text}'
         
         # Always raise the exception so it can be caught by test framework or CLI
         raise SyntaxError(error_msg)

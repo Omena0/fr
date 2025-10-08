@@ -1,0 +1,6 @@
+// ?4:[RuntimeError] Test error message
+
+int main() {
+    raise "RuntimeError" "Test error message"
+    return 0
+}

@@ -1,0 +1,8 @@
+// ?6,19:Index error: list index out of range: 10 (length: 2)
+
+void main() {
+    list x = [1, 2]
+    if (true) {
+        int y = x[10]
+    }
+}

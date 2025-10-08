@@ -1,0 +1,6 @@
+// ?5,18:Index error: list index out of range: 10 (length: 3)
+
+void main() {
+    list nums = [1, 2, 3]
+    int x = nums[10]
+}

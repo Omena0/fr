@@ -1,0 +1,10 @@
+// ?6,0:Index error: list index out of range: 7 (length: 3)
+
+void main() {
+    list data = [5, 10, 15]
+    int idx = 7
+    switch (idx) {
+        case 7:
+            int val = data[7]
+    }
+}

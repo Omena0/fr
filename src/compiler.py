@@ -69,6 +69,8 @@ class BytecodeCompiler:
         # For "py_import datetime as dt": {'dt': {'module': 'datetime', 'type': 'module'}}
         # For "from datetime py_import datetime": {'datetime': {'module': 'datetime', 'type': 'name', 'name': 'datetime'}}
         self.py_imports: Dict[str, Dict[str, Any]] = {}
+        self.line_map: List[int] = []  # Maps bytecode instruction index to source line number
+        self.current_line: int = 1  # Current source line being compiled
 
     def get_label(self, prefix: str = "L") -> str:
         """Generate a unique label"""
@@ -79,6 +81,14 @@ class BytecodeCompiler:
     def emit(self, instruction: str):
         """Add an instruction to the current function's bytecode"""
         self.output.append(f"  {instruction}")
+        # Only track line numbers for actual executable instructions, not directives
+        if not instruction.lstrip().startswith('.'):
+            self.line_map.append(self.current_line)
+
+    def emit_directive(self, directive: str):
+        """Add a directive (non-executable) to the bytecode"""
+        self.output.append(f"  {directive}")
+        # Directives don't add to line_map
 
     def get_var_id(self, name: str) -> int:
         """Get or create variable ID"""
@@ -712,6 +722,10 @@ class BytecodeCompiler:
 
     def compile_statement(self, node: dict, func_return_type: str):
         """Compile a statement node"""
+        # Update current line if available
+        if 'line' in node:
+            self.current_line = node['line']
+        
         node_type = node.get('type')
 
         # Variable declaration/assignment
@@ -851,6 +865,23 @@ class BytecodeCompiler:
             else:
                 self.emit("RETURN_VOID")
 
+        elif node_type == 'raise':
+            exc_type = node.get('exc_type', '')
+            message = node.get('message', '')
+            
+            # Escape strings for bytecode
+            escaped_exc_type = escape_string_for_bytecode(exc_type) if exc_type else ''
+            escaped_message = escape_string_for_bytecode(message) if message else ''
+            
+            # Emit RAISE instruction with exception type and message
+            if exc_type and message:
+                self.emit(f'RAISE "{escaped_exc_type}" "{escaped_message}"')
+            elif exc_type:
+                self.emit(f'RAISE "{escaped_exc_type}" ""')
+            else:
+                # Bare raise - re-raise current exception
+                self.emit('RAISE "" ""')
+
         elif node_type == 'if':
             condition = node.get('condition')
             scope = node.get('scope', [])
@@ -989,6 +1020,33 @@ class BytecodeCompiler:
 
             # Pop loop from stack
             self.loop_stack.pop()
+
+        elif node_type == 'try':
+            try_scope = node.get('try_scope', [])
+            exc_type = node.get('exc_type', '')
+            except_scope = node.get('except_scope', [])
+
+            except_label = self.get_label("except")
+            end_label = self.get_label("try_end")
+
+            # Start exception handling block
+            escaped_exc_type = escape_string_for_bytecode(exc_type)
+            self.emit(f'TRY_BEGIN "{escaped_exc_type}" {except_label}')
+
+            # Compile try body
+            for stmt in try_scope:
+                self.compile_statement(stmt, func_return_type)
+
+            # End exception handling and jump to end
+            self.emit("TRY_END")
+            self.emit(f"JUMP {end_label}")
+
+            # Compile except body
+            self.emit(f"LABEL {except_label}")
+            for stmt in except_scope:
+                self.compile_statement(stmt, func_return_type)
+
+            self.emit(f"LABEL {end_label}")
 
         elif node_type == 'for':
             var_name = node.get('var', '')
@@ -1496,10 +1554,11 @@ class BytecodeCompiler:
 
         return '\n'.join(results)
 
-def compile_ast_to_bytecode(ast: AstType) -> str:
-    """Main entry point for compilation"""
+def compile_ast_to_bytecode(ast: AstType) -> tuple[str, list[int]]:
+    """Main entry point for compilation - returns (bytecode, line_map)"""
     compiler = BytecodeCompiler()
-    return compiler.compile_ast(ast)
+    bytecode = compiler.compile_ast(ast)
+    return bytecode, compiler.line_map
 
 
 if __name__ == '__main__':
@@ -1515,7 +1574,7 @@ if __name__ == '__main__':
         with open(ast_file, 'r') as f:
             ast = json.load(f)
 
-        bytecode = compile_ast_to_bytecode(ast)
+        bytecode, _line_map = compile_ast_to_bytecode(ast)
         print(bytecode)
 
     except Exception as e:

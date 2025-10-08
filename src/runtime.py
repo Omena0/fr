@@ -10,6 +10,13 @@ debug_runtime_instance = None
 # Track the actual current vars (updated when entering/exiting functions)
 _current_runtime_vars = vars
 
+# Runtime context for error formatting
+_runtime_file: str | None = None
+_runtime_source: str | None = None
+_runtime_current_line: int = 0
+_runtime_current_func: str = '<module>'
+_runtime_current_char: int = 0  # Character position for error reporting
+
 def set_debug_runtime(runtime):
     """Set the debug runtime instance (called from debug_runtime module)"""
     global debug_runtime_instance
@@ -22,6 +29,46 @@ def get_debug_runtime():
 def get_current_vars():
     """Get the current variable scope (for debugging)"""
     return _current_runtime_vars
+
+def get_runtime_context():
+    """Get the current runtime context for error formatting"""
+    return {
+        'file': _runtime_file,
+        'source': _runtime_source,
+        'line': _runtime_current_line,
+        'func': _runtime_current_func,
+        'char': _runtime_current_char
+    }
+
+def set_error_char(char: int):
+    """Set the character position for the next error"""
+    global _runtime_current_char
+    _runtime_current_char = char
+
+def format_runtime_exception(e: Exception) -> str:
+    """Format a runtime exception similar to parse-time exceptions"""
+    ctx = get_runtime_context()
+    error_msg = str(e)
+    char_pos = ctx['char']
+    
+    # Get the source line if available
+    source_line = ""
+    if ctx['source'] and ctx['line'] > 0:
+        lines = ctx['source'].split('\n')
+        if 0 < ctx['line'] <= len(lines):
+            source_line = lines[ctx['line'] - 1]
+    
+    # Format location
+    location = f"{ctx['file']}:{ctx['line']}:{char_pos}" if ctx['file'] else f"Line {ctx['line']}:{char_pos}"
+    
+    # Build error message in same format as parse errors
+    if source_line:
+        pointer = ' ' * char_pos + '^'
+        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
+    else:
+        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
+    
+    return formatted
 
 sys.setrecursionlimit(1000000000)
 sys.set_int_max_str_digits(100000000)
@@ -51,11 +98,13 @@ NODE_TYPE_IF = 'if'
 NODE_TYPE_SWITCH = 'switch'
 NODE_TYPE_FOR = 'for'
 NODE_TYPE_FOR_IN = 'for_in'
+NODE_TYPE_TRY = 'try'
 NODE_TYPE_WHILE = 'while'
 NODE_TYPE_BREAK = 'break'
 NODE_TYPE_CONTINUE = 'continue'
 NODE_TYPE_ASSERT = 'assert'
 NODE_TYPE_RETURN = 'return'
+NODE_TYPE_RAISE = 'raise'
 NODE_TYPE_INDEX_ASSIGN = 'index_assign'
 NODE_TYPE_FIELD_ASSIGN = 'field_assign'
 NODE_TYPE_STRING = 'string'
@@ -151,8 +200,10 @@ def _bind_function_args(func_args: list, arg_values: list):
 def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     # sourcery skip: avoid-builtin-shadow
     from parser import cast_args
-    global vars, runtime, _current_runtime_vars
+    global vars, runtime, _current_runtime_vars, _runtime_current_func, _runtime_current_line
     old_vars = vars
+    old_func = _runtime_current_func
+    old_line = _runtime_current_line  # Save calling line
 
     # Check if this is a struct constructor call
     if name in vars and is_struct_def(vars[name]):
@@ -180,6 +231,7 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     if not is_builtin:
         vars = _preserve_struct_definitions()
         _current_runtime_vars = vars  # Update current vars for debugger
+        _runtime_current_func = name  # Track function for error reporting
 
     # Bind function arguments to the scope
     if isinstance(func.get('args'), list):
@@ -201,6 +253,8 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     vars = old_vars
     if not is_builtin:
         _current_runtime_vars = vars  # Only restore if we changed it
+        _runtime_current_func = old_func  # Restore function name
+    _runtime_current_line = old_line  # Always restore calling line
 
     # Notify debugger of function return (only for user-defined functions)
     debug_runtime = get_debug_runtime()
@@ -221,12 +275,50 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
         try:
             return target[index]
         except (IndexError, TypeError) as e:
-            raise RuntimeError(f"Index error: {e}") from e
+            # Try to find the index operation in the source for better error reporting
+            ctx = get_runtime_context()
+            if ctx['source'] and ctx['line'] > 0:
+                lines = ctx['source'].split('\n')
+                if 0 < ctx['line'] <= len(lines):
+                    source_line = lines[ctx['line'] - 1]
+                    # Try to find the specific index value in the source
+                    # Look for patterns like [index] where index matches our error value
+                    import re
+                    # Handle negative indices - search for the literal value or the negative form
+                    search_patterns = [f'[{index}]', f'[-{abs(index)}]'] if index < 0 else [f'[{index}]']
+
+                    char_pos = None
+                    for pattern in search_patterns:
+                        pos = source_line.find(pattern)
+                        if pos >= 0:
+                            # Point to the last digit before ']'
+                            char_pos = pos + len(pattern) - 2
+                            break
+
+                    # Fallback: if we can't find the exact index, look for any bracket pair
+                    if char_pos is None:
+                        bracket_pos = source_line.find('[')
+                        if bracket_pos >= 0:
+                            close_bracket = source_line.find(']', bracket_pos)
+                            char_pos = close_bracket - 1 if close_bracket > bracket_pos else bracket_pos
+                    if char_pos is not None:
+                        set_error_char(char_pos)
+            # Create detailed error message
+            error_msg = f"Index error: list index out of range: {index}"
+            if isinstance(target, list):
+                error_msg += f" (length: {len(target)})"
+            raise RuntimeError(error_msg) from e
 
     raise RuntimeError(f"Cannot index into type {type(target).__name__}")
 
 def _handle_list_indexing(node: dict) -> Any:
     """Handle list/string indexing: arr[index]"""
+    global _runtime_current_line
+    
+    # Update current line if this node has line info
+    if 'line' in node:
+        _runtime_current_line = node['line']
+    
     target = eval_expr_node(node['value'])
     index = eval_expr_node(node['slice'])
     
@@ -547,6 +639,8 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
         except Exception as e:
             if isinstance(left, str):
                 raise SyntaxError(f'{left} is not defined.') from e
+            # Re-raise all other exceptions (ZeroDivisionError, etc.)
+            raise
 
     return left
 
@@ -787,14 +881,75 @@ def _execute_node_assert(node: dict):
             raise AssertionError(message)
         raise AssertionError('Assertion failed')
 
+def _execute_node_try(node: dict, level: int) -> Any:
+    """Handle try-except statement"""
+    try:
+        # Execute the try block
+        result = run_scope(node['try_scope'], level+1)
+        return result
+    except Exception as e:
+        # Get the exception type name
+        exc_name = type(e).__name__
+        expected_exc = node['exc_type']
+        
+        # Check if the exception type matches
+        if exc_name == expected_exc:
+            # Execute the except block
+            result = run_scope(node['except_scope'], level+1)
+            return result
+        else:
+            # Re-raise if it doesn't match
+            raise
+
+def _execute_node_raise(node: dict):
+    """Handle raise statement"""
+    global _runtime_current_char
+    
+    exc_type = node.get('exc_type')
+    message = node.get('message', '')
+    
+    # Update character position for error reporting
+    if 'char' in node:
+        _runtime_current_char = node['char']
+    
+    if not exc_type:
+        # Bare raise - re-raise current exception
+        raise
+    
+    # Map exception type string to Python exception class
+    exc_classes = {
+        'ZeroDivisionError': ZeroDivisionError,
+        'ValueError': ValueError,
+        'TypeError': TypeError,
+        'IndexError': IndexError,
+        'KeyError': KeyError,
+        'AttributeError': AttributeError,
+        'RuntimeError': RuntimeError,
+        'AssertionError': AssertionError,
+        'Exception': Exception,
+    }
+    
+    exc_class = exc_classes.get(exc_type, RuntimeError)
+    
+    # Include exception type in message for better error reporting
+    full_message = f"[{exc_type}] {message}" if message else f"[{exc_type}]"
+    
+    raise exc_class(full_message)
+
 def run_scope(ast: AstType, level=0):
     """Execute a scope (list of AST nodes)"""
+    global _runtime_current_line
     result = None
 
     for idx, node in enumerate(ast):
+        # Update current line for error context
+        if isinstance(node, dict):
+            _runtime_current_line = node.get('line', idx + 1)
+        else:
+            _runtime_current_line = idx + 1
+            
         if debug_runtime := get_debug_runtime():
-            line = node.get('line', idx + 1) if isinstance(node, dict) else idx + 1
-            debug_runtime.notify_line(line)
+            debug_runtime.notify_line(_runtime_current_line)
 
         # Handle call expressions from AST first (e.g. method calls like obj.method())
         # These don't have a 'type' key, just 'func' and 'args'
@@ -836,6 +991,10 @@ def run_scope(ast: AstType, level=0):
             _execute_node_for_in(node, level)
         elif node_type == NODE_TYPE_WHILE:
             _execute_node_while(node)
+        elif node_type == NODE_TYPE_TRY:
+            result = _execute_node_try(node, level)
+            if result is not None:
+                return result
         elif node_type == NODE_TYPE_BREAK:
             raise BreakException(node.get('level', 1))
         elif node_type == NODE_TYPE_CONTINUE:
@@ -844,15 +1003,23 @@ def run_scope(ast: AstType, level=0):
             _execute_node_assert(node)
         elif node_type == NODE_TYPE_RETURN:
             return eval_expr(node['value'])
+        elif node_type == NODE_TYPE_RAISE:
+            _execute_node_raise(node)
         else:
             raise RuntimeError(f'Unknown node type: {node_type}')
 
     return result
 
-def run(ast:AstType):
+def run(ast:AstType, file:str='', source:str=''):
     # Use lock to prevent race conditions in parallel test execution
     with _runtime_lock:
         global vars, runtime, funcs, py_imports, _current_runtime_vars
+        global _runtime_file, _runtime_source, _runtime_current_func
+        
+        # Initialize runtime context for error formatting
+        _runtime_file = file
+        _runtime_source = source
+        _runtime_current_func = '<module>'
         
         runtime = True
         # Reset vars to clear any state from previous runs (critical for parallel test execution)

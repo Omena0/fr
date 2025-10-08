@@ -5,7 +5,6 @@
  * Optimized version with aggressive compiler hints
  */
 #define _POSIX_C_SOURCE 200809L
-#define _XOPEN_SOURCE 500
 #define _USE_MATH_DEFINES  // For M_PI on some platforms
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +80,10 @@ char* unescape_string(const char* str) {
 typedef struct Value Value;
 typedef struct List List;
 typedef struct Struct Struct;
+typedef struct VM VM;  // Forward declare VM
+
+// Global VM pointer for error reporting (set during vm_run)
+static VM *g_current_vm = NULL;
 
 // Safe multi-value structures (avoid type-punning)
 typedef struct {
@@ -149,12 +152,14 @@ typedef struct Value
         PyObject *pyobj;    // Python object pointer
     } as;
 } Value;
+
 // Variable storage
 typedef struct
 {
     Value vars[MAX_VARS];
     int var_count;
 } VarTable;
+
 // Instruction
 typedef enum
 {
@@ -337,6 +342,11 @@ typedef enum
     OP_PY_GETATTR,        // Get attribute from Python object (obj, attr_name -> value)
     OP_PY_SETATTR,        // Set attribute on Python object (obj, attr_name, value -> none)
     OP_PY_CALL_METHOD,    // Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
+
+    // Exception handling
+    OP_TRY_BEGIN,         // Begin exception handler (exc_type, label -> void)
+    OP_TRY_END,           // End exception handler (-> void)
+    OP_RAISE,             // Raise an exception (exc_type, message -> void)
 } OpCode;
 
 // Instruction structure
@@ -357,6 +367,7 @@ typedef struct
         } indices;
     } operand;
 } Instruction;
+
 // Function info
 typedef struct
 {
@@ -367,12 +378,14 @@ typedef struct
     int end_pc;
     ValueType return_type;
 } Function;
+
 // Label info
 typedef struct
 {
     char *name;
     int pc;
 } Label;
+
 // Call frame
 typedef struct
 {
@@ -382,8 +395,9 @@ typedef struct
 } CallFrame;
 
 // Struct definition metadata
-#define MAX_STRUCTS 64
+#define MAX_STRUCTS 256
 #define MAX_STRUCT_FIELDS 32
+#define MAX_EXCEPTION_HANDLERS 64
 
 typedef struct
 {
@@ -392,33 +406,58 @@ typedef struct
     char *field_names[MAX_STRUCT_FIELDS]; // Field names for debugging
 } StructDef;
 
-// VM state
+// Exception handler
 typedef struct
+{
+    char *exc_type;       // Exception type to catch (e.g., "ZeroDivisionError")
+    int handler_pc;       // PC to jump to when exception is caught
+    int stack_top;        // Stack top at the time of TRY_BEGIN
+    int call_stack_top;   // Call stack top at the time of TRY_BEGIN
+} ExceptionHandler;
+
+// VM state
+typedef struct VM
 {
     Value stack[MAX_STACK];
     int stack_top;
     Instruction code[MAX_CODE];
     int code_count;
     int pc;
+
     Function functions[MAX_FUNCTIONS];
     int func_count;
     Label labels[MAX_LABELS];
     int label_count;
+
     CallFrame call_stack[MAX_CALL_STACK];
     int call_stack_top;
     char *entry_point;
     bool running;
+
     int exit_code;  // Exit code for the program (0 = success, 1 = error)
     StructDef structs[MAX_STRUCTS];  // Struct definitions
     int struct_count;                // Number of registered structs
     int prog_argc;                   // Program argument count
     char **prog_argv;                // Program arguments
+
+    // Exception handling
+    ExceptionHandler exception_handlers[MAX_EXCEPTION_HANDLERS];
+    int exception_handler_count;     // Number of active exception handlers
+
+    // Debug information
+    char *debug_source_file;         // Source file path for error reporting
+    char **debug_source_lines;       // Array of source code lines
+    int debug_source_line_count;     // Number of source lines
+    char *debug_current_func;        // Current function name for error reporting
+    int *debug_line_map;             // Maps PC to source line number
+    int debug_line_map_count;        // Number of entries in line map
 } VM;
 
 // Forward declarations for helper functions
 void value_free(Value v);
 Value value_copy(Value v);
 void list_free(List *list);
+void vm_runtime_error(VM *vm, const char *message, int char_pos);
 
 // Safe parsing helpers (use strtol family instead of unsafe ato* functions)
 static inline int64_t safe_atoll(const char *str)
@@ -503,8 +542,7 @@ Value value_make_void()
 }
 
 // List helper functions
-List *list_new()
-{
+List *list_new() {
     List *list = malloc(sizeof(List));
     if (!list)
     {
@@ -522,8 +560,7 @@ List *list_new()
     return list;
 }
 
-void list_append(List *list, Value value)
-{
+void list_append(List *list, Value value) {
     if (list->length >= list->capacity)
     {
         // Double capacity
@@ -538,9 +575,9 @@ void list_append(List *list, Value value)
     list->items[list->length++] = value_copy(value);
 }
 
-Value list_get(List *list, int index)
-{
+Value list_get(List *list, int index) {
     // Handle negative indices (Python-style)
+    int original_index = index;  // Save for error message
     if (index < 0)
     {
         index = list->length + index;
@@ -548,15 +585,60 @@ Value list_get(List *list, int index)
 
     if (index < 0 || index >= list->length)
     {
-        fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
+        char error_msg[256];
+        snprintf(error_msg, sizeof(error_msg), "Index error: list index out of range: %d (length: %d)", original_index, list->length);
+
+        // Try to find the exact index value in the source line for better error reporting
+        int char_pos = 0;
+        if (g_current_vm && g_current_vm->debug_source_lines) {
+            int line_idx = g_current_vm->pc >= 2 && g_current_vm->debug_line_map_count > 0
+                ? g_current_vm->debug_line_map[(g_current_vm->pc - 2) % g_current_vm->debug_line_map_count]
+                : 0;
+
+            if (line_idx > 0 && line_idx <= g_current_vm->debug_source_line_count) {
+                const char *source_line = g_current_vm->debug_source_lines[line_idx - 1];
+                
+                // Try to find the exact index pattern [index]
+                char search_pattern[32];
+                int found = 0;
+                
+                // Try searching for [original_index] first
+                snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
+                const char *pattern_pos = strstr(source_line, search_pattern);
+                if (pattern_pos) {
+                    // Point to the last digit before ']'
+                    char_pos = pattern_pos - source_line + strlen(search_pattern) - 2;
+                    found = 1;
+                }
+                
+                // Fallback: find any bracket pair if exact match not found
+                if (!found) {
+                    const char *bracket = strchr(source_line, '[');
+                    if (bracket) {
+                        const char *close_bracket = strchr(bracket, ']');
+                        if (close_bracket && close_bracket > bracket) {
+                            char_pos = close_bracket - source_line - 1;
+                        } else {
+                            char_pos = bracket - source_line;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (g_current_vm) {
+            vm_runtime_error(g_current_vm, error_msg, char_pos);
+        } else {
+            fprintf(stderr, "Error: %s\n", error_msg);
+        }
         exit(1);
     }
     return value_copy(list->items[index]);
 }
 
-void list_set(List *list, int index, Value value)
-{
+void list_set(List *list, int index, Value value) {
     // Handle negative indices (Python-style)
+    int original_index = index;  // Save for error message
     if (index < 0)
     {
         index = list->length + index;
@@ -564,15 +646,59 @@ void list_set(List *list, int index, Value value)
 
     if (index < 0 || index >= list->length)
     {
-        fprintf(stderr, "Error: List index out of range: %d (length: %d)\n", index, list->length);
+        char error_msg[256];
+        snprintf(error_msg, sizeof(error_msg), "Index error: list index out of range: %d (length: %d)", original_index, list->length);
+
+        // Try to find the exact index value in the source line for better error reporting
+        int char_pos = 0;
+        if (g_current_vm && g_current_vm->debug_source_lines) {
+            int line_idx = g_current_vm->pc >= 2 && g_current_vm->debug_line_map_count > 0
+                ? g_current_vm->debug_line_map[(g_current_vm->pc - 2) % g_current_vm->debug_line_map_count]
+                : 0;
+
+            if (line_idx > 0 && line_idx <= g_current_vm->debug_source_line_count) {
+                const char *source_line = g_current_vm->debug_source_lines[line_idx - 1];
+                
+                // Try to find the exact index pattern [index]
+                char search_pattern[32];
+                int found = 0;
+                
+                // Try searching for [original_index] first
+                snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
+                const char *pattern_pos = strstr(source_line, search_pattern);
+                if (pattern_pos) {
+                    // Point to the last digit before ']'
+                    char_pos = pattern_pos - source_line + strlen(search_pattern) - 2;
+                    found = 1;
+                }
+                
+                // Fallback: find any bracket pair if exact match not found
+                if (!found) {
+                    const char *bracket = strchr(source_line, '[');
+                    if (bracket) {
+                        const char *close_bracket = strchr(bracket, ']');
+                        if (close_bracket && close_bracket > bracket) {
+                            char_pos = close_bracket - source_line - 1;
+                        } else {
+                            char_pos = bracket - source_line;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (g_current_vm) {
+            vm_runtime_error(g_current_vm, error_msg, char_pos);
+        } else {
+            fprintf(stderr, "Error: %s\n", error_msg);
+        }
         exit(1);
     }
     value_free(list->items[index]);
     list->items[index] = value_copy(value);
 }
 
-Value list_pop(List *list)
-{
+Value list_pop(List *list) {
     if (list->length == 0)
     {
         fprintf(stderr, "Error: Cannot pop from empty list\n");
@@ -581,8 +707,7 @@ Value list_pop(List *list)
     return list->items[--list->length];
 }
 
-void list_free(List *list)
-{
+void list_free(List *list) {
     if (!list)
         return;
     for (int i = 0; i < list->length; i++)
@@ -593,24 +718,21 @@ void list_free(List *list)
     free(list);
 }
 
-Value value_make_list()
-{
+Value value_make_list() {
     Value v;
     v.type = VAL_LIST;
     v.as.list = list_new();
     return v;
 }
 
-Value value_wrap_list(List *list)
-{
+Value value_wrap_list(List *list) {
     Value v;
     v.type = VAL_LIST;
     v.as.list = list;
     return v;
 }
 
-void value_free(Value v)
-{
+void value_free(Value v) {
     if (v.type == VAL_BIGINT && v.as.bigint)
     {
         mpz_clear(*v.as.bigint);
@@ -640,6 +762,7 @@ void value_free(Value v)
         Py_XDECREF(v.as.pyobj);
     }
 }
+
 Value value_copy(Value v)
 {
     if (v.type == VAL_INT)
@@ -696,6 +819,7 @@ Value value_copy(Value v)
     }
     return v; // Other types are simple values
 }
+
 // Create an alias to another value - for now just shallow copy (good enough for int64)
 static inline void value_copy_ref(Value *src, Value *dst)
 {
@@ -710,17 +834,23 @@ static inline void value_copy_ref(Value *src, Value *dst)
         *dst = value_copy(*src); // Deep copy for mutable types
     }
 }
+
 // Function prototypes
 void vm_init(VM *vm);
 void vm_free(VM *vm);
+
 static inline Value vm_pop(VM *vm);
 static inline void vm_push(VM *vm, Value value);
+
 void vm_run(VM *vm) __attribute__((hot));
 bool vm_load_bytecode(VM *vm,const char *filename);
+
 Function *vm_find_function(VM *vm,const char *name);
+
 int vm_find_label(VM *vm,const char *name);
 void value_print(Value val);
 Value value_to_string(Value val);
+
 static inline Value value_add(Value a, Value b);
 static inline Value value_sub(Value a, Value b);
 static inline Value value_mul(Value a, Value b);
@@ -743,6 +873,13 @@ void vm_init(VM *vm)
     vm->struct_count = 0;
     vm->prog_argc = 0;
     vm->prog_argv = NULL;
+    vm->exception_handler_count = 0;
+    vm->debug_source_file = NULL;
+    vm->debug_source_lines = NULL;
+    vm->debug_source_line_count = 0;
+    vm->debug_current_func = strdup("<module>");
+    vm->debug_line_map = NULL;
+    vm->debug_line_map_count = 0;
 
     // Initialize Python interpreter
     if (!Py_IsInitialized()) {
@@ -752,6 +889,7 @@ void vm_init(VM *vm)
         PyRun_SimpleString("sys.path.insert(0, '.')");
     }
 }
+
 // Free VM resources
 void vm_free(VM *vm)
 {
@@ -759,6 +897,12 @@ void vm_free(VM *vm)
     for (int i = 0; i < vm->stack_top; i++)
     {
         value_free(vm->stack[i]);
+    }
+    // Free exception handlers
+    for (int i = 0; i < vm->exception_handler_count; i++)
+    {
+        if (vm->exception_handlers[i].exc_type)
+            free(vm->exception_handlers[i].exc_type);
     }
     // Free function names
     for (int i = 0; i < vm->func_count; i++)
@@ -779,6 +923,11 @@ void vm_free(VM *vm)
     for (int i = 0; i < vm->code_count; i++)
     {
         if (vm->code[i].op == OP_CONST_STR && vm->code[i].operand.str_val)
+        {
+            free(vm->code[i].operand.str_val);
+        }
+        // Free TRY_BEGIN and RAISE operands
+        else if ((vm->code[i].op == OP_TRY_BEGIN || vm->code[i].op == OP_RAISE) && vm->code[i].operand.str_val)
         {
             free(vm->code[i].operand.str_val);
         }
@@ -806,11 +955,149 @@ void vm_free(VM *vm)
         }
     }
 
+    // Free debug information
+    if (vm->debug_source_file)
+        free(vm->debug_source_file);
+    if (vm->debug_current_func)
+        free(vm->debug_current_func);
+    if (vm->debug_source_lines) {
+        for (int i = 0; i < vm->debug_source_line_count; i++) {
+            if (vm->debug_source_lines[i])
+                free(vm->debug_source_lines[i]);
+        }
+        free(vm->debug_source_lines);
+    }
+    if (vm->debug_line_map)
+        free(vm->debug_line_map);
+
     // Finalize Python interpreter
     if (Py_IsInitialized()) {
         Py_Finalize();
     }
 }
+
+// Helper function to format runtime errors with debug information
+void vm_runtime_error(VM *vm, const char *message, int char_pos) {
+    // Check if there's an active exception handler
+    if (vm->exception_handler_count > 0) {
+        // Find the most recent handler
+        ExceptionHandler *handler = &vm->exception_handlers[vm->exception_handler_count - 1];
+        
+        // Extract exception type from message
+        // Format: "[ExceptionType] actual message" or just "actual message"
+        char extracted_type[256] = "RuntimeError";  // Default, on stack but persistent during function
+        const char *exc_type = extracted_type;
+        const char *display_message = message;  // Message to display
+        
+        // Check for [ExceptionType] marker at start
+        if (message[0] == '[') {
+            const char *end_bracket = strchr(message, ']');
+            if (end_bracket) {
+                // Extract exception type
+                size_t type_len = end_bracket - message - 1;
+                if (type_len < sizeof(extracted_type)) {
+                    strncpy(extracted_type, message + 1, type_len);
+                    extracted_type[type_len] = '\0';
+                    exc_type = extracted_type;
+                    
+                    // Skip past the marker and space to get display message
+                    display_message = end_bracket + 1;
+                    while (*display_message == ' ') display_message++;
+                }
+            }
+        }
+        // Fallback: try to detect from message content
+        else if (strstr(message, "division by zero") || strstr(message, "Division by zero") || 
+            strstr(message, "float division by zero")) {
+            strcpy(extracted_type, "ZeroDivisionError");
+            exc_type = extracted_type;
+        } else if (strstr(message, "Index error") || strstr(message, "index out of range")) {
+            strcpy(extracted_type, "IndexError");
+            exc_type = extracted_type;
+        } else if (strstr(message, "Type error")) {
+            strcpy(extracted_type, "TypeError");
+            exc_type = extracted_type;
+        } else if (strstr(message, "Value error")) {
+            strcpy(extracted_type, "ValueError");
+            exc_type = extracted_type;
+        }
+        
+        // Check if the handler matches this exception type
+        if (strcmp(handler->exc_type, exc_type) == 0 || strcmp(handler->exc_type, "") == 0) {
+            // Restore stack state
+            vm->stack_top = handler->stack_top;
+            vm->call_stack_top = handler->call_stack_top;
+            
+            // Jump to exception handler
+            vm->pc = handler->handler_pc;
+            
+            // Pop the exception handler
+            free(handler->exc_type);
+            handler->exc_type = NULL;
+            vm->exception_handler_count--;
+            
+            return;  // Continue execution at handler
+        }
+        
+        // Handler doesn't match - pop it and continue searching or error
+        free(handler->exc_type);
+        handler->exc_type = NULL;
+        vm->exception_handler_count--;
+        
+        // Recursively check for other handlers
+        // Use display_message to avoid showing the [Type] marker
+        if (vm->exception_handler_count > 0) {
+            vm_runtime_error(vm, display_message, char_pos);
+            return;
+        }
+        
+        // No more handlers - will fall through to error printing
+        // Use display_message for cleaner output
+        message = display_message;
+    }
+    
+    // No handler found or handler doesn't match - print error and exit
+    fprintf(stderr, "Exception: Runtime Error\n");
+
+    if (vm->debug_source_file && vm->debug_source_lines && vm->debug_source_line_count > 0) {
+        // Get line number from line map based on PC
+        // Note: PC has already been incremented by DISPATCH(), so we need PC-2 to get the current instruction
+        int line = 1; // Default to line 1
+        int pc_index = vm->pc - 2;
+        if (vm->debug_line_map && pc_index >= 0 && pc_index < vm->debug_line_map_count) {
+            line = vm->debug_line_map[pc_index];
+        }
+
+        // Try to find current function name from call stack
+        const char *func_name = vm->debug_current_func ? vm->debug_current_func : "<module>";
+        if (vm->call_stack_top > 0) {
+            func_name = vm->call_stack[vm->call_stack_top - 1].func->name;
+        }
+
+        fprintf(stderr, "  File \"%s\" line %d in %s\n", vm->debug_source_file, line, func_name);
+
+        if (line > 0 && line <= vm->debug_source_line_count) {
+            const char *source_line = vm->debug_source_lines[line - 1];
+            fprintf(stderr, "      %s\n", source_line);
+
+            // Print pointer at character position
+            fprintf(stderr, "      ");
+            for (int i = 0; i < char_pos; i++) {
+                fprintf(stderr, " ");
+            }
+            fprintf(stderr, "^\n");
+
+            fprintf(stderr, "    %s:%d:%d: %s\n", vm->debug_source_file, line, char_pos, message);
+        } else {
+            fprintf(stderr, "    %s:%d:%d: %s\n", vm->debug_source_file, line, char_pos, message);
+        }
+    } else {
+        fprintf(stderr, "Error: %s\n", message);
+    }
+    
+    exit(1);
+}
+
 // Stack operations - inline for performance
 static inline void vm_push(VM *vm, Value value)
 {
@@ -830,6 +1117,7 @@ static inline Value vm_pop(VM *vm)
     }
     return vm->stack[--vm->stack_top];
 }
+
 // Print value
 void value_print(Value val)
 {
@@ -885,6 +1173,7 @@ void value_print(Value val)
         break;
     }
 }
+
 // Convert value to string
 Value value_to_string(Value val)
 {
@@ -960,6 +1249,7 @@ Value value_to_string(Value val)
     }
     return result;
 }
+
 // Helper: Check if int64 addition would overflow
 static inline bool would_add_overflow(int64_t a, int64_t b)
 {
@@ -969,6 +1259,7 @@ static inline bool would_add_overflow(int64_t a, int64_t b)
         return true;
     return false;
 }
+
 // Helper: Check if int64 multiplication would overflow
 static inline bool would_mul_overflow(int64_t a, int64_t b)
 {
@@ -986,6 +1277,7 @@ static inline bool would_mul_overflow(int64_t a, int64_t b)
         return true;
     return false;
 }
+
 // Helper: Promote int64 to bigint
 static inline Value promote_to_bigint(int64_t val)
 {
@@ -995,6 +1287,7 @@ static inline Value promote_to_bigint(int64_t val)
     mpz_init_set_si(*result.as.bigint, val);
     return result;
 }
+
 // Arithmetic operations - inline for performance
 static inline Value value_add(Value a, Value b)
 {
@@ -1070,6 +1363,7 @@ static inline Value value_add(Value a, Value b)
     fprintf(stderr, "Type error in addition\n");
     exit(1);
 }
+
 Value value_sub(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
@@ -1097,6 +1391,7 @@ Value value_sub(Value a, Value b)
     fprintf(stderr, "Type error in subtraction\n");
     exit(1);
 }
+
 Value value_mul(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
@@ -1138,6 +1433,7 @@ Value value_mul(Value a, Value b)
     fprintf(stderr, "Type error in multiplication\n");
     exit(1);
 }
+
 Value value_div(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
@@ -1165,6 +1461,7 @@ Value value_div(Value a, Value b)
     fprintf(stderr, "Type error in division\n");
     exit(1);
 }
+
 Value value_mod(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
@@ -1350,9 +1647,7 @@ Value python_to_fr_value(PyObject *obj) {
 }
 
 // Find function by name
-Function *vm_find_function(VM *vm,
-                           const char *name)
-{
+Function *vm_find_function(VM *vm, const char *name) {
     for (int i = 0; i < vm->func_count; i++)
     {
         if (strcmp(vm->functions[i].name, name) == 0)
@@ -1363,9 +1658,7 @@ Function *vm_find_function(VM *vm,
     return NULL;
 }
 // Find label by name
-int vm_find_label(VM *vm,
-                  const char *name)
-{
+int vm_find_label(VM *vm, const char *name) {
     for (int i = 0; i < vm->label_count; i++)
     {
         if (strcmp(vm->labels[i].name, name) == 0)
@@ -1376,9 +1669,7 @@ int vm_find_label(VM *vm,
     return -1;
 }
 // Load bytecode from file
-bool vm_load_bytecode(VM *vm,
-                      const char *filename)
-{
+bool vm_load_bytecode(VM *vm, const char *filename) {
     FILE *file = fopen(filename, "r");
     if (!file)
     {
@@ -1964,6 +2255,77 @@ bool vm_load_bytecode(VM *vm,
                 inst.op = OP_PY_SETATTR;
             else if (strcmp(token, "PY_CALL_METHOD") == 0)
                 inst.op = OP_PY_CALL_METHOD;
+            // Exception handling
+            else if (strcmp(token, "TRY_BEGIN") == 0)
+            {
+                // TRY_BEGIN "exc_type" label
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: TRY_BEGIN requires exc_type and label\n");
+                    exit(1);
+                }
+                
+                // Parse quoted exception type
+                char *p = rest_of_line;
+                while (*p == ' ' || *p == '\t') p++; // Skip whitespace
+                
+                if (*p != '"')
+                {
+                    fprintf(stderr, "Error: TRY_BEGIN expects quoted exception type\n");
+                    exit(1);
+                }
+                p++; // Skip opening quote
+                
+                char *exc_type_start = p;
+                while (*p && *p != '"') p++;
+                
+                if (*p != '"')
+                {
+                    fprintf(stderr, "Error: TRY_BEGIN unterminated string\n");
+                    exit(1);
+                }
+                
+                size_t exc_type_len = p - exc_type_start;
+                char *exc_type = malloc(exc_type_len + 1);
+                strncpy(exc_type, exc_type_start, exc_type_len);
+                exc_type[exc_type_len] = '\0';
+                
+                p++; // Skip closing quote
+                
+                // Skip whitespace to get label
+                while (*p == ' ' || *p == '\t') p++;
+                
+                char *label = strdup(p);
+                
+                inst.op = OP_TRY_BEGIN;
+                // Store both exc_type and label as a combined string (we'll parse it in execution)
+                // Format: "exc_type|label"
+                size_t combined_len = strlen(exc_type) + strlen(label) + 2;
+                char *combined = malloc(combined_len);
+                snprintf(combined, combined_len, "%s|%s", exc_type, label);
+                inst.operand.str_val = combined;
+                
+                free(exc_type);
+                free(label);
+            }
+            else if (strcmp(token, "TRY_END") == 0)
+            {
+                inst.op = OP_TRY_END;
+            }
+            else if (strcmp(token, "RAISE") == 0)
+            {
+                // RAISE "exc_type" "message"
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: RAISE requires exc_type and message\n");
+                    exit(1);
+                }
+                
+                inst.op = OP_RAISE;
+                inst.operand.str_val = strdup(rest_of_line);
+            }
             else if (strcmp(token, "POP") == 0)
                 inst.op = OP_POP;
             else if (strcmp(token, "DUP") == 0)
@@ -2288,8 +2650,10 @@ bool vm_load_bytecode(VM *vm,
     return true;
 }
 // Execute VM
-__attribute__((hot)) void vm_run(VM *vm)
-{
+__attribute__((hot)) void vm_run(VM *vm) {
+    // Set global VM for error reporting
+    g_current_vm = vm;
+
     // Find entry point function
     Function *entry = vm_find_function(vm, vm->entry_point);
     if (!entry)
@@ -2474,6 +2838,9 @@ __attribute__((hot)) void vm_run(VM *vm)
         [OP_PY_GETATTR] = &&L_PY_GETATTR,
         [OP_PY_SETATTR] = &&L_PY_SETATTR,
         [OP_PY_CALL_METHOD] = &&L_PY_CALL_METHOD,
+        [OP_TRY_BEGIN] = &&L_TRY_BEGIN,
+        [OP_TRY_END] = &&L_TRY_END,
+        [OP_RAISE] = &&L_RAISE,
     };
 #define DISPATCH() goto *dispatch_table[vm->code[vm->pc++].op]
     DISPATCH();
@@ -2628,8 +2995,36 @@ L_DIV_F64: // OP_DIV_F64
     // For DIV_F64, always return float result
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
+        if (b.as.int64 == 0) {
+            vm_runtime_error(vm, "float division by zero", 0);
+            exit(1);
+        }
         double result = (double)a.as.int64 / (double)b.as.int64;
         vm_push(vm, value_make_f64(result));
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_F64)
+    {
+        if (b.as.f64 == 0.0) {
+            vm_runtime_error(vm, "float division by zero", 0);
+            exit(1);
+        }
+        vm_push(vm, value_make_f64(a.as.f64 / b.as.f64));
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        if (b.as.f64 == 0.0) {
+            vm_runtime_error(vm, "float division by zero", 0);
+            exit(1);
+        }
+        vm_push(vm, value_make_f64((double)a.as.int64 / b.as.f64));
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        if (b.as.int64 == 0) {
+            vm_runtime_error(vm, "float division by zero", 0);
+            exit(1);
+        }
+        vm_push(vm, value_make_f64(a.as.f64 / (double)b.as.int64));
     }
     else
     {
@@ -3140,7 +3535,11 @@ L_DIV_CONST_I64: // OP_DIV_CONST_I64
         int64_t const_val = inst.operand.int64;
         if (const_val == 0)
         {
-            fprintf(stderr, "Division by zero\n");
+            if (g_current_vm) {
+                vm_runtime_error(g_current_vm, "Division by zero", 0);
+            } else {
+                fprintf(stderr, "Division by zero\n");
+            }
             exit(1);
         }
         if (likely(a.type == VAL_INT))
@@ -3659,13 +4058,54 @@ L_LIST_GET: // OP_LIST_GET - Also works for strings
     else if (container_val.type == VAL_STR)
     {
         // Get character at index as a string
-        if (index < 0 || index >= (int)strlen(container_val.as.str))
+        int original_index = index;
+        int str_len = (int)strlen(container_val.as.str);
+        
+        // Handle negative indices
+        if (index < 0)
         {
-            fprintf(stderr, "Error: String index out of range\n");
+            index = str_len + index;
+        }
+        
+        if (index < 0 || index >= str_len)
+        {
+            char error_msg[256];
+            snprintf(error_msg, sizeof(error_msg), "Index error: string index out of range: %d (length: %d)", original_index, str_len);
+            
+            // Try to find the exact index value in the source line
+            int char_pos = 0;
+            if (vm->debug_source_lines) {
+                int line_idx = vm->pc >= 2 && vm->debug_line_map_count > 0
+                    ? vm->debug_line_map[(vm->pc - 2) % vm->debug_line_map_count]
+                    : 0;
+
+                if (line_idx > 0 && line_idx <= vm->debug_source_line_count) {
+                    const char *source_line = vm->debug_source_lines[line_idx - 1];
+                    
+                    // Try to find the exact index pattern [index]
+                    char search_pattern[32];
+                    snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
+                    const char *pattern_pos = strstr(source_line, search_pattern);
+                    if (pattern_pos) {
+                        // Point to the last digit before ']'
+                        char_pos = pattern_pos - source_line + strlen(search_pattern) - 2;
+                    } else {
+                        // Fallback: find any bracket pair
+                        const char *bracket = strchr(source_line, '[');
+                        if (bracket) {
+                            const char *close_bracket = strchr(bracket, ']');
+                            if (close_bracket && close_bracket > bracket) {
+                                char_pos = close_bracket - source_line - 1;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            vm_runtime_error(vm, error_msg, char_pos);
+            fflush(stderr);
             value_free(container_val);
-            vm->running = false;
-            vm->exit_code = 1;
-            return;
+            exit(1);
         }
         char *char_str = malloc(2);
         char_str[0] = container_val.as.str[index];
@@ -4587,7 +5027,11 @@ L_FILE_CHDIR: // OP_FILE_CHDIR - Change working directory (path -> void)
     }
 
     const char *path = path_val.as.str;
-    chdir(path);
+    if (chdir(path) != 0) {
+        fprintf(stderr, "Runtime error: chdir() failed for path: %s\n", path);
+        value_free(path_val);
+        exit(1);
+    }
 
     value_free(path_val);
     DISPATCH();
@@ -5232,6 +5676,7 @@ L_ASSERT: // OP_ASSERT - Assert with optional message
 L_HALT: // OP_HALT
 {
     vm->running = false;
+    g_current_vm = NULL; // Clear global VM pointer
     return; // Exit the interpreter loop
 }
 
@@ -5726,7 +6171,7 @@ L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name,
     value_free(value_val);
     value_free(attr_name_val);
     value_free(obj_val);
-    
+
     // Push void value (since setattr returns None)
     Value void_val = {.type = VAL_VOID};
     vm_push(vm, void_val);
@@ -5825,23 +6270,298 @@ L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name,
     DISPATCH();
 }
 
+L_TRY_BEGIN: // OP_TRY_BEGIN - Begin exception handler
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    
+    // Parse combined string "exc_type|label"
+    char *combined = strdup(inst.operand.str_val);
+    char *exc_type = strtok(combined, "|");
+    char *label_name = strtok(NULL, "|");
+    
+    if (!label_name) {
+        fprintf(stderr, "Error: TRY_BEGIN malformed operand\n");
+        free(combined);
+        exit(1);
+    }
+    
+    // Find label PC
+    int handler_pc = vm_find_label(vm, label_name);
+    if (handler_pc == -1) {
+        fprintf(stderr, "Error: Exception handler label not found: %s\n", label_name);
+        free(combined);
+        exit(1);
+    }
+    
+    // Push exception handler onto stack
+    if (vm->exception_handler_count >= MAX_EXCEPTION_HANDLERS) {
+        fprintf(stderr, "Error: Maximum exception handler depth exceeded\n");
+        free(combined);
+        exit(1);
+    }
+    
+    ExceptionHandler *handler = &vm->exception_handlers[vm->exception_handler_count++];
+    handler->exc_type = strdup(exc_type);
+    handler->handler_pc = handler_pc;
+    handler->stack_top = vm->stack_top;
+    handler->call_stack_top = vm->call_stack_top;
+    
+    free(combined);
+    DISPATCH();
+}
+
+L_TRY_END: // OP_TRY_END - End exception handler (pop from handler stack)
+{
+    if (vm->exception_handler_count > 0) {
+        vm->exception_handler_count--;
+        ExceptionHandler *handler = &vm->exception_handlers[vm->exception_handler_count];
+        free(handler->exc_type);
+        handler->exc_type = NULL;
+    }
+    DISPATCH();
+}
+
+L_RAISE: // OP_RAISE - Raise an exception
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    
+    // Parse exception type and message from quoted strings
+    // Format: "ExceptionType" "message" or "ExceptionType" "" or "" ""
+    char *msg = inst.operand.str_val;
+    
+    // Make a working copy to avoid modifying the original
+    char *working = strdup(msg);
+    char *p = working;
+    while (*p == ' ' || *p == '\t') p++;
+    
+    char exc_type[256] = "";
+    char message[1024] = "";
+    
+    if (*p == '"') {
+        // Parse exception type
+        p++; // Skip opening quote
+        char *exc_start = p;
+        while (*p && *p != '"') p++;
+        
+        if (*p == '"') {
+            size_t exc_len = p - exc_start;
+            if (exc_len < sizeof(exc_type)) {
+                strncpy(exc_type, exc_start, exc_len);
+                exc_type[exc_len] = '\0';
+            }
+            p++; // Skip closing quote
+            
+            // Skip whitespace to message
+            while (*p == ' ' || *p == '\t') p++;
+            
+            if (*p == '"') {
+                p++; // Skip opening quote of message
+                char *msg_start = p;
+                while (*p && *p != '"') p++;
+                if (*p == '"') {
+                    size_t msg_len = p - msg_start;
+                    if (msg_len < sizeof(message)) {
+                        strncpy(message, msg_start, msg_len);
+                        message[msg_len] = '\0';
+                    }
+                }
+            }
+        }
+    }
+    
+    free(working);
+    
+    // Build the error message
+    // For detection of exception type, we'll use the exc_type directly in vm_runtime_error
+    // But the message shown to user should just be the message itself
+    char full_message[2048];
+    if (message[0] != '\0') {
+        snprintf(full_message, sizeof(full_message), "%s", message);
+    } else if (exc_type[0] != '\0') {
+        snprintf(full_message, sizeof(full_message), "%s", exc_type);
+    } else {
+        // Bare raise (re-raise current exception) - not supported in C VM yet
+        fprintf(stderr, "Error: Bare raise not supported in C VM\n");
+        exit(1);
+    }
+    
+    // Trigger the error
+    // Pass the exc_type info by including it as a detectable pattern
+    // We'll modify vm_runtime_error to detect the exception type from exc_type variable
+    // For now, prepend it in a way vm_runtime_error can detect
+    char error_with_type[4096];  // Increased buffer size to prevent truncation
+    if (exc_type[0] != '\0') {
+        // Add a marker that vm_runtime_error can detect and remove
+        snprintf(error_with_type, sizeof(error_with_type), "[%s] %s", exc_type, full_message);
+    } else {
+        snprintf(error_with_type, sizeof(error_with_type), "%s", full_message);
+    }
+    
+    vm_runtime_error(vm, error_with_type, 0);
+    // If we get here, a handler was found and vm_runtime_error returned
+    // The PC has been updated to jump to the handler, so just dispatch
+    DISPATCH();
+}
+
     exit(1);
 }
-int main(int argc, char **argv)
-{
+
+int main(int argc, char **argv) {
     if (argc < 2)
     {
-        fprintf(stderr, "Usage: %s <bytecode_file> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--debug-info] <bytecode_file> [args...]\n", argv[0]);
         return 1;
     }
+
     VM vm;
     vm_init(&vm);
 
-    // Store program arguments (skip program name and bytecode file)
-    vm.prog_argc = argc - 2;  // Number of arguments after the bytecode file
-    vm.prog_argv = (argc > 2) ? &argv[2] : NULL;  // Pointer to first program argument
+    // Check for --debug-info flag
+    int arg_offset = 1;
+    bool has_debug_info = false;
+    if (strcmp(argv[1], "--debug-info") == 0) {
+        has_debug_info = true;
+        arg_offset = 2;
 
-    if (!vm_load_bytecode(&vm, argv[1]))
+        if (argc < 3) {
+            fprintf(stderr, "Error: --debug-info flag requires bytecode file argument\n");
+            return 1;
+        }
+    }
+
+    if (has_debug_info) {
+        // Read JSON debug info from stdin
+        char buffer[1024 * 1024]; // 1MB buffer
+        size_t total_read = 0;
+        size_t bytes_read;
+
+        while ((bytes_read = fread(buffer + total_read, 1, sizeof(buffer) - total_read - 1, stdin)) > 0) {
+            total_read += bytes_read;
+            if (total_read >= sizeof(buffer) - 1) break;
+        }
+        buffer[total_read] = '\0';
+
+        // Simple JSON parsing (looking for "file" and "source" fields)
+        char *file_start = strstr(buffer, "\"file\":");
+        char *source_start = strstr(buffer, "\"source\":");
+
+        if (file_start) {
+            // Skip past "file": and find the opening quote of the value
+            file_start = strchr(file_start + 6, '"'); // Skip past "file"
+            if (file_start) {
+                file_start++; // Skip the opening quote
+                char *file_end = strchr(file_start, '"');
+                if (file_end) {
+                    vm.debug_source_file = strndup(file_start, file_end - file_start);
+                }
+            }
+        }
+
+        if (source_start) {
+            // Skip past "source": and find the opening quote of the value
+            source_start = strchr(source_start + 8, '"'); // Skip past "source"
+            if (source_start) {
+                source_start++; // Skip the opening quote
+
+                // Parse the JSON string, handling escape sequences
+                char *source_buffer = malloc(strlen(source_start) + 1);
+                int src_idx = 0;
+                int dst_idx = 0;
+            bool in_escape = false;
+
+            while (source_start[src_idx] && source_start[src_idx] != '"') {
+                if (in_escape) {
+                    switch (source_start[src_idx]) {
+                        case 'n': source_buffer[dst_idx++] = '\n'; break;
+                        case 't': source_buffer[dst_idx++] = '\t'; break;
+                        case 'r': source_buffer[dst_idx++] = '\r'; break;
+                        case '\\': source_buffer[dst_idx++] = '\\'; break;
+                        case '"': source_buffer[dst_idx++] = '"'; break;
+                        default: source_buffer[dst_idx++] = source_start[src_idx]; break;
+                    }
+                    in_escape = false;
+                } else if (source_start[src_idx] == '\\') {
+                    in_escape = true;
+                } else {
+                    source_buffer[dst_idx++] = source_start[src_idx];
+                }
+                src_idx++;
+            }
+            source_buffer[dst_idx] = '\0';
+
+            // Split source into lines
+            int line_count = 1;
+            for (int i = 0; i < dst_idx; i++) {
+                if (source_buffer[i] == '\n') line_count++;
+            }
+
+            vm.debug_source_lines = malloc(sizeof(char*) * line_count);
+            vm.debug_source_line_count = line_count;
+
+            char *line_start = source_buffer;
+            int line_idx = 0;
+            for (int i = 0; i <= dst_idx; i++) {
+                if (source_buffer[i] == '\n' || source_buffer[i] == '\0') {
+                    int line_len = source_buffer + i - line_start;
+                    vm.debug_source_lines[line_idx] = strndup(line_start, line_len);
+                    line_idx++;
+                    line_start = source_buffer + i + 1;
+                }
+            }
+
+            free(source_buffer);
+            }
+        }
+
+        // Parse line_map array
+        char *line_map_start = strstr(buffer, "\"line_map\":");
+        if (line_map_start) {
+            line_map_start = strchr(line_map_start, '[');
+            if (line_map_start) {
+                line_map_start++; // Skip [
+
+                // Count entries
+                int count = 0;
+                char *p = line_map_start;
+                while (*p && *p != ']') {
+                    if (*p == ',' || (*p >= '0' && *p <= '9')) {
+                        if (*p >= '0' && *p <= '9') {
+                            while (*p >= '0' && *p <= '9') p++;
+                            count++;
+                            while (*p == ' ' || *p == ',') p++;
+                        } else {
+                            p++;
+                        }
+                    } else {
+                        p++;
+                    }
+                }
+
+                if (count > 0) {
+                    vm.debug_line_map = malloc(sizeof(int) * count);
+                    vm.debug_line_map_count = count;
+
+                    p = line_map_start;
+                    int idx = 0;
+                    while (*p && *p != ']' && idx < count) {
+                        while (*p == ' ' || *p == ',') p++;
+                        if (*p >= '0' && *p <= '9') {
+                            vm.debug_line_map[idx++] = atoi(p);
+                            while (*p >= '0' && *p <= '9') p++;
+                        } else {
+                            p++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Store program arguments (skip program name, optional --debug-info flag, and bytecode file)
+    vm.prog_argc = argc - arg_offset - 1;
+    vm.prog_argv = (argc > arg_offset + 1) ? &argv[arg_offset + 1] : NULL;
+
+    if (!vm_load_bytecode(&vm, argv[arg_offset]))
     {
         return 1;
     }
@@ -5850,3 +6570,5 @@ int main(int argc, char **argv)
     vm_free(&vm);
     return exit_code;
 }
+
+
