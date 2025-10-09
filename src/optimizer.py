@@ -10,6 +10,7 @@ class BytecodeOptimizer:
 
     def __init__(self):
         self.labels: Dict[str, int] = {}  # Label -> line number
+        self.label_counter: int = 0  # Counter for generating unique labels
 
     def optimize(self, bytecode: str) -> str:
         """Apply all optimization passes to bytecode"""
@@ -39,7 +40,106 @@ class BytecodeOptimizer:
         # Pass 7: Remove dead stores
         lines = self.remove_dead_stores(lines)
 
+        # Pass 8: Algebraic simplifications (identity operations)
+        lines = self.algebraic_simplifications(lines)
+
+        # Pass 9: Optimize comparison inversions (NOT after comparison)
+        lines = self.optimize_comparison_inversions(lines)
+
+        # Pass 10: Constant folding
+        lines = self.constant_folding(lines)
+
+        # Pass 11: Fuse repeated arithmetic+store blocks with differing operands
+        lines = self.fuse_repeated_arith_store(lines)
+
+        # Pass 12: Optimize switch-case patterns
+        lines = self.optimize_switch_cases(lines)
+
+        # Pass 13: Fuse similar labeled blocks (switch case bodies with same pattern)
+        lines = self.fuse_similar_case_bodies(lines)
+
+        # Pass 14: Cache and reuse loaded values with DUP
+        lines = self.cache_loaded_values(lines)
+
+        # Pass 15: Eliminate redundant loop continuation labels
+        lines = self.eliminate_redundant_continue_labels(lines)
+
         return '\n'.join(lines)
+
+    def fuse_repeated_arith_store(self, lines: List[str]) -> List[str]:
+        """Detect repeated blocks of the form:
+        LOAD <src>
+        CONST_I64|CONST_F64 <val>
+        <OP>
+        STORE <dst>
+
+        And fuse consecutive repetitions into a single FUSED_ARITH_CONST
+        instruction that carries the op, type and a flat list of (src dst val)
+        triples. This reduces instruction overhead when the same operation is
+        applied multiple times with different operands.
+        """
+        result: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            # Try to match a block at i
+            if i + 3 < len(lines):
+                a = lines[i].strip()
+                b = lines[i+1].strip()
+                c = lines[i+2].strip()
+                d = lines[i+3].strip()
+
+                # Match LOAD, CONST, OP, STORE
+                if a.startswith('LOAD ') and (b.startswith('CONST_I64 ') or b.startswith('CONST_F64 ')) and d.startswith('STORE '):
+                    # Determine op and type
+                    if c in ('ADD_I64', 'SUB_I64', 'MUL_I64', 'DIV_I64', 'MOD_I64') and b.startswith('CONST_I64 '):
+                        typ = 'I64'
+                        op = c.replace('_I64', '')
+                    elif c in ('ADD_F64', 'SUB_F64', 'MUL_F64', 'DIV_F64') and b.startswith('CONST_F64 '):
+                        typ = 'F64'
+                        op = c.replace('_F64', '')
+                    else:
+                        typ = None
+                        op = None
+
+                    if typ is not None:
+                        # Collect consecutive matching blocks
+                        blocks: List[Tuple[str, str, str]] = []
+                        j = i
+                        while j + 3 < len(lines):
+                            a2 = lines[j].strip()
+                            b2 = lines[j+1].strip()
+                            c2 = lines[j+2].strip()
+                            d2 = lines[j+3].strip()
+
+                            if not (a2.startswith('LOAD ') and d2.startswith('STORE ')):
+                                break
+
+                            # same type and op
+                            if typ == 'I64' and not (b2.startswith('CONST_I64 ') and c2 == f'{op}_I64'):
+                                break
+                            if typ == 'F64' and not (b2.startswith('CONST_F64 ') and c2 == f'{op}_F64'):
+                                break
+
+                            src = a2.split()[1]
+                            const_val = b2.split(' ', 1)[1]
+                            dst = d2.split()[1]
+                            blocks.append((src, dst, const_val))
+                            j += 4
+
+                        if len(blocks) >= 2:
+                            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+                            # Build fused instr: FUSED_ARITH_CONST <OP> <TYPE> <count> <src dst val ...>
+                            args = ' '.join(f"{s} {t} {v}" for s, t, v in blocks)
+                            result.append(f"{indent}FUSED_ARITH_CONST {op} {typ} {len(blocks)} {args}")
+                            i = j
+                            continue
+
+            # default: copy
+            result.append(lines[i])
+            i += 1
+
+        return result
 
     def merge_const_store_init(self, lines: List[str]) -> List[str]:
         """
@@ -55,22 +155,22 @@ class BytecodeOptimizer:
             indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
 
             # Pattern: CONST_I64 X followed by STORE Y
-            if (i + 1 < len(lines) and 
-                line.startswith('CONST_I64 ') and 
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
                 lines[i+1].strip().startswith('STORE ')):
-                
+
                 pairs = []
                 j = i
-                
+
                 # Collect consecutive CONST_I64 + STORE pairs
-                while (j + 1 < len(lines) and 
-                       lines[j].strip().startswith('CONST_I64 ') and 
+                while (j + 1 < len(lines) and
+                       lines[j].strip().startswith('CONST_I64 ') and
                        lines[j+1].strip().startswith('STORE ')):
                     const_val = lines[j].strip().split('CONST_I64 ', 1)[1]
                     store_slot = lines[j+1].strip().split('STORE ', 1)[1]
                     pairs.append((store_slot, const_val))
                     j += 2
-                
+
                 if len(pairs) >= 1:
                     args = []
                     for slot, val in pairs:
@@ -80,21 +180,21 @@ class BytecodeOptimizer:
                     continue
 
             # Pattern: CONST_F64 X followed by STORE Y
-            if (i + 1 < len(lines) and 
-                line.startswith('CONST_F64 ') and 
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
                 lines[i+1].strip().startswith('STORE ')):
-                
+
                 pairs = []
                 j = i
-                
-                while (j + 1 < len(lines) and 
-                       lines[j].strip().startswith('CONST_F64 ') and 
+
+                while (j + 1 < len(lines) and
+                       lines[j].strip().startswith('CONST_F64 ') and
                        lines[j+1].strip().startswith('STORE ')):
                     const_val = lines[j].strip().split('CONST_F64 ', 1)[1]
                     store_slot = lines[j+1].strip().split('STORE ', 1)[1]
                     pairs.append((store_slot, const_val))
                     j += 2
-                
+
                 if len(pairs) >= 1:
                     args = []
                     for slot, val in pairs:
@@ -104,21 +204,21 @@ class BytecodeOptimizer:
                     continue
 
             # Pattern: CONST_BOOL X followed by STORE Y
-            if (i + 1 < len(lines) and 
-                line.startswith('CONST_BOOL ') and 
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_BOOL ') and
                 lines[i+1].strip().startswith('STORE ')):
-                
+
                 pairs = []
                 j = i
-                
-                while (j + 1 < len(lines) and 
-                       lines[j].strip().startswith('CONST_BOOL ') and 
+
+                while (j + 1 < len(lines) and
+                       lines[j].strip().startswith('CONST_BOOL ') and
                        lines[j+1].strip().startswith('STORE ')):
                     const_val = lines[j].strip().split('CONST_BOOL ', 1)[1]
                     store_slot = lines[j+1].strip().split('STORE ', 1)[1]
                     pairs.append((store_slot, const_val))
                     j += 2
-                
+
                 if len(pairs) >= 1:
                     args = []
                     for slot, val in pairs:
@@ -129,7 +229,7 @@ class BytecodeOptimizer:
 
             # Pattern: CONST_STR X followed by STORE Y
             # Strings are complex with quoting, skip for now
-            
+
             result.append(lines[i])
             i += 1
 
@@ -151,12 +251,12 @@ class BytecodeOptimizer:
             if line.startswith('CONST_I64 '):
                 constants = [line.split('CONST_I64 ', 1)[1]]
                 j = i + 1
-                
+
                 # Collect consecutive CONST_I64 instructions
                 while j < len(lines) and lines[j].strip().startswith('CONST_I64 '):
                     constants.append(lines[j].strip().split('CONST_I64 ', 1)[1])
                     j += 1
-                
+
                 # Only merge if we have 2 or more
                 if len(constants) >= 2:
                     result.append(f"{indent}CONST_I64 {' '.join(constants)}")
@@ -167,11 +267,11 @@ class BytecodeOptimizer:
             if line.startswith('CONST_F64 '):
                 constants = [line.split('CONST_F64 ', 1)[1]]
                 j = i + 1
-                
+
                 while j < len(lines) and lines[j].strip().startswith('CONST_F64 '):
                     constants.append(lines[j].strip().split('CONST_F64 ', 1)[1])
                     j += 1
-                
+
                 if len(constants) >= 2:
                     result.append(f"{indent}CONST_F64 {' '.join(constants)}")
                     i = j
@@ -181,11 +281,11 @@ class BytecodeOptimizer:
             if line.startswith('CONST_BOOL '):
                 constants = [line.split('CONST_BOOL ', 1)[1]]
                 j = i + 1
-                
+
                 while j < len(lines) and lines[j].strip().startswith('CONST_BOOL '):
                     constants.append(lines[j].strip().split('CONST_BOOL ', 1)[1])
                     j += 1
-                
+
                 if len(constants) >= 2:
                     result.append(f"{indent}CONST_BOOL {' '.join(constants)}")
                     i = j
@@ -196,13 +296,13 @@ class BytecodeOptimizer:
             if line.startswith('CONST_STR "'):
                 constants = []
                 j = i
-                
+
                 while j < len(lines) and lines[j].strip().startswith('CONST_STR "'):
                     # Extract the quoted string (everything after 'CONST_STR ')
                     const_str = lines[j].strip()[10:]  # len('CONST_STR ') = 10
                     constants.append(const_str)
                     j += 1
-                
+
                 if len(constants) >= 2:
                     result.append(f"{indent}CONST_STR {' '.join(constants)}")
                     i = j
@@ -306,7 +406,7 @@ class BytecodeOptimizer:
                             # Safe to optimize if followed by an arithmetic/comparison operation
                             safe_ops = ['ADD_', 'SUB_', 'MUL_', 'DIV_', 'MOD_', 'CMP_', 'AND', 'OR', 'NOT']
                             is_safe = any(following_line.startswith(op) for op in safe_ops)
-                            
+
                             if is_safe:
                                 # Keep STORE, add DUP before it, skip LOAD
                                 result.append(lines[i].replace('STORE', 'DUP\n  STORE'))
@@ -363,11 +463,11 @@ class BytecodeOptimizer:
             if line.startswith('ADD_CONST_I64 '):
                 constants = [line.split('ADD_CONST_I64 ', 1)[1]]
                 j = i + 1
-                
+
                 while j < len(lines) and lines[j].strip().startswith('ADD_CONST_I64 '):
                     constants.append(lines[j].strip().split('ADD_CONST_I64 ', 1)[1])
                     j += 1
-                
+
                 if len(constants) >= 2:
                     result.append(f"{indent}ADD_CONST_I64 {' '.join(constants)}")
                     i = j
@@ -511,6 +611,128 @@ class BytecodeOptimizer:
 
                 const_val = line.split()[1]
                 result.append(f"{indent}XOR_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, SHL_I64 -> SHL_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'SHL_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}SHL_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, SHR_I64 -> SHR_CONST_I64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'SHR_I64'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}SHR_CONST_I64 {const_val}")
+                i += 2
+                continue
+
+            # Comparison constant optimizations
+            # Pattern: CONST_I64 N, CMP_LT -> CMP_LT_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_LT'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_LT_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, CMP_GT -> CMP_GT_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_GT'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_GT_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, CMP_LE -> CMP_LE_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_LE'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_LE_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, CMP_GE -> CMP_GE_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_GE'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_GE_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, CMP_EQ -> CMP_EQ_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_EQ'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_EQ_CONST {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 N, CMP_NE -> CMP_NE_CONST N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip() == 'CMP_NE'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_NE_CONST {const_val}")
+                i += 2
+                continue
+
+            # Float comparison constant optimizations
+            # Pattern: CONST_F64 N, CMP_LT -> CMP_LT_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'CMP_LT'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_LT_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, CMP_GT -> CMP_GT_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'CMP_GT'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_GT_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, CMP_LE -> CMP_LE_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'CMP_LE'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_LE_CONST_F64 {const_val}")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 N, CMP_GE -> CMP_GE_CONST_F64 N
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip() == 'CMP_GE'):
+
+                const_val = line.split()[1]
+                result.append(f"{indent}CMP_GE_CONST_F64 {const_val}")
                 i += 2
                 continue
 
@@ -875,7 +1097,7 @@ class BytecodeOptimizer:
                 # Found first pair, look for more consecutive pairs
                 pairs = []
                 j = i
-                while (j + 1 < len(lines) and 
+                while (j + 1 < len(lines) and
                        lines[j].strip().startswith('LOAD ') and
                        lines[j+1].strip().startswith('STORE ')):
                     src = lines[j].strip().split()[1]
@@ -897,7 +1119,7 @@ class BytecodeOptimizer:
                 # Found first pair, look for more consecutive pairs
                 pairs = []
                 j = i
-                while (j + 1 < len(lines) and 
+                while (j + 1 < len(lines) and
                        lines[j].strip().startswith('STORE ') and
                        lines[j+1].strip().startswith('LOAD ')):
                     dst = lines[j].strip().split()[1]
@@ -1006,10 +1228,10 @@ class BytecodeOptimizer:
             if (i + 1 < len(lines) and
                 line.startswith('JUMP ') and
                 lines[i+1].strip().startswith('LABEL ')):
-                
+
                 jump_target = line.split()[1]
                 label_name = lines[i+1].strip().split()[1]
-                
+
                 if jump_target == label_name:
                     # Skip the JUMP, keep the LABEL
                     i += 1
@@ -1024,4 +1246,831 @@ class BytecodeOptimizer:
 
         return result
 
+    def algebraic_simplifications(self, lines: List[str]) -> List[str]:
+        """Apply algebraic simplifications (identity operations)"""
+        result = []
+        i = 0
 
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if line else '  '
+
+            # Pattern: CONST_I64 0, ADD_I64 -> POP (x + 0 = x, but value already on stack)
+            # Actually, x + 0 = x means we can just remove both instructions
+            if (i + 1 < len(lines) and
+                line == 'CONST_I64 0' and
+                lines[i+1].strip() == 'ADD_I64'):
+                # Skip both - result is already on stack
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 0, SUB_I64 -> nothing (x - 0 = x)
+            if (i + 1 < len(lines) and
+                line == 'CONST_I64 0' and
+                lines[i+1].strip() == 'SUB_I64'):
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 1, MUL_I64 -> nothing (x * 1 = x)
+            if (i + 1 < len(lines) and
+                line == 'CONST_I64 1' and
+                lines[i+1].strip() == 'MUL_I64'):
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 0, MUL_I64 -> POP, CONST_I64 0 (x * 0 = 0)
+            if (i + 1 < len(lines) and
+                line == 'CONST_I64 0' and
+                lines[i+1].strip() == 'MUL_I64'):
+                result.append(f"{indent}POP")
+                result.append(f"{indent}CONST_I64 0")
+                i += 2
+                continue
+
+            # Pattern: CONST_I64 1, DIV_I64 -> nothing (x / 1 = x)
+            if (i + 1 < len(lines) and
+                line == 'CONST_I64 1' and
+                lines[i+1].strip() == 'DIV_I64'):
+                i += 2
+                continue
+
+            # Float equivalents
+            # Pattern: CONST_F64 0.0, ADD_F64 -> nothing (x + 0.0 = x)
+            if (i + 1 < len(lines) and
+                line in ['CONST_F64 0.0', 'CONST_F64 0'] and
+                lines[i+1].strip() == 'ADD_F64'):
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 0.0, SUB_F64 -> nothing (x - 0.0 = x)
+            if (i + 1 < len(lines) and
+                line in ['CONST_F64 0.0', 'CONST_F64 0'] and
+                lines[i+1].strip() == 'SUB_F64'):
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 1.0, MUL_F64 -> nothing (x * 1.0 = x)
+            if (i + 1 < len(lines) and
+                line in ['CONST_F64 1.0', 'CONST_F64 1'] and
+                lines[i+1].strip() == 'MUL_F64'):
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 0.0, MUL_F64 -> POP, CONST_F64 0.0 (x * 0.0 = 0.0)
+            if (i + 1 < len(lines) and
+                line in ['CONST_F64 0.0', 'CONST_F64 0'] and
+                lines[i+1].strip() == 'MUL_F64'):
+                result.append(f"{indent}POP")
+                result.append(f"{indent}CONST_F64 0.0")
+                i += 2
+                continue
+
+            # Pattern: CONST_F64 1.0, DIV_F64 -> nothing (x / 1.0 = x)
+            if (i + 1 < len(lines) and
+                line in ['CONST_F64 1.0', 'CONST_F64 1'] and
+                lines[i+1].strip() == 'DIV_F64'):
+                i += 2
+                continue
+
+            # Logical identities
+            # Pattern: CONST_BOOL true, AND -> nothing (x AND true = x)
+            if (i + 1 < len(lines) and
+                line == 'CONST_BOOL true' and
+                lines[i+1].strip() == 'AND'):
+                i += 2
+                continue
+
+            # Pattern: CONST_BOOL false, AND -> POP, CONST_BOOL false (x AND false = false)
+            if (i + 1 < len(lines) and
+                line == 'CONST_BOOL false' and
+                lines[i+1].strip() == 'AND'):
+                result.append(f"{indent}POP")
+                result.append(f"{indent}CONST_BOOL false")
+                i += 2
+                continue
+
+            # Pattern: CONST_BOOL false, OR -> nothing (x OR false = x)
+            if (i + 1 < len(lines) and
+                line == 'CONST_BOOL false' and
+                lines[i+1].strip() == 'OR'):
+                i += 2
+                continue
+
+            # Pattern: CONST_BOOL true, OR -> POP, CONST_BOOL true (x OR true = true)
+            if (i + 1 < len(lines) and
+                line == 'CONST_BOOL true' and
+                lines[i+1].strip() == 'OR'):
+                result.append(f"{indent}POP")
+                result.append(f"{indent}CONST_BOOL true")
+                i += 2
+                continue
+
+            # Pattern: NOT, NOT -> nothing (double negation cancels out)
+            if (i + 1 < len(lines) and
+                line == 'NOT' and
+                lines[i+1].strip() == 'NOT'):
+                i += 2
+                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_comparison_inversions(self, lines: List[str]) -> List[str]:
+        """Optimize comparison inversions (NOT after comparison -> inverted comparison)"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if line else '  '
+
+            # Pattern: CMP_LT, NOT -> CMP_GE
+            if (i + 1 < len(lines) and
+                line == 'CMP_LT' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_GE")
+                i += 2
+                continue
+
+            # Pattern: CMP_GT, NOT -> CMP_LE
+            if (i + 1 < len(lines) and
+                line == 'CMP_GT' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_LE")
+                i += 2
+                continue
+
+            # Pattern: CMP_LE, NOT -> CMP_GT
+            if (i + 1 < len(lines) and
+                line == 'CMP_LE' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_GT")
+                i += 2
+                continue
+
+            # Pattern: CMP_GE, NOT -> CMP_LT
+            if (i + 1 < len(lines) and
+                line == 'CMP_GE' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_LT")
+                i += 2
+                continue
+
+            # Pattern: CMP_EQ, NOT -> CMP_NE
+            if (i + 1 < len(lines) and
+                line == 'CMP_EQ' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_NE")
+                i += 2
+                continue
+
+            # Pattern: CMP_NE, NOT -> CMP_EQ
+            if (i + 1 < len(lines) and
+                line == 'CMP_NE' and
+                lines[i+1].strip() == 'NOT'):
+                result.append(f"{indent}CMP_EQ")
+                i += 2
+                continue
+
+            # Also handle LOAD2_CMP variants
+            # Pattern: LOAD2_CMP_LT, NOT -> LOAD2_CMP_GE
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_LT ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_LT ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_GE {args}")
+                i += 2
+                continue
+
+            # Pattern: LOAD2_CMP_GT, NOT -> LOAD2_CMP_LE
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_GT ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_GT ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_LE {args}")
+                i += 2
+                continue
+
+            # Pattern: LOAD2_CMP_LE, NOT -> LOAD2_CMP_GT
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_LE ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_LE ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_GT {args}")
+                i += 2
+                continue
+
+            # Pattern: LOAD2_CMP_GE, NOT -> LOAD2_CMP_LT
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_GE ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_GE ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_LT {args}")
+                i += 2
+                continue
+
+            # Pattern: LOAD2_CMP_EQ, NOT -> LOAD2_CMP_NE
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_EQ ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_EQ ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_NE {args}")
+                i += 2
+                continue
+
+            # Pattern: LOAD2_CMP_NE, NOT -> LOAD2_CMP_EQ
+            if (i + 1 < len(lines) and
+                line.startswith('LOAD2_CMP_NE ') and
+                lines[i+1].strip() == 'NOT'):
+                args = line.split('LOAD2_CMP_NE ', 1)[1]
+                result.append(f"{indent}LOAD2_CMP_EQ {args}")
+                i += 2
+                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def constant_folding(self, lines: List[str]) -> List[str]:
+        """Fold constant expressions at compile time"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if line else '  '
+
+            # Pattern: CONST_I64 A, CONST_I64 B, ADD_I64 -> CONST_I64 (A+B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'ADD_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a + b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, SUB_I64 -> CONST_I64 (A-B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'SUB_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a - b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, MUL_I64 -> CONST_I64 (A*B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'MUL_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a * b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, DIV_I64 -> CONST_I64 (A//B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'DIV_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    if b != 0:
+                        result.append(f"{indent}CONST_I64 {a // b}")
+                        i += 3
+                        continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, MOD_I64 -> CONST_I64 (A%B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'MOD_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    if b != 0:
+                        result.append(f"{indent}CONST_I64 {a % b}")
+                        i += 3
+                        continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_F64 A, CONST_F64 B, ADD_F64 -> CONST_F64 (A+B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip().startswith('CONST_F64 ') and
+                lines[i+2].strip() == 'ADD_F64'):
+                try:
+                    a = float(line.split()[1])
+                    b = float(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_F64 {a + b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_F64 A, CONST_F64 B, SUB_F64 -> CONST_F64 (A-B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip().startswith('CONST_F64 ') and
+                lines[i+2].strip() == 'SUB_F64'):
+                try:
+                    a = float(line.split()[1])
+                    b = float(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_F64 {a - b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_F64 A, CONST_F64 B, MUL_F64 -> CONST_F64 (A*B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip().startswith('CONST_F64 ') and
+                lines[i+2].strip() == 'MUL_F64'):
+                try:
+                    a = float(line.split()[1])
+                    b = float(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_F64 {a * b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_F64 A, CONST_F64 B, DIV_F64 -> CONST_F64 (A/B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_F64 ') and
+                lines[i+1].strip().startswith('CONST_F64 ') and
+                lines[i+2].strip() == 'DIV_F64'):
+                try:
+                    a = float(line.split()[1])
+                    b = float(lines[i+1].strip().split()[1])
+                    if b != 0.0:
+                        result.append(f"{indent}CONST_F64 {a / b}")
+                        i += 3
+                        continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_BOOL A, CONST_BOOL B, AND -> CONST_BOOL (A and B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_BOOL ') and
+                lines[i+1].strip().startswith('CONST_BOOL ') and
+                lines[i+2].strip() == 'AND'):
+                try:
+                    a = line.split()[1] == 'true'
+                    b = lines[i+1].strip().split()[1] == 'true'
+                    result.append(f"{indent}CONST_BOOL {'true' if (a and b) else 'false'}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_BOOL A, CONST_BOOL B, OR -> CONST_BOOL (A or B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_BOOL ') and
+                lines[i+1].strip().startswith('CONST_BOOL ') and
+                lines[i+2].strip() == 'OR'):
+                try:
+                    a = line.split()[1] == 'true'
+                    b = lines[i+1].strip().split()[1] == 'true'
+                    result.append(f"{indent}CONST_BOOL {'true' if (a or b) else 'false'}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_BOOL A, NOT -> CONST_BOOL (!A)
+            if (i + 1 < len(lines) and
+                line.startswith('CONST_BOOL ') and
+                lines[i+1].strip() == 'NOT'):
+                try:
+                    a = line.split()[1] == 'true'
+                    result.append(f"{indent}CONST_BOOL {'false' if a else 'true'}")
+                    i += 2
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Bitwise constant folding
+            # Pattern: CONST_I64 A, CONST_I64 B, AND_I64 -> CONST_I64 (A & B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'AND_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a & b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, OR_I64 -> CONST_I64 (A | B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'OR_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a | b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, XOR_I64 -> CONST_I64 (A ^ B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'XOR_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    result.append(f"{indent}CONST_I64 {a ^ b}")
+                    i += 3
+                    continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, SHL_I64 -> CONST_I64 (A << B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'SHL_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    if 0 <= b < 64:  # Prevent shift overflow
+                        result.append(f"{indent}CONST_I64 {a << b}")
+                        i += 3
+                        continue
+                except (ValueError, IndexError):
+                    pass
+
+            # Pattern: CONST_I64 A, CONST_I64 B, SHR_I64 -> CONST_I64 (A >> B)
+            if (i + 2 < len(lines) and
+                line.startswith('CONST_I64 ') and
+                lines[i+1].strip().startswith('CONST_I64 ') and
+                lines[i+2].strip() == 'SHR_I64'):
+                try:
+                    a = int(line.split()[1])
+                    b = int(lines[i+1].strip().split()[1])
+                    if 0 <= b < 64:  # Prevent shift overflow
+                        result.append(f"{indent}CONST_I64 {a >> b}")
+                        i += 3
+                        continue
+                except (ValueError, IndexError):
+                    pass
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_switch_cases(self, lines: List[str]) -> List[str]:
+        """Optimize switch-case patterns by:
+        1. Detecting repeated LOAD var, CMP_EQ_CONST, JUMP_IF_TRUE sequences
+        2. Consolidating redundant LOADs (cache the switch value)
+        3. Using SWITCH_JUMP_TABLE for dense integer switches
+        4. Using DUP to cache switch value for sparse switches
+        """
+        result: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            # Try to detect switch pattern: repeated sequences of:
+            # LOAD <var>
+            # CMP_EQ_CONST <value>
+            # JUMP_IF_TRUE <label>
+
+            if i + 2 < len(lines):
+                line = lines[i].strip()
+
+                # Look for first case comparison
+                if (line.startswith('LOAD ') and
+                    lines[i+1].strip().startswith('CMP_EQ_CONST ') and
+                    lines[i+2].strip().startswith('JUMP_IF_TRUE ')):
+
+                    switch_var = line.split()[1]
+                    cases: List[Tuple[int, str]] = []  # (value, label)
+                    j = i
+
+                    # Collect all consecutive case comparisons on the same variable
+                    while (j + 2 < len(lines) and
+                           lines[j].strip() == f'LOAD {switch_var}' and
+                           lines[j+1].strip().startswith('CMP_EQ_CONST ') and
+                           lines[j+2].strip().startswith('JUMP_IF_TRUE ')):
+                        try:
+                            const_val = int(lines[j+1].strip().split()[1])
+                            label = lines[j+2].strip().split()[1]
+                            cases.append((const_val, label))
+                        except ValueError:
+                            break
+                        j += 3
+
+                    # Check for default case (JUMP without condition)
+                    default_label = None
+                    if j < len(lines) and lines[j].strip().startswith('JUMP '):
+                        default_label = lines[j].strip().split()[1]
+                        j += 1
+
+                    # If we found 3+ cases, try to optimize
+                    if len(cases) >= 3:
+                        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+
+                        # Check if this is a dense switch (consecutive integers)
+                        sorted_cases = sorted(cases, key=lambda x: x[0])
+                        min_val = sorted_cases[0][0]
+                        max_val = sorted_cases[-1][0]
+                        is_dense = (max_val - min_val == len(sorted_cases) - 1)
+
+                        # For dense switches with 5+ cases, use SWITCH_JUMP_TABLE
+                        if is_dense and len(sorted_cases) >= 5 and default_label:
+                            # Emit SWITCH_JUMP_TABLE instruction
+                            result.append(f"{indent}LOAD {switch_var}")
+                            
+                            # Build case labels array in order from min to max
+                            case_labels = []
+                            for val in range(min_val, max_val + 1):
+                                # Find the label for this value
+                                for case_val, case_label in sorted_cases:
+                                    if case_val == val:
+                                        case_labels.append(case_label)
+                                        break
+                            
+                            # Format: SWITCH_JUMP_TABLE min max label1 label2 ... labelN default
+                            labels_str = ' '.join(case_labels)
+                            result.append(f"{indent}SWITCH_JUMP_TABLE {min_val} {max_val} {labels_str} {default_label}")
+                        else:
+                            # For non-dense or small switches, use DUP optimization
+                            result.append(f"{indent}LOAD {switch_var}")
+
+                            for idx, (const_val, label) in enumerate(cases):
+                                # DUP unless this is the last case and there's no default
+                                if idx < len(cases) - 1 or default_label:
+                                    result.append(f"{indent}DUP")
+                                result.append(f"{indent}CMP_EQ_CONST {const_val}")
+                                result.append(f"{indent}JUMP_IF_TRUE {label}")
+
+                            # Add default jump if present
+                            if default_label:
+                                result.append(f"{indent}POP")
+                                result.append(f"{indent}JUMP {default_label}")
+
+                        i = j
+                        continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def fuse_similar_case_bodies(self, lines: List[str]) -> List[str]:
+        """Detect and optimize repetitive case bodies that follow the same pattern.
+        
+        Example pattern to detect:
+          LABEL case_15:
+            LOAD 1
+            ADD_CONST_I64 2
+            STORE 1
+            JUMP switch_end3
+          LABEL case_26:
+            LOAD 1
+            ADD_CONST_I64 3
+            STORE 1
+            JUMP switch_end3
+        
+        All cases do: var += constant, then jump to same end label.
+        We can replace this with a computed offset based on the case number.
+        """
+        result: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Look for consecutive case labels with simple LOAD/ADD_CONST/STORE/JUMP pattern
+            if line.startswith('LABEL case_'):
+                # Collect consecutive similar case bodies
+                cases = []
+                j = i
+                
+                while j < len(lines) and lines[j].strip().startswith('LABEL case_'):
+                    label = lines[j].strip()
+                    
+                    # Extract case number from label (e.g., "case_15" -> 1, "case_26" -> 2)
+                    try:
+                        label_suffix = label.split('case_')[1].rstrip(':')
+                        # Get the first digit as the case value
+                        case_num = int(label_suffix[0]) if label_suffix[0].isdigit() else None
+                        if case_num is None:
+                            break
+                    except (ValueError, IndexError):
+                        break
+                    
+                    # Check if next lines match pattern: LOAD var, ADD_CONST_I64 N, STORE var, JUMP end
+                    if j + 4 < len(lines):
+                        body_line1 = lines[j + 1].strip()
+                        body_line2 = lines[j + 2].strip()
+                        body_line3 = lines[j + 3].strip()
+                        body_line4 = lines[j + 4].strip()
+                        
+                        if (body_line1.startswith('LOAD ') and
+                            body_line2.startswith('ADD_CONST_I64 ') and
+                            body_line3.startswith('STORE ') and
+                            body_line4.startswith('JUMP ') and not body_line4.startswith('JUMP_IF')):
+                            
+                            var = body_line1.split()[1]
+                            add_val = int(body_line2.split()[1])
+                            store_var = body_line3.split()[1]
+                            end_label = body_line4.split()[1]
+                            
+                            if var == store_var:
+                                cases.append({
+                                    'case_num': case_num,
+                                    'label': label,
+                                    'var': var,
+                                    'add_val': add_val,
+                                    'end_label': end_label
+                                })
+                                j += 5
+                                continue
+                    
+                    break
+                
+                # If we found 3+ repetitive cases with the same pattern, optimize
+                if len(cases) >= 3:
+                    # Check if all cases use same variable and end label
+                    first_var = cases[0]['var']
+                    first_end = cases[0]['end_label']
+                    
+                    if all(c['var'] == first_var and c['end_label'] == first_end for c in cases):
+                        # Check if add values follow a pattern: case N adds N+1
+                        pattern_match = all(c['add_val'] == c['case_num'] + 1 for c in cases)
+                        
+                        if pattern_match:
+                            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                            
+                            # Try to find the switch value variable by looking backwards
+                            switch_var = None
+                            for k in range(i-1, max(0, i-20), -1):
+                                prev = lines[k].strip()
+                                if prev.startswith('SWITCH_JUMP_TABLE '):
+                                    # Switch value is on the stack (from previous LOAD)
+                                    for m in range(k-1, max(0, k-5), -1):
+                                        if lines[m].strip().startswith('LOAD '):
+                                            switch_var = lines[m].strip().split()[1]
+                                            break
+                                    break
+                            
+                            if switch_var:
+                                indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                                
+                                # Create a single label for the optimized code
+                                optimized_label = f"switch_opt_{self.label_counter}"
+                                self.label_counter += 1
+                                
+                                # Emit the optimized label and code
+                                result.append(f"{indent}LABEL {optimized_label}")
+                                result.append(f"{indent}LOAD {switch_var}")
+                                result.append(f"{indent}ADD_CONST_I64 1")
+                                result.append(f"{indent}LOAD {first_var}")
+                                result.append(f"{indent}ADD_I64")
+                                result.append(f"{indent}STORE {first_var}")
+                                result.append(f"{indent}JUMP {first_end}")
+                                
+                                # Now we need to update the SWITCH_JUMP_TABLE to point to this label
+                                # Go back and find the SWITCH_JUMP_TABLE instruction
+                                for k in range(len(result) - 1, max(0, len(result) - 20), -1):
+                                    if result[k].strip().startswith('SWITCH_JUMP_TABLE '):
+                                        # Replace all case labels in SWITCH_JUMP_TABLE with optimized_label
+                                        parts = result[k].split()
+                                        min_val = parts[1]
+                                        max_val = parts[2]
+                                        # Replace case labels (skip min, max, keep default at end)
+                                        num_cases = int(max_val) - int(min_val) + 1
+                                        default_label = parts[3 + num_cases]  # Last label is default
+                                        
+                                        # All cases point to optimized label, except default
+                                        new_labels = [optimized_label] * num_cases + [default_label]
+                                        result[k] = f"{indent}SWITCH_JUMP_TABLE {min_val} {max_val} {' '.join(new_labels)}"
+                                        break
+                                
+                                # Skip all the case bodies we optimized
+                                i = j
+                                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+
+
+    def cache_loaded_values(self, lines: List[str]) -> List[str]:
+        """Cache loaded values using DUP to avoid redundant LOADs."""
+        result: List[str] = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Only optimize LOAD instructions
+            if line.startswith('LOAD '):
+                var = line.split()[1]
+                found_dup = False
+                
+                # Look ahead for duplicate LOAD of same variable (max 6 instructions)
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    next_line = lines[j].strip()
+                    
+                    # Stop if we hit a control flow change or variable modification
+                    if (next_line.startswith('LABEL ') or 
+                        next_line.startswith('JUMP') or
+                        next_line == f'STORE {var}' or
+                        next_line.startswith('STORE_CONST')):
+                        break
+                    
+                    # Found duplicate LOAD - replace with DUP
+                    if next_line == f'LOAD {var}':
+                        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                        result.append(lines[i])  # Original LOAD
+                        result.append(f"{indent}DUP")  # Add DUP
+                        
+                        # Copy instructions between original and duplicate LOAD
+                        for k in range(i + 1, j):
+                            result.append(lines[k])
+                        
+                        # Skip the duplicate LOAD and continue from next instruction
+                        i = j + 1
+                        found_dup = True
+                        break
+                
+                # If no duplicate found, just copy the line
+                if not found_dup:
+                    result.append(lines[i])
+                    i += 1
+            else:
+                # Not a LOAD, just copy it
+                result.append(lines[i])
+                i += 1
+        
+        return result
+
+    def eliminate_redundant_continue_labels(self, lines: List[str]) -> List[str]:
+        """Eliminate redundant loop continuation labels."""
+        jumped_labels = set()
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('JUMP '):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    jumped_labels.add(parts[1])
+            elif stripped.startswith('JUMP_IF_TRUE ') or stripped.startswith('JUMP_IF_FALSE '):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    jumped_labels.add(parts[1])
+        
+        result: List[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            if line.startswith('LABEL for_continue'):
+                label_name = line.split()[1]
+                
+                if label_name not in jumped_labels and i + 2 < len(lines):
+                    next1 = lines[i + 1].strip()
+                    next2 = lines[i + 2].strip()
+                    
+                    if next1.startswith('INC_LOCAL ') and next2.startswith('JUMP for_start'):
+                        i += 1
+                        continue
+            
+            result.append(lines[i])
+            i += 1
+        
+        return result

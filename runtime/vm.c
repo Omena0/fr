@@ -243,7 +243,12 @@ typedef enum
     OP_SUB_CONST_I64, // Subtract constant from top of stack
     OP_MUL_CONST_I64, // Multiply top of stack by constant
     OP_DIV_CONST_I64, // Divide top of stack by constant
+    OP_MOD_CONST_I64, // Modulo top of stack by constant
     OP_ADD_CONST_I64_MULTI, // Add multiple constants to top of stack
+    OP_ADD_CONST_F64, // Add float constant to top of stack
+    OP_SUB_CONST_F64, // Subtract float constant from top of stack
+    OP_MUL_CONST_F64, // Multiply top of stack by float constant
+    OP_DIV_CONST_F64, // Divide top of stack by float constant
     OP_AND_CONST,     // Logical AND with constant bool
     OP_OR_CONST,      // Logical OR with constant bool
     OP_AND_CONST_I64, // Bitwise AND with constant
@@ -272,7 +277,14 @@ typedef enum
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
     OP_LOAD2_MUL_I64, // LOAD x y, MUL_I64 -> single instruction
+    OP_LOAD2_MOD_I64, // LOAD x y, MOD_I64 -> single instruction
+    OP_LOAD2_ADD_F64, // LOAD x y, ADD_F64 -> single instruction (float)
+    OP_LOAD2_SUB_F64, // LOAD x y, SUB_F64 -> single instruction (float)
+    OP_LOAD2_MUL_F64, // LOAD x y, MUL_F64 -> single instruction (float)
+    OP_LOAD2_DIV_F64, // LOAD x y, DIV_F64 -> single instruction (float)
     OP_LOAD2_CMP_LT,  // LOAD x y, CMP_LT -> single instruction
+    // Switch optimization
+    OP_SWITCH_JUMP_TABLE, // Jump table for dense integer switches (min max label1 label2 ... default)
     OP_LOAD2_CMP_GT,  // LOAD x y, CMP_GT -> single instruction
     OP_LOAD2_CMP_LE,  // LOAD x y, CMP_LE -> single instruction
     OP_LOAD2_CMP_GE,  // LOAD x y, CMP_GE -> single instruction
@@ -372,6 +384,20 @@ typedef enum
     OP_TRY_BEGIN,         // Begin exception handler (exc_type, label -> void)
     OP_TRY_END,           // End exception handler (-> void)
     OP_RAISE,             // Raise an exception (exc_type, message -> void)
+
+    // Comparison with constant optimizations
+    OP_CMP_LT_CONST,      // Compare top of stack < constant (TOS, const -> bool)
+    OP_CMP_GT_CONST,      // Compare top of stack > constant (TOS, const -> bool)
+    OP_CMP_LE_CONST,      // Compare top of stack <= constant (TOS, const -> bool)
+    OP_CMP_GE_CONST,      // Compare top of stack >= constant (TOS, const -> bool)
+    OP_CMP_EQ_CONST,      // Compare top of stack == constant (TOS, const -> bool)
+    OP_CMP_NE_CONST,      // Compare top of stack != constant (TOS, const -> bool)
+    OP_CMP_LT_CONST_F64,  // Compare top of stack < constant (float)
+    OP_CMP_GT_CONST_F64,  // Compare top of stack > constant (float)
+    OP_CMP_LE_CONST_F64,  // Compare top of stack <= constant (float)
+    OP_CMP_GE_CONST_F64,  // Compare top of stack >= constant (float)
+    OP_CMP_EQ_CONST_F64,  // Compare top of stack == constant (float)
+    OP_CMP_NE_CONST_F64,  // Compare top of stack != constant (float)
 } OpCode;
 
 // Instruction structure
@@ -390,6 +416,14 @@ typedef struct
             int src;
             int dst;
         } indices;
+        struct
+        { // For SWITCH_JUMP_TABLE instruction
+            int min_val;
+            int max_val;
+            int num_labels;
+            char **labels; // Array of label strings (to be resolved to PCs)
+            int *pcs;      // Array of resolved PC indices (filled during label resolution)
+        } switch_table;
     } operand;
 } Instruction;
 
@@ -409,6 +443,7 @@ typedef struct
 {
     char *name;
     int pc;
+    int func_index;  // Which function this label belongs to
 } Label;
 
 // Call frame
@@ -872,7 +907,7 @@ bool vm_load_bytecode(VM *vm,const char *filename);
 
 Function *vm_find_function(VM *vm,const char *name);
 
-int vm_find_label(VM *vm,const char *name);
+int vm_find_label(VM *vm,const char *name, int func_index);
 void value_print(Value val);
 Value value_to_string(Value val);
 
@@ -1412,6 +1447,30 @@ Value value_sub(Value a, Value b)
         mpz_sub(*result.as.bigint, *a.as.bigint, *b.as.bigint);
         return result;
     }
+    else if (a.type == VAL_INT && b.type == VAL_BIGINT)
+    {
+        // Mixed: int - bigint -> bigint
+        Value a_big = promote_to_bigint(a.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_sub(*result.as.bigint, *a_big.as.bigint, *b.as.bigint);
+        value_free(a_big);
+        return result;
+    }
+    else if (a.type == VAL_BIGINT && b.type == VAL_INT)
+    {
+        // Mixed: bigint - int -> bigint
+        Value b_big = promote_to_bigint(b.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_sub(*result.as.bigint, *a.as.bigint, *b_big.as.bigint);
+        value_free(b_big);
+        return result;
+    }
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 - b.as.f64);
@@ -1454,6 +1513,30 @@ Value value_mul(Value a, Value b)
         mpz_mul(*result.as.bigint, *a.as.bigint, *b.as.bigint);
         return result;
     }
+    else if (a.type == VAL_INT && b.type == VAL_BIGINT)
+    {
+        // Mixed: int * bigint -> bigint
+        Value a_big = promote_to_bigint(a.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_mul(*result.as.bigint, *a_big.as.bigint, *b.as.bigint);
+        value_free(a_big);
+        return result;
+    }
+    else if (a.type == VAL_BIGINT && b.type == VAL_INT)
+    {
+        // Mixed: bigint * int -> bigint
+        Value b_big = promote_to_bigint(b.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_mul(*result.as.bigint, *a.as.bigint, *b_big.as.bigint);
+        value_free(b_big);
+        return result;
+    }
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 * b.as.f64);
@@ -1482,6 +1565,30 @@ Value value_div(Value a, Value b)
         mpz_fdiv_q(*result.as.bigint, *a.as.bigint, *b.as.bigint); // Floor division
         return result;
     }
+    else if (a.type == VAL_INT && b.type == VAL_BIGINT)
+    {
+        // Mixed: int / bigint -> bigint
+        Value a_big = promote_to_bigint(a.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_fdiv_q(*result.as.bigint, *a_big.as.bigint, *b.as.bigint);
+        value_free(a_big);
+        return result;
+    }
+    else if (a.type == VAL_BIGINT && b.type == VAL_INT)
+    {
+        // Mixed: bigint / int -> bigint
+        Value b_big = promote_to_bigint(b.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_fdiv_q(*result.as.bigint, *a.as.bigint, *b_big.as.bigint);
+        value_free(b_big);
+        return result;
+    }
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 / b.as.f64);
@@ -1508,6 +1615,30 @@ Value value_mod(Value a, Value b)
         result.as.bigint = malloc(sizeof(mpz_t));
         mpz_init(*result.as.bigint);
         mpz_mod(*result.as.bigint, *a.as.bigint, *b.as.bigint);
+        return result;
+    }
+    else if (a.type == VAL_INT && b.type == VAL_BIGINT)
+    {
+        // Mixed: int % bigint -> bigint
+        Value a_big = promote_to_bigint(a.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_mod(*result.as.bigint, *a_big.as.bigint, *b.as.bigint);
+        value_free(a_big);
+        return result;
+    }
+    else if (a.type == VAL_BIGINT && b.type == VAL_INT)
+    {
+        // Mixed: bigint % int -> bigint
+        Value b_big = promote_to_bigint(b.as.int64);
+        Value result;
+        result.type = VAL_BIGINT;
+        result.as.bigint = malloc(sizeof(mpz_t));
+        mpz_init(*result.as.bigint);
+        mpz_mod(*result.as.bigint, *a.as.bigint, *b_big.as.bigint);
+        value_free(b_big);
         return result;
     }
     fprintf(stderr, "Type error in modulo\n");
@@ -1551,6 +1682,50 @@ static inline Value value_compare(Value a, Value b, OpCode op)
         if (a.as.f64 < b.as.f64)
             cmp = -1;
         else if (a.as.f64 > b.as.f64)
+            cmp = 1;
+        else
+            cmp = 0;
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int vs float - convert int to float for comparison
+        double a_f64 = (double)a.as.int64;
+        if (a_f64 < b.as.f64)
+            cmp = -1;
+        else if (a_f64 > b.as.f64)
+            cmp = 1;
+        else
+            cmp = 0;
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float vs int - convert int to float for comparison
+        double b_f64 = (double)b.as.int64;
+        if (a.as.f64 < b_f64)
+            cmp = -1;
+        else if (a.as.f64 > b_f64)
+            cmp = 1;
+        else
+            cmp = 0;
+    }
+    else if (a.type == VAL_BIGINT && b.type == VAL_F64)
+    {
+        // Mixed: bigint vs float - convert bigint to float for comparison
+        double a_f64 = mpz_get_d(*a.as.bigint);
+        if (a_f64 < b.as.f64)
+            cmp = -1;
+        else if (a_f64 > b.as.f64)
+            cmp = 1;
+        else
+            cmp = 0;
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_BIGINT)
+    {
+        // Mixed: float vs bigint - convert bigint to float for comparison
+        double b_f64 = mpz_get_d(*b.as.bigint);
+        if (a.as.f64 < b_f64)
+            cmp = -1;
+        else if (a.as.f64 > b_f64)
             cmp = 1;
         else
             cmp = 0;
@@ -1685,11 +1860,22 @@ Function *vm_find_function(VM *vm, const char *name) {
     }
     return NULL;
 }
-// Find label by name
-int vm_find_label(VM *vm, const char *name) {
+
+// Find which function a PC belongs to
+int vm_find_function_for_pc(VM *vm, int pc) {
+    for (int i = 0; i < vm->func_count; i++) {
+        if (pc >= vm->functions[i].start_pc && pc <= vm->functions[i].end_pc) {
+            return i;
+        }
+    }
+    return -1;  // Not in any function (global code)
+}
+
+// Find label by name within a specific function
+int vm_find_label(VM *vm, const char *name, int func_index) {
     for (int i = 0; i < vm->label_count; i++)
     {
-        if (strcmp(vm->labels[i].name, name) == 0)
+        if (vm->labels[i].func_index == func_index && strcmp(vm->labels[i].name, name) == 0)
         {
             return vm->labels[i].pc;
         }
@@ -1813,6 +1999,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             char *name = strtok(NULL, " ");
             vm->labels[vm->label_count].name = strdup(name);
             vm->labels[vm->label_count].pc = vm->code_count;
+            vm->labels[vm->label_count].func_index = current_func ? (current_func - vm->functions) : -1;
             vm->label_count++;
             // Add LABEL instruction
             vm->code[vm->code_count].op = OP_LABEL;
@@ -2533,11 +2720,41 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_MUL_CONST_I64;
                 inst.operand.int64 = safe_atoll(val);
             }
+            else if (strcmp(token, "MOD_CONST_I64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_MOD_CONST_I64;
+                inst.operand.int64 = safe_atoll(val);
+            }
             else if (strcmp(token, "DIV_CONST_I64") == 0)
             {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_DIV_CONST_I64;
                 inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "ADD_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_ADD_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "SUB_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_SUB_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "MUL_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_MUL_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "DIV_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_DIV_CONST_F64;
+                inst.operand.f64 = atof(val);
             }
             else if (strcmp(token, "AND_CONST") == 0)
             {
@@ -2568,6 +2785,79 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 char *val = strtok(NULL, " ");
                 inst.op = OP_XOR_CONST_I64;
                 inst.operand.int64 = safe_atoll(val);
+            }
+            // Comparison with constant
+            else if (strcmp(token, "CMP_LT_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_LT_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_GT_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_GT_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_LE_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_LE_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_GE_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_GE_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_EQ_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_EQ_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_NE_CONST") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_NE_CONST;
+                inst.operand.int64 = safe_atoll(val);
+            }
+            else if (strcmp(token, "CMP_LT_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_LT_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "CMP_GT_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_GT_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "CMP_LE_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_LE_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "CMP_GE_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_GE_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "CMP_EQ_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_EQ_CONST_F64;
+                inst.operand.f64 = atof(val);
+            }
+            else if (strcmp(token, "CMP_NE_CONST_F64") == 0)
+            {
+                char *val = strtok(NULL, " ");
+                inst.op = OP_CMP_NE_CONST_F64;
+                inst.operand.f64 = atof(val);
             }
             // Stack manipulation
             else if (strcmp(token, "SWAP") == 0)
@@ -2701,6 +2991,46 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.indices.src = safe_atoi(var1);
                 inst.operand.indices.dst = safe_atoi(var2);
             }
+            else if (strcmp(token, "LOAD2_MOD_I64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_MOD_I64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
+            else if (strcmp(token, "LOAD2_ADD_F64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_ADD_F64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
+            else if (strcmp(token, "LOAD2_SUB_F64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_SUB_F64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
+            else if (strcmp(token, "LOAD2_MUL_F64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_MUL_F64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
+            else if (strcmp(token, "LOAD2_DIV_F64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_DIV_F64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
             // Fused LOAD2 + comparison instructions
             else if (strcmp(token, "LOAD2_CMP_LT") == 0)
             {
@@ -2751,6 +3081,44 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.indices.dst = safe_atoi(var2);
             }
             else if (strcmp(token, "SELECT") == 0)
+                inst.op = OP_SWITCH_JUMP_TABLE;
+            else if (strcmp(token, "SWITCH_JUMP_TABLE") == 0)
+            {
+                // Format: SWITCH_JUMP_TABLE min max label1 label2 ... labelN default
+                char *min_str = strtok(NULL, " ");
+                char *max_str = strtok(NULL, " ");
+                int min_val = safe_atoi(min_str);
+                int max_val = safe_atoi(max_str);
+                int num_cases = max_val - min_val + 1;
+                
+                inst.op = OP_SWITCH_JUMP_TABLE;
+                inst.operand.switch_table.min_val = min_val;
+                inst.operand.switch_table.max_val = max_val;
+                inst.operand.switch_table.num_labels = num_cases + 1; // +1 for default
+                
+                // Allocate labels and pcs arrays
+                inst.operand.switch_table.labels = malloc((num_cases + 1) * sizeof(char*));
+                inst.operand.switch_table.pcs = malloc((num_cases + 1) * sizeof(int));
+                
+                // Read case labels
+                for (int j = 0; j < num_cases; j++) {
+                    char *label = strtok(NULL, " ");
+                    if (!label) {
+                        fprintf(stderr, "SWITCH_JUMP_TABLE: Missing label for case %d\n", j);
+                        exit(1);
+                    }
+                    inst.operand.switch_table.labels[j] = strdup(label);
+                }
+                
+                // Read default label
+                char *default_label = strtok(NULL, " ");
+                if (!default_label) {
+                    fprintf(stderr, "SWITCH_JUMP_TABLE: Missing default label\n");
+                    exit(1);
+                }
+                inst.operand.switch_table.labels[num_cases] = strdup(default_label);
+            }
+            else if (strcmp(token, "SELECT") == 0)
                 inst.op = OP_SELECT;
             else
             {
@@ -2767,7 +3135,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
         Instruction *inst = &vm->code[i];
         if (inst->op == OP_JUMP || inst->op == OP_JUMP_IF_FALSE || inst->op == OP_JUMP_IF_TRUE)
         {
-            int target = vm_find_label(vm, inst->operand.str_val);
+            int func_index = vm_find_function_for_pc(vm, i);
+            int target = vm_find_label(vm, inst->operand.str_val, func_index);
             if (target == -1)
             {
                 fprintf(stderr, "Label not found during resolution: %s\n", inst->operand.str_val);
@@ -2776,6 +3145,25 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             // Free the string and replace with PC index
             free(inst->operand.str_val);
             inst->operand.int64 = target;
+        }
+        else if (inst->op == OP_SWITCH_JUMP_TABLE)
+        {
+            int func_index = vm_find_function_for_pc(vm, i);
+            // Resolve all labels in the jump table
+            for (int j = 0; j < inst->operand.switch_table.num_labels; j++)
+            {
+                int target = vm_find_label(vm, inst->operand.switch_table.labels[j], func_index);
+                if (target == -1)
+                {
+                    fprintf(stderr, "Label not found in SWITCH_JUMP_TABLE: %s\n", inst->operand.switch_table.labels[j]);
+                    exit(1);
+                }
+                inst->operand.switch_table.pcs[j] = target;
+                free(inst->operand.switch_table.labels[j]);
+            }
+            // Free the labels array (we now use pcs array)
+            free(inst->operand.switch_table.labels);
+            inst->operand.switch_table.labels = NULL;
         }
     }
     return true;
@@ -2887,8 +3275,13 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_ADD_CONST_I64] = &&L_ADD_CONST_I64,
         [OP_SUB_CONST_I64] = &&L_SUB_CONST_I64,
         [OP_MUL_CONST_I64] = &&L_MUL_CONST_I64,
+        [OP_MOD_CONST_I64] = &&L_MOD_CONST_I64,
         [OP_DIV_CONST_I64] = &&L_DIV_CONST_I64,
         [OP_ADD_CONST_I64_MULTI] = &&L_ADD_CONST_I64_MULTI,
+        [OP_ADD_CONST_F64] = &&L_ADD_CONST_F64,
+        [OP_SUB_CONST_F64] = &&L_SUB_CONST_F64,
+        [OP_MUL_CONST_F64] = &&L_MUL_CONST_F64,
+        [OP_DIV_CONST_F64] = &&L_DIV_CONST_F64,
         [OP_AND_CONST] = &&L_AND_CONST,
         [OP_OR_CONST] = &&L_OR_CONST,
         [OP_AND_CONST_I64] = &&L_AND_CONST_I64,
@@ -2912,6 +3305,11 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
+        [OP_LOAD2_MOD_I64] = &&L_LOAD2_MOD_I64,
+        [OP_LOAD2_ADD_F64] = &&L_LOAD2_ADD_F64,
+        [OP_LOAD2_SUB_F64] = &&L_LOAD2_SUB_F64,
+        [OP_LOAD2_MUL_F64] = &&L_LOAD2_MUL_F64,
+        [OP_LOAD2_DIV_F64] = &&L_LOAD2_DIV_F64,
         [OP_LOAD2_CMP_LT] = &&L_LOAD2_CMP_LT,
         [OP_LOAD2_CMP_GT] = &&L_LOAD2_CMP_GT,
         [OP_LOAD2_CMP_LE] = &&L_LOAD2_CMP_LE,
@@ -2980,6 +3378,19 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_TRY_BEGIN] = &&L_TRY_BEGIN,
         [OP_TRY_END] = &&L_TRY_END,
         [OP_RAISE] = &&L_RAISE,
+        [OP_CMP_LT_CONST] = &&L_CMP_LT_CONST,
+        [OP_CMP_GT_CONST] = &&L_CMP_GT_CONST,
+        [OP_CMP_LE_CONST] = &&L_CMP_LE_CONST,
+        [OP_CMP_GE_CONST] = &&L_CMP_GE_CONST,
+        [OP_CMP_EQ_CONST] = &&L_CMP_EQ_CONST,
+        [OP_CMP_NE_CONST] = &&L_CMP_NE_CONST,
+        [OP_CMP_LT_CONST_F64] = &&L_CMP_LT_CONST_F64,
+        [OP_CMP_GT_CONST_F64] = &&L_CMP_GT_CONST_F64,
+        [OP_CMP_LE_CONST_F64] = &&L_CMP_LE_CONST_F64,
+        [OP_CMP_GE_CONST_F64] = &&L_CMP_GE_CONST_F64,
+        [OP_CMP_EQ_CONST_F64] = &&L_CMP_EQ_CONST_F64,
+        [OP_CMP_NE_CONST_F64] = &&L_CMP_NE_CONST_F64,
+        [OP_SWITCH_JUMP_TABLE] = &&L_SWITCH_JUMP_TABLE,
     };
 #define DISPATCH() goto *dispatch_table[vm->code[vm->pc++].op]
     DISPATCH();
@@ -3397,6 +3808,7 @@ L_CALL: // OP_CALL
             fprintf(stderr, "Function not found: %s\n", inst.operand.str_val);
             exit(1);
         }
+        
         // Set up new call frame
         CallFrame *frame = &vm->call_stack[vm->call_stack_top++];
         frame->func = func;
@@ -3445,6 +3857,7 @@ L_RETURN: // OP_RETURN
 
     DISPATCH();
 }
+
 L_RETURN_VOID: // OP_RETURN_VOID
 {
 
@@ -3637,8 +4050,26 @@ L_ADD_CONST_I64: // OP_ADD_CONST_I64
         int64_t const_val = inst.operand.int64;
         if (likely(a.type == VAL_INT))
         {
-            a.as.int64 += const_val;
-            vm_push(vm, a);
+            // Check for overflow
+            if (would_add_overflow(a.as.int64, const_val))
+            {
+                // Promote to bigint
+                Value a_big = promote_to_bigint(a.as.int64);
+                if (const_val >= 0)
+                {
+                    mpz_add_ui(*a_big.as.bigint, *a_big.as.bigint, (unsigned long)const_val);
+                }
+                else
+                {
+                    mpz_sub_ui(*a_big.as.bigint, *a_big.as.bigint, (unsigned long)(-const_val));
+                }
+                vm_push(vm, a_big);
+            }
+            else
+            {
+                a.as.int64 += const_val;
+                vm_push(vm, a);
+            }
         }
         else if (a.type == VAL_BIGINT)
         {
@@ -3718,6 +4149,41 @@ L_MUL_CONST_I64: // OP_MUL_CONST_I64
         else if (a.type == VAL_F64)
         {
             a.as.f64 *= (double)const_val;
+            vm_push(vm, a);
+        }
+        else
+        {
+            value_free(a);
+        }
+        DISPATCH();
+    }
+}
+L_MOD_CONST_I64: // OP_MOD_CONST_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        Value a = vm_pop(vm);
+        int64_t const_val = inst.operand.int64;
+        if (const_val == 0)
+        {
+            if (g_current_vm) {
+                vm_runtime_error(g_current_vm, "Modulo by zero", 0);
+            } else {
+                fprintf(stderr, "Modulo by zero\n");
+            }
+            exit(1);
+        }
+        if (likely(a.type == VAL_INT))
+        {
+            a.as.int64 %= const_val;
+            vm_push(vm, a);
+        }
+        else if (a.type == VAL_BIGINT)
+        {
+            mpz_mod_ui(*a.as.bigint, *a.as.bigint, const_val < 0 ? -const_val : const_val);
+            if (const_val < 0) {
+                mpz_neg(*a.as.bigint, *a.as.bigint);
+            }
             vm_push(vm, a);
         }
         else
@@ -3807,6 +4273,116 @@ L_ADD_CONST_I64_MULTI: // OP_ADD_CONST_I64_MULTI
         vm_push(vm, a);
         DISPATCH();
     }
+}
+L_ADD_CONST_F64: // OP_ADD_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    
+    if (likely(a.type == VAL_F64))
+    {
+        a.as.f64 += const_val;
+    }
+    else if (a.type == VAL_INT)
+    {
+        a.as.f64 = (double)a.as.int64 + const_val;
+        a.type = VAL_F64;
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        a.as.f64 = mpz_get_d(*a.as.bigint) + const_val;
+        mpz_clear(*a.as.bigint);
+        free(a.as.bigint);
+        a.type = VAL_F64;
+    }
+    vm_push(vm, a);
+    DISPATCH();
+}
+L_SUB_CONST_F64: // OP_SUB_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    
+    if (likely(a.type == VAL_F64))
+    {
+        a.as.f64 -= const_val;
+    }
+    else if (a.type == VAL_INT)
+    {
+        a.as.f64 = (double)a.as.int64 - const_val;
+        a.type = VAL_F64;
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        a.as.f64 = mpz_get_d(*a.as.bigint) - const_val;
+        mpz_clear(*a.as.bigint);
+        free(a.as.bigint);
+        a.type = VAL_F64;
+    }
+    vm_push(vm, a);
+    DISPATCH();
+}
+L_MUL_CONST_F64: // OP_MUL_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    
+    if (likely(a.type == VAL_F64))
+    {
+        a.as.f64 *= const_val;
+    }
+    else if (a.type == VAL_INT)
+    {
+        a.as.f64 = (double)a.as.int64 * const_val;
+        a.type = VAL_F64;
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        a.as.f64 = mpz_get_d(*a.as.bigint) * const_val;
+        mpz_clear(*a.as.bigint);
+        free(a.as.bigint);
+        a.type = VAL_F64;
+    }
+    vm_push(vm, a);
+    DISPATCH();
+}
+L_DIV_CONST_F64: // OP_DIV_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    
+    if (const_val == 0.0)
+    {
+        if (g_current_vm) {
+            vm_runtime_error(g_current_vm, "float division by zero", 0);
+        } else {
+            fprintf(stderr, "float division by zero\n");
+        }
+        exit(1);
+    }
+    
+    if (likely(a.type == VAL_F64))
+    {
+        a.as.f64 /= const_val;
+    }
+    else if (a.type == VAL_INT)
+    {
+        a.as.f64 = (double)a.as.int64 / const_val;
+        a.type = VAL_F64;
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        a.as.f64 = mpz_get_d(*a.as.bigint) / const_val;
+        mpz_clear(*a.as.bigint);
+        free(a.as.bigint);
+        a.type = VAL_F64;
+    }
+    vm_push(vm, a);
+    DISPATCH();
 }
 L_AND_CONST: // OP_AND_CONST
 {
@@ -3935,6 +4511,328 @@ L_XOR_CONST_I64: // OP_XOR_CONST_I64
         }
         DISPATCH();
     }
+}
+// Comparison with constant instructions
+L_CMP_LT_CONST: // OP_CMP_LT_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 < const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) < 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 < (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_GT_CONST: // OP_CMP_GT_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 > const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) > 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 > (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_LE_CONST: // OP_CMP_LE_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 <= const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) <= 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 <= (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_GE_CONST: // OP_CMP_GE_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 >= const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) >= 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 >= (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_EQ_CONST: // OP_CMP_EQ_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 == const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) == 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 == (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_NE_CONST: // OP_CMP_NE_CONST
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    int64_t const_val = inst.operand.int64;
+    bool result = false;
+    
+    if (likely(a.type == VAL_INT))
+    {
+        result = (a.as.int64 != const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_cmp_si(*a.as.bigint, const_val) != 0);
+    }
+    else if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 != (double)const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_LT_CONST_F64: // OP_CMP_LT_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 < const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 < const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) < const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_GT_CONST_F64: // OP_CMP_GT_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 > const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 > const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) > const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_LE_CONST_F64: // OP_CMP_LE_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 <= const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 <= const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) <= const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_GE_CONST_F64: // OP_CMP_GE_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 >= const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 >= const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) >= const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_EQ_CONST_F64: // OP_CMP_EQ_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 == const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 == const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) == const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_CMP_NE_CONST_F64: // OP_CMP_NE_CONST_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value a = vm_pop(vm);
+    double const_val = inst.operand.f64;
+    bool result = false;
+    
+    if (a.type == VAL_F64)
+    {
+        result = (a.as.f64 != const_val);
+    }
+    else if (a.type == VAL_INT)
+    {
+        result = ((double)a.as.int64 != const_val);
+    }
+    else if (a.type == VAL_BIGINT)
+    {
+        result = (mpz_get_d(*a.as.bigint) != const_val);
+    }
+    value_free(a);
+    vm_push(vm, value_make_bool(result));
+    DISPATCH();
+}
+L_SWITCH_JUMP_TABLE: // OP_SWITCH_JUMP_TABLE
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value switch_val = vm_pop(vm);
+    
+    // Convert switch value to int64
+    int64_t val;
+    if (switch_val.type == VAL_INT)
+    {
+        val = switch_val.as.int64;
+    }
+    else if (switch_val.type == VAL_BIGINT)
+    {
+        if (!mpz_fits_slong_p(*switch_val.as.bigint))
+        {
+            // Value too large, jump to default
+            value_free(switch_val);
+            vm->pc = inst.operand.switch_table.pcs[inst.operand.switch_table.num_labels - 1];
+            DISPATCH();
+        }
+        val = mpz_get_si(*switch_val.as.bigint);
+    }
+    else
+    {
+        fprintf(stderr, "SWITCH_JUMP_TABLE: invalid switch value type\n");
+        value_free(switch_val);
+        exit(1);
+    }
+    
+    value_free(switch_val);
+    
+    // Check if value is in range [min_val, max_val]
+    if (val >= inst.operand.switch_table.min_val && val <= inst.operand.switch_table.max_val)
+    {
+        // Jump to corresponding case
+        int case_index = val - inst.operand.switch_table.min_val;
+        vm->pc = inst.operand.switch_table.pcs[case_index];
+    }
+    else
+    {
+        // Jump to default (last PC in array)
+        vm->pc = inst.operand.switch_table.pcs[inst.operand.switch_table.num_labels - 1];
+    }
+    DISPATCH();
 }
 // Stack manipulation instructions
 L_SWAP: // OP_SWAP
@@ -6020,6 +6918,133 @@ L_LOAD2_MUL_I64: // OP_LOAD2_MUL_I64
     DISPATCH();
 }
 
+L_LOAD2_MOD_I64: // OP_LOAD2_MOD_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    if (a.type != VAL_INT || b.type != VAL_INT)
+    {
+        vm_runtime_error(vm, "Modulo requires integer operands", 0);
+        return;
+    }
+
+    if (b.as.int64 == 0)
+    {
+        vm_runtime_error(vm, "[ZeroDivisionError] Division by zero in modulo operation", 0);
+        return;
+    }
+
+    Value result;
+    result.type = VAL_INT;
+    result.as.int64 = a.as.int64 % b.as.int64;
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
+L_LOAD2_ADD_F64: // OP_LOAD2_ADD_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    if (a.type != VAL_F64 || b.type != VAL_F64)
+    {
+        vm_runtime_error(vm, "LOAD2_ADD_F64 requires float operands", 0);
+        return;
+    }
+
+    Value result;
+    result.type = VAL_F64;
+    result.as.f64 = a.as.f64 + b.as.f64;
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
+L_LOAD2_SUB_F64: // OP_LOAD2_SUB_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    if (a.type != VAL_F64 || b.type != VAL_F64)
+    {
+        vm_runtime_error(vm, "LOAD2_SUB_F64 requires float operands", 0);
+        return;
+    }
+
+    Value result;
+    result.type = VAL_F64;
+    result.as.f64 = a.as.f64 - b.as.f64;
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
+L_LOAD2_MUL_F64: // OP_LOAD2_MUL_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    if (a.type != VAL_F64 || b.type != VAL_F64)
+    {
+        vm_runtime_error(vm, "LOAD2_MUL_F64 requires float operands", 0);
+        return;
+    }
+
+    Value result;
+    result.type = VAL_F64;
+    result.as.f64 = a.as.f64 * b.as.f64;
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
+L_LOAD2_DIV_F64: // OP_LOAD2_DIV_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    if (a.type != VAL_F64 || b.type != VAL_F64)
+    {
+        vm_runtime_error(vm, "LOAD2_DIV_F64 requires float operands", 0);
+        return;
+    }
+
+    if (b.as.f64 == 0.0)
+    {
+        vm_runtime_error(vm, "[ZeroDivisionError] Float division by zero", 0);
+        return;
+    }
+
+    Value result;
+    result.type = VAL_F64;
+    result.as.f64 = a.as.f64 / b.as.f64;
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
 // Fused LOAD2 + comparison operations
 L_LOAD2_CMP_LT: // OP_LOAD2_CMP_LT
 {
@@ -6499,8 +7524,9 @@ L_TRY_BEGIN: // OP_TRY_BEGIN - Begin exception handler
         exit(1);
     }
     
-    // Find label PC
-    int handler_pc = vm_find_label(vm, label_name);
+    // Find label PC within current function
+    int func_index = vm_find_function_for_pc(vm, vm->pc - 1);
+    int handler_pc = vm_find_label(vm, label_name, func_index);
     if (handler_pc == -1) {
         fprintf(stderr, "Error: Exception handler label not found: %s\n", label_name);
         free(combined);
