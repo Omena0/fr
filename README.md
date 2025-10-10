@@ -24,6 +24,15 @@ pip install frscript
 
 ## What's New
 
+### In version 7B:
+Bugfixes and performance.
+
+- Fixed FUSED_LOAD_STORE and FUSED_STORE_LOAD instructions executing in pairs.
+- Fixed SELECT instruction being incorrectly mapped.
+- Added SELECT optimization for if-else statements that assign to the same variable
+- SELECT instruction now automatically replaces simple if-else assignment patterns
+- Optimizer detects and preserves side effects in conditional branches
+
 ### In version 7A:
 General performance upgrade.
 
@@ -66,6 +75,8 @@ This version is ~10% faster than 6A.
 - Fixed type errors
 
 ### In Version 6D
+Feature and bugfix update
+
 - Added runtime error handling
 - Added try-except statements.
 - Added raise statement
@@ -84,6 +95,8 @@ This version is ~10% faster than 6A.
 - Fixed test runner to properly handle exceptions vs partial output in C VM
 
 ### In Version 6A
+Bugfixes.
+
 - Fixed Python SyntaxError handling for unclosed strings in parser
 
     The parser now properly catches and handles Python SyntaxErrors when parsing expressions with unclosed strings, providing better error messages.
@@ -92,6 +105,8 @@ This version is ~10% faster than 6A.
 - Updated README with improved installation instructions
 
 ### In Version 5A
+Debugging update
+
 - Added comprehensive debugging support
 
     You can now debug FRScript code with step-by-step execution, breakpoints, and detailed variable tracking.

@@ -14,5 +14,6 @@ in each file separately does not warrant another line.
 
 If there already is content and it is from a previous commit, overwrite the file.
 
+If adding a new bytecode instruction, remember to update doc/vm_instructions.md.
 
 Clean up after you're done.

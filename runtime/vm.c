@@ -661,11 +661,11 @@ Value list_get(List *list, int index) {
 
             if (line_idx > 0 && line_idx <= g_current_vm->debug_source_line_count) {
                 const char *source_line = g_current_vm->debug_source_lines[line_idx - 1];
-                
+
                 // Try to find the exact index pattern [index]
                 char search_pattern[32];
                 int found = 0;
-                
+
                 // Try searching for [original_index] first
                 snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
                 const char *pattern_pos = strstr(source_line, search_pattern);
@@ -674,7 +674,7 @@ Value list_get(List *list, int index) {
                     char_pos = pattern_pos - source_line + strlen(search_pattern) - 2;
                     found = 1;
                 }
-                
+
                 // Fallback: find any bracket pair if exact match not found
                 if (!found) {
                     const char *bracket = strchr(source_line, '[');
@@ -722,11 +722,11 @@ void list_set(List *list, int index, Value value) {
 
             if (line_idx > 0 && line_idx <= g_current_vm->debug_source_line_count) {
                 const char *source_line = g_current_vm->debug_source_lines[line_idx - 1];
-                
+
                 // Try to find the exact index pattern [index]
                 char search_pattern[32];
                 int found = 0;
-                
+
                 // Try searching for [original_index] first
                 snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
                 const char *pattern_pos = strstr(source_line, search_pattern);
@@ -735,7 +735,7 @@ void list_set(List *list, int index, Value value) {
                     char_pos = pattern_pos - source_line + strlen(search_pattern) - 2;
                     found = 1;
                 }
-                
+
                 // Fallback: find any bracket pair if exact match not found
                 if (!found) {
                     const char *bracket = strchr(source_line, '[');
@@ -1050,13 +1050,13 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
     if (vm->exception_handler_count > 0) {
         // Find the most recent handler
         ExceptionHandler *handler = &vm->exception_handlers[vm->exception_handler_count - 1];
-        
+
         // Extract exception type from message
         // Format: "[ExceptionType] actual message" or just "actual message"
         char extracted_type[256] = "RuntimeError";  // Default, on stack but persistent during function
         const char *exc_type = extracted_type;
         const char *display_message = message;  // Message to display
-        
+
         // Check for [ExceptionType] marker at start
         if (message[0] == '[') {
             const char *end_bracket = strchr(message, ']');
@@ -1067,7 +1067,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
                     strncpy(extracted_type, message + 1, type_len);
                     extracted_type[type_len] = '\0';
                     exc_type = extracted_type;
-                    
+
                     // Skip past the marker and space to get display message
                     display_message = end_bracket + 1;
                     while (*display_message == ' ') display_message++;
@@ -1075,7 +1075,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
             }
         }
         // Fallback: try to detect from message content
-        else if (strstr(message, "division by zero") || strstr(message, "Division by zero") || 
+        else if (strstr(message, "division by zero") || strstr(message, "Division by zero") ||
             strstr(message, "float division by zero")) {
             strcpy(extracted_type, "ZeroDivisionError");
             exc_type = extracted_type;
@@ -1089,41 +1089,41 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
             strcpy(extracted_type, "ValueError");
             exc_type = extracted_type;
         }
-        
+
         // Check if the handler matches this exception type
         if (strcmp(handler->exc_type, exc_type) == 0 || strcmp(handler->exc_type, "") == 0) {
             // Restore stack state
             vm->stack_top = handler->stack_top;
             vm->call_stack_top = handler->call_stack_top;
-            
+
             // Jump to exception handler
             vm->pc = handler->handler_pc;
-            
+
             // Pop the exception handler
             free(handler->exc_type);
             handler->exc_type = NULL;
             vm->exception_handler_count--;
-            
+
             return;  // Continue execution at handler
         }
-        
+
         // Handler doesn't match - pop it and continue searching or error
         free(handler->exc_type);
         handler->exc_type = NULL;
         vm->exception_handler_count--;
-        
+
         // Recursively check for other handlers
         // Use display_message to avoid showing the [Type] marker
         if (vm->exception_handler_count > 0) {
             vm_runtime_error(vm, display_message, char_pos);
             return;
         }
-        
+
         // No more handlers - will fall through to error printing
         // Use display_message for cleaner output
         message = display_message;
     }
-    
+
     // No handler found or handler doesn't match - print error and exit
     fprintf(stderr, "Exception: Runtime Error\n");
 
@@ -1162,7 +1162,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
     } else {
         fprintf(stderr, "Error: %s\n", message);
     }
-    
+
     exit(1);
 }
 
@@ -2480,14 +2480,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 int64_t values[10000];  // Support up to 10000 elements
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
-                
+
                 if (val_str == NULL) {
                     fprintf(stderr, "Error: LIST_NEW_I64 missing count\n");
                     exit(1);
                 }
-                
+
                 count = safe_atoi(val_str);
-                
+
                 // Now read the values
                 for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
@@ -2522,14 +2522,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 double values[10000];
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
-                
+
                 if (val_str == NULL) {
                     fprintf(stderr, "Error: LIST_NEW_F64 missing count\n");
                     exit(1);
                 }
-                
+
                 count = safe_atoi(val_str);
-                
+
                 for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
@@ -2561,7 +2561,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
 
                 char *strings[10000];
                 int count = 0;
-                
+
                 // Parse count
                 char *p = rest_of_line;
                 while (*p == ' ' || *p == '\t') p++;
@@ -2569,7 +2569,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 while (*p && *p != ' ' && *p != '\t') p++;
                 if (*p) *p++ = '\0';
                 count = safe_atoi(count_start);
-                
+
                 // Parse quoted strings
                 for (int j = 0; j < count && j < 10000; j++) {
                     while (*p == ' ' || *p == '\t') p++;
@@ -2578,24 +2578,24 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                         exit(1);
                     }
                     p++; // Skip opening quote
-                    
+
                     char *start = p;
                     while (*p && (*p != '"' || (p > start && *(p-1) == '\\'))) {
                         p++;
                     }
-                    
+
                     if (*p != '"') {
                         fprintf(stderr, "Error: LIST_NEW_STR unterminated string\n");
                         exit(1);
                     }
-                    
+
                     size_t len = p - start;
                     char *temp = malloc(len + 1);
                     strncpy(temp, start, len);
                     temp[len] = '\0';
                     strings[j] = unescape_string(temp);
                     free(temp);
-                    
+
                     p++; // Skip closing quote
                 }
 
@@ -2622,14 +2622,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 int values[10000];
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
-                
+
                 if (val_str == NULL) {
                     fprintf(stderr, "Error: LIST_NEW_BOOL missing count\n");
                     exit(1);
                 }
-                
+
                 count = safe_atoi(val_str);
-                
+
                 for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
@@ -2783,39 +2783,39 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     fprintf(stderr, "Error: TRY_BEGIN requires exc_type and label\n");
                     exit(1);
                 }
-                
+
                 // Parse quoted exception type
                 char *p = rest_of_line;
                 while (*p == ' ' || *p == '\t') p++; // Skip whitespace
-                
+
                 if (*p != '"')
                 {
                     fprintf(stderr, "Error: TRY_BEGIN expects quoted exception type\n");
                     exit(1);
                 }
                 p++; // Skip opening quote
-                
+
                 char *exc_type_start = p;
                 while (*p && *p != '"') p++;
-                
+
                 if (*p != '"')
                 {
                     fprintf(stderr, "Error: TRY_BEGIN unterminated string\n");
                     exit(1);
                 }
-                
+
                 size_t exc_type_len = p - exc_type_start;
                 char *exc_type = malloc(exc_type_len + 1);
                 strncpy(exc_type, exc_type_start, exc_type_len);
                 exc_type[exc_type_len] = '\0';
-                
+
                 p++; // Skip closing quote
-                
+
                 // Skip whitespace to get label
                 while (*p == ' ' || *p == '\t') p++;
-                
+
                 char *label = strdup(p);
-                
+
                 inst.op = OP_TRY_BEGIN;
                 // Store both exc_type and label as a combined string (we'll parse it in execution)
                 // Format: "exc_type|label"
@@ -2823,7 +2823,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 char *combined = malloc(combined_len);
                 snprintf(combined, combined_len, "%s|%s", exc_type, label);
                 inst.operand.str_val = combined;
-                
+
                 free(exc_type);
                 free(label);
             }
@@ -2840,7 +2840,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     fprintf(stderr, "Error: RAISE requires exc_type and message\n");
                     exit(1);
                 }
-                
+
                 inst.op = OP_RAISE;
                 inst.operand.str_val = strdup(rest_of_line);
             }
@@ -3093,7 +3093,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             // Fused load/store
             else if (strcmp(token, "FUSED_LOAD_STORE") == 0)
             {
-                // FUSED_LOAD_STORE src1 dst1 src2 dst2 ...
+                // FUSED_LOAD_STORE src1 dst1 src2 dst2 ... (alternating)
                 inst.op = OP_FUSED_LOAD_STORE;
                 char *rest_of_line = strtok(NULL, "\n");
                 if (rest_of_line == NULL)
@@ -3112,16 +3112,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     arg_str = strtok(NULL, " ");
                 }
 
-                // Arguments should be in pairs (src/dst)
-                if (arg_count % 2 != 0)
-                {
-                    fprintf(stderr, "Error: FUSED_LOAD_STORE requires pairs of src/dst\n");
-                    exit(1);
-                }
-
                 // Create safe struct
                 MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
-                multi->count = arg_count / 2; // Number of pairs
+                multi->count = arg_count; // Total number of arguments
                 for (int j = 0; j < arg_count; j++)
                 {
                     multi->values[j] = temp_args[j];
@@ -3274,8 +3267,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.indices.src = safe_atoi(var1);
                 inst.operand.indices.dst = safe_atoi(var2);
             }
-            else if (strcmp(token, "SELECT") == 0)
-                inst.op = OP_SWITCH_JUMP_TABLE;
             else if (strcmp(token, "SWITCH_JUMP_TABLE") == 0)
             {
                 // Format: SWITCH_JUMP_TABLE min max label1 label2 ... labelN default
@@ -3284,16 +3275,16 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 int min_val = safe_atoi(min_str);
                 int max_val = safe_atoi(max_str);
                 int num_cases = max_val - min_val + 1;
-                
+
                 inst.op = OP_SWITCH_JUMP_TABLE;
                 inst.operand.switch_table.min_val = min_val;
                 inst.operand.switch_table.max_val = max_val;
                 inst.operand.switch_table.num_labels = num_cases + 1; // +1 for default
-                
+
                 // Allocate labels and pcs arrays
                 inst.operand.switch_table.labels = malloc((num_cases + 1) * sizeof(char*));
                 inst.operand.switch_table.pcs = malloc((num_cases + 1) * sizeof(int));
-                
+
                 // Read case labels
                 for (int j = 0; j < num_cases; j++) {
                     char *label = strtok(NULL, " ");
@@ -3303,7 +3294,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     }
                     inst.operand.switch_table.labels[j] = strdup(label);
                 }
-                
+
                 // Read default label
                 char *default_label = strtok(NULL, " ");
                 if (!default_label) {
@@ -3406,10 +3397,10 @@ __attribute__((hot)) void vm_run(VM *vm) {
     vm->call_stack_top = 1;
     vm->pc = entry->start_pc;
     vm->running = true;
-    
+
     // Cache current call frame to reduce pointer arithmetic overhead
     register CallFrame *current_frame = &vm->call_stack[0];
-    
+
     // Main interpreter loop - optimized with aligned dispatch table for cache efficiency
     static const void *dispatch_table[] __attribute__((aligned(64))) = {
         [OP_CONST_I64] = &&L_CONST_I64,
@@ -3662,7 +3653,7 @@ L_LOAD: // OP_LOAD
     {
         Value v = current_frame->vars.vars[inst.operand.index];
         // Fast path for immutable types - avoid expensive copy
-        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 ||
                    v.type == VAL_BOOL || v.type == VAL_VOID)) {
             vm_push(vm, v);
         } else {
@@ -3700,13 +3691,13 @@ L_STORE_CONST_I64: // OP_STORE_CONST_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
     StoreConstI64 *multi = (StoreConstI64 *)inst.operand.ptr;
-    
+
     // Process each slot/value pair
     for (int i = 0; i < multi->count; i++)
     {
         int slot = (int)multi->pairs[i * 2];
         int64_t val = multi->pairs[i * 2 + 1];
-        
+
         value_free(current_frame->vars.vars[slot]);
         current_frame->vars.vars[slot] = value_make_int_si(val);
     }
@@ -3716,14 +3707,14 @@ L_STORE_CONST_F64: // OP_STORE_CONST_F64
 {
     Instruction inst = vm->code[vm->pc - 1];
     StoreConstF64 *multi = (StoreConstF64 *)inst.operand.ptr;
-    
+
     // Process each slot/value pair
     for (int i = 0; i < multi->count; i++)
     {
         int slot = (int)multi->pairs[i * 2];
         double val;
         memcpy(&val, &multi->pairs[i * 2 + 1], sizeof(double));
-        
+
         value_free(current_frame->vars.vars[slot]);
         current_frame->vars.vars[slot] = value_make_f64(val);
     }
@@ -3733,13 +3724,13 @@ L_STORE_CONST_BOOL: // OP_STORE_CONST_BOOL
 {
     Instruction inst = vm->code[vm->pc - 1];
     StoreConstBool *multi = (StoreConstBool *)inst.operand.ptr;
-    
+
     // Process each slot/value pair
     for (int i = 0; i < multi->count; i++)
     {
         int slot = (int)multi->pairs[i * 2];
         int val = (int)multi->pairs[i * 2 + 1];
-        
+
         value_free(current_frame->vars.vars[slot]);
         current_frame->vars.vars[slot] = value_make_bool(val);
     }
@@ -3749,13 +3740,13 @@ L_STORE_CONST_STR: // OP_STORE_CONST_STR
 {
     Instruction inst = vm->code[vm->pc - 1];
     StoreConstStr *multi = (StoreConstStr *)inst.operand.ptr;
-    
+
     // Process each slot/value pair
     for (int i = 0; i < multi->count; i++)
     {
         int slot = (int)(intptr_t)multi->pairs[i * 2];
         char *str = multi->pairs[i * 2 + 1];
-        
+
         value_free(current_frame->vars.vars[slot]);
         current_frame->vars.vars[slot] = value_make_str(str);
     }
@@ -4006,7 +3997,7 @@ L_CALL: // OP_CALL
             fprintf(stderr, "Function not found: %s\n", inst.operand.str_val);
             exit(1);
         }
-        
+
         // Set up new call frame
         CallFrame *frame = &vm->call_stack[vm->call_stack_top++];
         frame->func = func;
@@ -4477,7 +4468,7 @@ L_ADD_CONST_F64: // OP_ADD_CONST_F64
     Instruction inst = vm->code[vm->pc - 1];
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
-    
+
     if (likely(a.type == VAL_F64))
     {
         a.as.f64 += const_val;
@@ -4502,7 +4493,7 @@ L_SUB_CONST_F64: // OP_SUB_CONST_F64
     Instruction inst = vm->code[vm->pc - 1];
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
-    
+
     if (likely(a.type == VAL_F64))
     {
         a.as.f64 -= const_val;
@@ -4527,7 +4518,7 @@ L_MUL_CONST_F64: // OP_MUL_CONST_F64
     Instruction inst = vm->code[vm->pc - 1];
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
-    
+
     if (likely(a.type == VAL_F64))
     {
         a.as.f64 *= const_val;
@@ -4552,7 +4543,7 @@ L_DIV_CONST_F64: // OP_DIV_CONST_F64
     Instruction inst = vm->code[vm->pc - 1];
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
-    
+
     if (const_val == 0.0)
     {
         if (g_current_vm) {
@@ -4562,7 +4553,7 @@ L_DIV_CONST_F64: // OP_DIV_CONST_F64
         }
         exit(1);
     }
-    
+
     if (likely(a.type == VAL_F64))
     {
         a.as.f64 /= const_val;
@@ -4717,7 +4708,7 @@ L_CMP_LT_CONST: // OP_CMP_LT_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 < const_val);
@@ -4740,7 +4731,7 @@ L_CMP_GT_CONST: // OP_CMP_GT_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 > const_val);
@@ -4763,7 +4754,7 @@ L_CMP_LE_CONST: // OP_CMP_LE_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 <= const_val);
@@ -4786,7 +4777,7 @@ L_CMP_GE_CONST: // OP_CMP_GE_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 >= const_val);
@@ -4809,7 +4800,7 @@ L_CMP_EQ_CONST: // OP_CMP_EQ_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 == const_val);
@@ -4832,7 +4823,7 @@ L_CMP_NE_CONST: // OP_CMP_NE_CONST
     Value a = vm_pop(vm);
     int64_t const_val = inst.operand.int64;
     bool result = false;
-    
+
     if (likely(a.type == VAL_INT))
     {
         result = (a.as.int64 != const_val);
@@ -4855,7 +4846,7 @@ L_CMP_LT_CONST_F64: // OP_CMP_LT_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 < const_val);
@@ -4878,7 +4869,7 @@ L_CMP_GT_CONST_F64: // OP_CMP_GT_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 > const_val);
@@ -4901,7 +4892,7 @@ L_CMP_LE_CONST_F64: // OP_CMP_LE_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 <= const_val);
@@ -4924,7 +4915,7 @@ L_CMP_GE_CONST_F64: // OP_CMP_GE_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 >= const_val);
@@ -4947,7 +4938,7 @@ L_CMP_EQ_CONST_F64: // OP_CMP_EQ_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 == const_val);
@@ -4970,7 +4961,7 @@ L_CMP_NE_CONST_F64: // OP_CMP_NE_CONST_F64
     Value a = vm_pop(vm);
     double const_val = inst.operand.f64;
     bool result = false;
-    
+
     if (a.type == VAL_F64)
     {
         result = (a.as.f64 != const_val);
@@ -4991,7 +4982,7 @@ L_SWITCH_JUMP_TABLE: // OP_SWITCH_JUMP_TABLE
 {
     Instruction inst = vm->code[vm->pc - 1];
     Value switch_val = vm_pop(vm);
-    
+
     // Convert switch value to int64
     int64_t val;
     if (switch_val.type == VAL_INT)
@@ -5015,9 +5006,9 @@ L_SWITCH_JUMP_TABLE: // OP_SWITCH_JUMP_TABLE
         value_free(switch_val);
         exit(1);
     }
-    
+
     value_free(switch_val);
-    
+
     // Check if value is in range [min_val, max_val]
     if (val >= inst.operand.switch_table.min_val && val <= inst.operand.switch_table.max_val)
     {
@@ -5354,18 +5345,18 @@ L_LIST_GET: // OP_LIST_GET - Also works for strings
         // Get character at index as a string
         int original_index = index;
         int str_len = (int)strlen(container_val.as.str);
-        
+
         // Handle negative indices
         if (index < 0)
         {
             index = str_len + index;
         }
-        
+
         if (index < 0 || index >= str_len)
         {
             char error_msg[256];
             snprintf(error_msg, sizeof(error_msg), "Index error: string index out of range: %d (length: %d)", original_index, str_len);
-            
+
             // Try to find the exact index value in the source line
             int char_pos = 0;
             if (vm->debug_source_lines) {
@@ -5375,7 +5366,7 @@ L_LIST_GET: // OP_LIST_GET - Also works for strings
 
                 if (line_idx > 0 && line_idx <= vm->debug_source_line_count) {
                     const char *source_line = vm->debug_source_lines[line_idx - 1];
-                    
+
                     // Try to find the exact index pattern [index]
                     char search_pattern[32];
                     snprintf(search_pattern, sizeof(search_pattern), "[%d]", original_index);
@@ -5395,7 +5386,7 @@ L_LIST_GET: // OP_LIST_GET - Also works for strings
                     }
                 }
             }
-            
+
             vm_runtime_error(vm, error_msg, char_pos);
             fflush(stderr);
             value_free(container_val);
@@ -5477,7 +5468,7 @@ L_LIST_NEW_I64: // OP_LIST_NEW_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt64 *multi = (MultiInt64*)inst.operand.ptr;
-    
+
     List *list = list_new();
     for (int i = 0; i < multi->count; i++)
     {
@@ -5485,7 +5476,7 @@ L_LIST_NEW_I64: // OP_LIST_NEW_I64
         list_append(list, val);
         value_free(val);
     }
-    
+
     vm_push(vm, value_wrap_list(list));
     DISPATCH();
 }
@@ -5494,7 +5485,7 @@ L_LIST_NEW_F64: // OP_LIST_NEW_F64
 {
     Instruction inst = vm->code[vm->pc - 1];
     MultiF64 *multi = (MultiF64*)inst.operand.ptr;
-    
+
     List *list = list_new();
     for (int i = 0; i < multi->count; i++)
     {
@@ -5502,7 +5493,7 @@ L_LIST_NEW_F64: // OP_LIST_NEW_F64
         list_append(list, val);
         value_free(val);
     }
-    
+
     vm_push(vm, value_wrap_list(list));
     DISPATCH();
 }
@@ -5511,7 +5502,7 @@ L_LIST_NEW_STR: // OP_LIST_NEW_STR
 {
     Instruction inst = vm->code[vm->pc - 1];
     MultiStr *multi = (MultiStr*)inst.operand.ptr;
-    
+
     List *list = list_new();
     for (int i = 0; i < multi->count; i++)
     {
@@ -5519,7 +5510,7 @@ L_LIST_NEW_STR: // OP_LIST_NEW_STR
         list_append(list, val);
         value_free(val);
     }
-    
+
     vm_push(vm, value_wrap_list(list));
     DISPATCH();
 }
@@ -5528,7 +5519,7 @@ L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
 {
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt*)inst.operand.ptr;
-    
+
     List *list = list_new();
     for (int i = 0; i < multi->count; i++)
     {
@@ -5536,7 +5527,7 @@ L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
         list_append(list, val);
         value_free(val);
     }
-    
+
     vm_push(vm, value_wrap_list(list));
     DISPATCH();
 }
@@ -7054,7 +7045,7 @@ L_LOAD_MULTI: // OP_LOAD_MULTI
         int index = multi->values[i];
         Value v = current_frame->vars.vars[index];
         // Fast path for immutable types
-        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 ||
                    v.type == VAL_BOOL || v.type == VAL_VOID)) {
             vm_push(vm, v);
         } else {
@@ -7070,25 +7061,30 @@ L_FUSED_LOAD_STORE: // OP_FUSED_LOAD_STORE
     Instruction inst = vm->code[vm->pc - 1];
     MultiInt *multi = (MultiInt *)inst.operand.ptr;
 
-    // Process each src/dst pair
+    // Process each operation sequentially
+    // Even indices are LOAD operations, odd indices are STORE operations
     for (int i = 0; i < multi->count; i++)
     {
-        int src = multi->values[i * 2];
-        int dst = multi->values[i * 2 + 1];
-
-        // LOAD: load from src and push
-        Value v = current_frame->vars.vars[src];
-        if (likely(v.type == VAL_INT || v.type == VAL_F64 || 
-                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
-            vm_push(vm, v);
-        } else {
-            vm_push(vm, value_copy(v));
+        int var_id = multi->values[i];
+        
+        if (i % 2 == 0)
+        {
+            // LOAD: load from var_id and push
+            Value v = current_frame->vars.vars[var_id];
+            if (likely(v.type == VAL_INT || v.type == VAL_F64 ||
+                       v.type == VAL_BOOL || v.type == VAL_VOID)) {
+                vm_push(vm, v);
+            } else {
+                vm_push(vm, value_copy(v));
+            }
         }
-
-        // STORE: pop value and store to dst
-        Value val = vm_pop(vm);
-        value_free(current_frame->vars.vars[dst]);
-        current_frame->vars.vars[dst] = val;
+        else
+        {
+            // STORE: pop value and store to var_id
+            Value val = vm_pop(vm);
+            value_free(current_frame->vars.vars[var_id]);
+            current_frame->vars.vars[var_id] = val;
+        }
     }
 
     DISPATCH();
@@ -7101,19 +7097,24 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
 
     CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
 
-    // Process each dst/src pair
+    // Process each operation sequentially
+    // Even indices are STORE operations, odd indices are LOAD operations
     for (int i = 0; i < multi->count; i++)
     {
-        int dst = multi->values[i];
-        int src = multi->values[i + 1];
-
-        // STORE: pop value and store to dst
-        Value val = vm_pop(vm);
-        value_free(current_frame->vars.vars[dst]);
-        current_frame->vars.vars[dst] = val;
-
-        // LOAD: load from src and push
-        vm_push(vm, value_copy(frame->vars.vars[src]));
+        int var_id = multi->values[i];
+        
+        if (i % 2 == 0)
+        {
+            // STORE: pop value and store to var_id
+            Value val = vm_pop(vm);
+            value_free(current_frame->vars.vars[var_id]);
+            current_frame->vars.vars[var_id] = val;
+        }
+        else
+        {
+            // LOAD: load from var_id and push
+            vm_push(vm, value_copy(frame->vars.vars[var_id]));
+        }
     }
 
     DISPATCH();
@@ -7762,18 +7763,18 @@ L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name,
 L_TRY_BEGIN: // OP_TRY_BEGIN - Begin exception handler
 {
     Instruction inst = vm->code[vm->pc - 1];
-    
+
     // Parse combined string "exc_type|label"
     char *combined = strdup(inst.operand.str_val);
     char *exc_type = strtok(combined, "|");
     char *label_name = strtok(NULL, "|");
-    
+
     if (!label_name) {
         fprintf(stderr, "Error: TRY_BEGIN malformed operand\n");
         free(combined);
         exit(1);
     }
-    
+
     // Find label PC within current function
     int func_index = vm_find_function_for_pc(vm, vm->pc - 1);
     int handler_pc = vm_find_label(vm, label_name, func_index);
@@ -7782,20 +7783,20 @@ L_TRY_BEGIN: // OP_TRY_BEGIN - Begin exception handler
         free(combined);
         exit(1);
     }
-    
+
     // Push exception handler onto stack
     if (vm->exception_handler_count >= MAX_EXCEPTION_HANDLERS) {
         fprintf(stderr, "Error: Maximum exception handler depth exceeded\n");
         free(combined);
         exit(1);
     }
-    
+
     ExceptionHandler *handler = &vm->exception_handlers[vm->exception_handler_count++];
     handler->exc_type = strdup(exc_type);
     handler->handler_pc = handler_pc;
     handler->stack_top = vm->stack_top;
     handler->call_stack_top = vm->call_stack_top;
-    
+
     free(combined);
     DISPATCH();
 }
@@ -7814,25 +7815,25 @@ L_TRY_END: // OP_TRY_END - End exception handler (pop from handler stack)
 L_RAISE: // OP_RAISE - Raise an exception
 {
     Instruction inst = vm->code[vm->pc - 1];
-    
+
     // Parse exception type and message from quoted strings
     // Format: "ExceptionType" "message" or "ExceptionType" "" or "" ""
     char *msg = inst.operand.str_val;
-    
+
     // Make a working copy to avoid modifying the original
     char *working = strdup(msg);
     char *p = working;
     while (*p == ' ' || *p == '\t') p++;
-    
+
     char exc_type[256] = "";
     char message[1024] = "";
-    
+
     if (*p == '"') {
         // Parse exception type
         p++; // Skip opening quote
         char *exc_start = p;
         while (*p && *p != '"') p++;
-        
+
         if (*p == '"') {
             size_t exc_len = p - exc_start;
             if (exc_len < sizeof(exc_type)) {
@@ -7840,10 +7841,10 @@ L_RAISE: // OP_RAISE - Raise an exception
                 exc_type[exc_len] = '\0';
             }
             p++; // Skip closing quote
-            
+
             // Skip whitespace to message
             while (*p == ' ' || *p == '\t') p++;
-            
+
             if (*p == '"') {
                 p++; // Skip opening quote of message
                 char *msg_start = p;
@@ -7858,9 +7859,9 @@ L_RAISE: // OP_RAISE - Raise an exception
             }
         }
     }
-    
+
     free(working);
-    
+
     // Build the error message
     // For detection of exception type, we'll use the exc_type directly in vm_runtime_error
     // But the message shown to user should just be the message itself
@@ -7874,7 +7875,7 @@ L_RAISE: // OP_RAISE - Raise an exception
         fprintf(stderr, "Error: Bare raise not supported in C VM\n");
         exit(1);
     }
-    
+
     // Trigger the error
     // Pass the exc_type info by including it as a detectable pattern
     // We'll modify vm_runtime_error to detect the exception type from exc_type variable
@@ -7886,7 +7887,7 @@ L_RAISE: // OP_RAISE - Raise an exception
     } else {
         snprintf(error_with_type, sizeof(error_with_type), "%s", full_message);
     }
-    
+
     vm_runtime_error(vm, error_with_type, 0);
     // If we get here, a handler was found and vm_runtime_error returned
     // The PC has been updated to jump to the handler, so just dispatch

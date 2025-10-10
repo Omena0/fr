@@ -67,6 +67,9 @@ class BytecodeOptimizer:
         # Pass 16: Eliminate redundant loop continuation labels
         lines = self.eliminate_redundant_continue_labels(lines)
 
+        # Pass 17: Optimize if-else to SELECT instruction
+        lines = self.optimize_if_else_select(lines)
+
         return '\n'.join(lines)
 
     def fuse_repeated_arith_store(self, lines: List[str]) -> List[str]:
@@ -174,7 +177,7 @@ class BytecodeOptimizer:
                     pairs.append((store_slot, const_val))
                     j += 2
 
-                if len(pairs) >= 1:
+                if pairs:
                     args = []
                     for slot, val in pairs:
                         args.extend([slot, val])
@@ -198,7 +201,7 @@ class BytecodeOptimizer:
                     pairs.append((store_slot, const_val))
                     j += 2
 
-                if len(pairs) >= 1:
+                if pairs:
                     args = []
                     for slot, val in pairs:
                         args.extend([slot, val])
@@ -222,7 +225,7 @@ class BytecodeOptimizer:
                     pairs.append((store_slot, const_val))
                     j += 2
 
-                if len(pairs) >= 1:
+                if pairs:
                     args = []
                     for slot, val in pairs:
                         args.extend([slot, val])
@@ -1094,55 +1097,78 @@ class BytecodeOptimizer:
                         i += 2
                         continue
 
-            # Pattern: Multiple LOAD src, STORE dst pairs -> FUSED_LOAD_STORE
-            # Look for sequences of LOAD/STORE pairs
-            if line.startswith('LOAD ') and i + 1 < len(lines) and lines[i+1].strip().startswith('STORE '):
-                # Found first pair, look for more consecutive pairs
-                pairs = []
+            # Pattern: Alternating LOAD/STORE sequence -> FUSED_LOAD_STORE
+            # Must start with LOAD and alternate, can end with either LOAD or STORE
+            if line.startswith('LOAD '):
+                # Collect alternating LOAD/STORE operations
+                ops = []
                 j = i
-                while (j + 1 < len(lines) and
-                       lines[j].strip().startswith('LOAD ') and
-                       lines[j+1].strip().startswith('STORE ')):
-                    src = lines[j].strip().split()[1]
-                    dst = lines[j+1].strip().split()[1]
-                    pairs.append((src, dst))
-                    j += 2
+                expect_load = True
+                
+                while j < len(lines):
+                    curr_line = lines[j].strip()
+                    if expect_load and curr_line.startswith('LOAD '):
+                        ops.append(curr_line.split()[1])
+                        expect_load = False
+                        j += 1
+                    elif not expect_load and curr_line.startswith('STORE '):
+                        ops.append(curr_line.split()[1])
+                        expect_load = True
+                        j += 1
+                    else:
+                        break
 
-                # If we found 2 or more pairs, use FUSED_LOAD_STORE
-                if len(pairs) >= 2:
-                        # Build the fused instruction
-                    args = ' '.join(f"{src} {dst}" for src, dst in pairs)
+                # Merge if we have at least one complete pair (2 ops) or more
+                if len(ops) >= 2:
+                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+                    args = ' '.join(ops)
                     result.append(f"{indent}FUSED_LOAD_STORE {args}")
                     i = j
                     continue
 
-            # Pattern: Multiple STORE dst, LOAD src pairs -> FUSED_STORE_LOAD
-            # Look for sequences of STORE/LOAD pairs, with optional trailing STORE
-            if line.startswith('STORE ') and i + 1 < len(lines) and lines[i+1].strip().startswith('LOAD '):
-                # Found first pair, look for more consecutive pairs
-                pairs = []
+            # Pattern: STORE N, LOAD N (same var) -> DUP, STORE N
+            if (line.startswith('STORE ') and i + 1 < len(lines) and 
+                lines[i+1].strip().startswith('LOAD ')):
+                store_var = line.split()[1]
+                load_var = lines[i+1].strip().split()[1]
+                if store_var == load_var:
+                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+                    result.append(f"{indent}DUP")
+                    result.append(lines[i])
+                    i += 2
+                    continue
+
+            # Pattern: Alternating STORE/LOAD sequence -> FUSED_STORE_LOAD
+            # Must start with STORE and alternate, can end with either STORE or LOAD
+            # Skip if first pair is STORE N, LOAD N (same var) - handled above
+            if line.startswith('STORE '):
+                # Collect alternating STORE/LOAD operations
+                ops = []
                 j = i
-                while (j + 1 < len(lines) and
-                       lines[j].strip().startswith('STORE ') and
-                       lines[j+1].strip().startswith('LOAD ')):
-                    dst = lines[j].strip().split()[1]
-                    src = lines[j+1].strip().split()[1]
-                    pairs.append((dst, src))
-                    j += 2
+                expect_store = True
+                
+                while j < len(lines):
+                    curr_line = lines[j].strip()
+                    if expect_store and curr_line.startswith('STORE '):
+                        ops.append(curr_line.split()[1])
+                        expect_store = False
+                        j += 1
+                    elif not expect_store and curr_line.startswith('LOAD '):
+                        ops.append(curr_line.split()[1])
+                        expect_store = True
+                        j += 1
+                    else:
+                        break
 
-                # Check for trailing STORE (without following LOAD)
-                trailing_store = None
-                if j < len(lines) and lines[j].strip().startswith('STORE '):
-                    trailing_store = lines[j].strip().split()[1]
-                    j += 1
-
-                # If we found 2 or more pairs (or 1+ pairs with trailing store), use FUSED_STORE_LOAD
-                if len(pairs) >= 2 or (len(pairs) >= 1 and trailing_store):
-                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i].startswith('STORE') else '  '
-                    # Build the fused instruction
-                    args = ' '.join(f"{dst} {src}" for dst, src in pairs)
-                    if trailing_store:
-                        args += f" {trailing_store}"
+                # Only merge if:
+                # 1. We have at least 2 pairs (4 ops) OR
+                # 2. We have 1 pair but STORE and LOAD are different vars OR
+                # 3. We have more than 2 ops total
+                should_fuse = len(ops) >= 4 or (len(ops) >= 2 and ops[0] != ops[1]) or len(ops) > 2
+                
+                if should_fuse:
+                    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+                    args = ' '.join(ops)
                     result.append(f"{indent}FUSED_STORE_LOAD {args}")
                     i = j
                     continue
@@ -2194,3 +2220,214 @@ class BytecodeOptimizer:
             i += 1
         
         return result
+
+    def optimize_if_else_select(self, lines: List[str]) -> List[str]:
+        """
+        Optimize if-else patterns where both branches assign to the same variable.
+        
+        Pattern:
+            <condition>
+            JUMP_IF_FALSE else_label
+            [statements]
+            <value_expr>
+            STORE var
+            JUMP end_label
+            LABEL else_label
+            [statements]
+            <value_expr>
+            STORE var
+            LABEL end_label
+        
+        Optimized to:
+            <condition>
+            <true_value_expr>
+            <false_value_expr>
+            SELECT
+            STORE var
+        """
+        result: List[str] = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for JUMP_IF_FALSE
+            if line.startswith('JUMP_IF_FALSE '):
+                parts = line.split()
+                if len(parts) != 2:
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                    
+                else_label = parts[1]
+                jump_idx = i
+                
+                # Scan if-branch
+                j = i + 1
+                if_store_idx = -1
+                if_store_var = None
+                end_label = None
+                
+                while j < len(lines):
+                    curr = lines[j].strip()
+                    
+                    if curr.startswith('LABEL '):
+                        break
+                    
+                    if curr.startswith('JUMP '):
+                        end_label = curr.split()[1] if len(curr.split()) > 1 else None
+                        j += 1
+                        break
+                    
+                    if curr.startswith('STORE '):
+                        if_store_var = curr.split()[1] if len(curr.split()) > 1 else None
+                        if_store_idx = j
+                    elif curr.startswith('STORE_CONST_'):
+                        parts_sc = curr.split()
+                        if len(parts_sc) >= 2:
+                            if_store_var = parts_sc[1]
+                            if_store_idx = j
+                    
+                    j += 1
+                
+                if if_store_idx == -1 or end_label is None:
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                
+                # Check for else label
+                if j >= len(lines) or lines[j].strip() != f"LABEL {else_label}":
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                
+                # Scan else-branch
+                k = j + 1
+                else_store_idx = -1
+                else_store_var = None
+                
+                while k < len(lines):
+                    curr = lines[k].strip()
+                    
+                    if curr.startswith('LABEL '):
+                        break
+                    
+                    if curr.startswith('STORE '):
+                        else_store_var = curr.split()[1] if len(curr.split()) > 1 else None
+                        else_store_idx = k
+                    elif curr.startswith('STORE_CONST_'):
+                        parts_sc = curr.split()
+                        if len(parts_sc) >= 2:
+                            else_store_var = parts_sc[1]
+                            else_store_idx = k
+                    
+                    k += 1
+                
+                if else_store_idx == -1 or if_store_var != else_store_var:
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                
+                # Check for end label
+                if k >= len(lines) or lines[k].strip() != f"LABEL {end_label}":
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                
+                # Successfully matched! Build optimized code
+                indent = lines[if_store_idx][:len(lines[if_store_idx]) - len(lines[if_store_idx].lstrip())]
+                
+                # Check if there are any statements between jump and store (in if branch)
+                # or between else label and store (in else branch)
+                # For STORE_CONST, the constant value is part of the STORE so there's no separate CONST
+                # but there could still be other instructions before it
+                if_expr_count = 0
+                for idx in range(jump_idx + 1, if_store_idx):
+                    if lines[idx].strip():  # Non-empty line
+                        if_expr_count += 1
+                
+                else_expr_count = 0
+                for idx in range(j + 1, else_store_idx):
+                    if lines[idx].strip():  # Non-empty line
+                        else_expr_count += 1
+                
+                # If STORE_CONST, we expect 0 expression lines (value is in STORE itself)
+                # If regular STORE, we expect exactly 1 expression line (the CONST/LOAD)
+                # Anything else means side effects
+                if lines[if_store_idx].strip().startswith('STORE_CONST_'):
+                    if_has_side_effects = (if_expr_count > 0)
+                else:
+                    if_has_side_effects = (if_expr_count != 1)
+                
+                if lines[else_store_idx].strip().startswith('STORE_CONST_'):
+                    else_has_side_effects = (else_expr_count > 0)
+                else:
+                    else_has_side_effects = (else_expr_count != 1)
+                
+                # Only optimize if no side effects in branches
+                if if_has_side_effects or else_has_side_effects:
+                    result.append(lines[i])
+                    i += 1
+                    continue
+                
+                # Find condition start
+                cond_start = jump_idx - 1
+                while cond_start >= len(result):
+                    prev = lines[cond_start].strip()
+                    if (prev.startswith('LABEL ') or prev.startswith('JUMP ') or
+                        prev.startswith('.local ') or prev.startswith('STORE ') or
+                        prev.startswith('STORE_CONST_')):
+                        cond_start += 1
+                        break
+                    cond_start -= 1
+                
+                if cond_start < len(result):
+                    cond_start = len(result)
+                
+                # Add condition
+                for idx in range(cond_start, jump_idx):
+                    result.append(lines[idx])
+                
+                # Add true value
+                # If STORE is STORE_CONST_*, extract the constant and push it
+                if lines[if_store_idx].strip().startswith('STORE_CONST_'):
+                    # Extract constant from STORE_CONST_I64/F64/etc var val
+                    parts = lines[if_store_idx].strip().split()
+                    if len(parts) >= 3:
+                        const_type = parts[0].replace('STORE_CONST_', 'CONST_')
+                        const_val = parts[2]
+                        result.append(f"{indent}{const_type} {const_val}")
+                else:
+                    # Normal case: copy instructions before STORE
+                    for idx in range(jump_idx + 1, if_store_idx):
+                        result.append(lines[idx])
+                
+                # Add false value
+                # If STORE is STORE_CONST_*, extract the constant and push it
+                if lines[else_store_idx].strip().startswith('STORE_CONST_'):
+                    # Extract constant from STORE_CONST_I64/F64/etc var val
+                    parts = lines[else_store_idx].strip().split()
+                    if len(parts) >= 3:
+                        const_type = parts[0].replace('STORE_CONST_', 'CONST_')
+                        const_val = parts[2]
+                        result.append(f"{indent}{const_type} {const_val}")
+                else:
+                    # Normal case: copy instructions before STORE
+                    for idx in range(j + 1, else_store_idx):
+                        result.append(lines[idx])
+                
+                # Add SELECT and STORE
+                result.append(f"{indent}SELECT")
+                result.append(f"{indent}STORE {if_store_var}")
+                
+                # Skip to after end label
+                i = k + 1
+                continue
+            
+            result.append(lines[i])
+            i += 1
+        
+        return result
+
+
+
