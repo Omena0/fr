@@ -14,9 +14,10 @@ TYPE_NONE = 0
 TYPE_BOOL_FALSE = 1
 TYPE_BOOL_TRUE = 2
 TYPE_INT = 3
-TYPE_STR = 4
-TYPE_LIST = 5
-TYPE_DICT = 6
+TYPE_FLOAT = 4
+TYPE_STR = 5
+TYPE_LIST = 6
+TYPE_DICT = 7
 
 def _compute_checksum(data: bytes) -> int:
     """Compute a simple CRC32 checksum"""
@@ -29,6 +30,11 @@ def _encode_value(value: Any) -> bytes:
         return bytes([TYPE_NONE])
     elif isinstance(value, bool):
         return bytes([TYPE_BOOL_TRUE if value else TYPE_BOOL_FALSE])
+    elif isinstance(value, float):
+        # Encode float as double (8 bytes)
+        data = bytes([TYPE_FLOAT])
+        data += struct.pack('<d', value)
+        return data
     elif isinstance(value, int):
         # Variable-length integer encoding
         data = bytes([TYPE_INT])
@@ -74,6 +80,10 @@ def _decode_value(data: bytes, offset: int) -> tuple[Any, int]:
         return False, offset
     elif type_tag == TYPE_BOOL_TRUE:
         return True, offset
+    elif type_tag == TYPE_FLOAT:
+        value = struct.unpack('<d', data[offset:offset+8])[0]
+        offset += 8
+        return value, offset
     elif type_tag == TYPE_INT:
         str_len = struct.unpack('<I', data[offset:offset+4])[0]
         offset += 4

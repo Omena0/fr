@@ -1,0 +1,357 @@
+// Comprehensive PGO Benchmark - Stresses all language features
+// This benchmark exercises: data types, operators, control flow, functions,
+// data structures, recursion, string operations, and more
+
+// ============= Mathematical Functions =============
+
+const int fibonacci(int n) {
+    // Iterative version using for loop - O(n)
+    if (n <= 1) {
+        return n
+    }
+    int a = 0
+    int b = 1
+    int c = 1
+    for (i, n) {
+        c = a + b
+        a = b
+        b = c
+    }
+    return b
+}
+
+const int factorial(int n) {
+    // Iterative version - O(n)
+    if (n <= 1) {
+        return 1
+    }
+    int result = 1
+    for (i, n) {
+        result = result * (i + 1)
+    }
+    return result
+}
+
+const float power(float base, int exp) {
+    if (exp == 0) {
+        return 1.0
+    }
+    float result = 1.0
+    for (i, exp) {
+        result *= base
+    }
+    return result
+}
+
+const int gcd(int a, int b) {
+    // Greatest common divisor using Euclidean algorithm
+    while (b != 0) {
+        int temp = b
+        b = a % b
+        a = temp
+    }
+    return a
+}
+
+const int is_prime(int n) {
+    // Prime check - returns 1 if prime, 0 if not
+    if (n <= 1) {
+        return 0
+    }
+    if (n <= 3) {
+        return 1
+    }
+    if (n % 2 == 0) {
+        return 0
+    }
+    for (i, n / 2) {
+        int divisor = i + 2
+        if (divisor * divisor > n) {
+            break
+        }
+        if (n % divisor == 0) {
+            return 0
+        }
+    }
+    return 1
+}
+
+// ============= List Operations =============
+
+const list build_list(int size) {
+    list result = []
+    for (i, size) {
+        result = append(result, i * 2)
+    }
+    return result
+}
+
+int sum_list(list lst) {
+    int total = 0
+    int len_lst = len(lst)
+    for (i, len_lst) {
+        total = total + lst[i]
+    }
+    return total
+}
+
+list filter_even(list lst) {
+    list result = []
+    int len_lst = len(lst)
+    for (i, len_lst) {
+        int val = lst[i]
+        if (val % 2 == 0) {
+            result = append(result, val)
+        }
+    }
+    return result
+}
+
+list reverse_list(list lst) {
+    // Reverse a list
+    list result = []
+    int len_lst = len(lst)
+    for (i, len_lst) {
+        result = append(result, lst[len_lst - i - 1])
+    }
+    return result
+}
+
+list merge_lists(list a, list b) {
+    // Merge two lists
+    list result = a
+    int len_b = len(b)
+    for (i, len_b) {
+        result = append(result, b[i])
+    }
+    return result
+}
+
+int list_max(list lst) {
+    // Find maximum value in list
+    int max_val = lst[0]
+    int len_lst = len(lst)
+    for (i, len_lst) {
+        int val = lst[i]
+        if (val > max_val) {
+            max_val = val
+        }
+    }
+    return max_val
+}
+
+// ============= String Operations =============
+
+const str string_repeat(str s, int n) {
+    // Repeat string n times
+    str result = ""
+    for (i, n) {
+        result = result + s
+    }
+    return result
+}
+
+int count_char(str s, str ch) {
+    // Count occurrences of character in string
+    int count = 0
+    int len_s = len(s)
+    for (i, len_s) {
+        if (s[i] == ch) {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+// ============= Control Flow Stress Tests =============
+
+const int switch_test(int iterations) {
+    int sum = 0
+    for (i, iterations) {
+        int val = i % 10
+        switch (val) {
+            case 0:
+                sum = sum + 1
+            case 1:
+                sum = sum + 2
+            case 2:
+                sum = sum + 3
+            case 3:
+                sum = sum + 4
+            case 4:
+                sum = sum + 5
+            case 5:
+                sum = sum + 6
+            case 6:
+                sum = sum + 7
+            case 7:
+                sum = sum + 8
+            case 8:
+                sum = sum + 9
+            case 9:
+                sum = sum + 10
+            default:
+                sum = sum + 0
+        }
+    }
+    return sum
+}
+
+const int while_loop_test(int n) {
+    int count = 0
+    for (i, n) {
+        count = count + 1
+    }
+    return count
+}
+
+const int nested_loops(int n) {
+    int result = 0
+    for (i, n) {
+        for (j, n) {
+            for (k, n) {
+                result = result + 1
+            }
+        }
+    }
+    return result
+}
+
+const int matrix_multiply_sum(int size) {
+    // Simulate matrix operations
+    int sum = 0
+    for (i, size) {
+        for (j, size) {
+            sum = sum + (i * j)
+        }
+    }
+    return sum
+}
+
+const int complex_conditions(int n) {
+    // Test complex boolean conditions
+    int count = 0
+    for (i, n) {
+        if (i % 2 == 0 and i % 3 == 0) {
+            count = count + 1
+        }
+        if (i % 5 == 0 or i % 7 == 0) {
+            count = count + 2
+        }
+    }
+    return count
+}
+
+const int break_continue_test(int n) {
+    // Test break and continue
+    int sum = 0
+    for (i, n) {
+        if (i % 10 == 0) {
+            continue
+        }
+        if (i > n / 2) {
+            break
+        }
+        sum = sum + i
+    }
+    return sum
+}
+
+// ============= Main Benchmark =============
+
+void main() {
+    println("=== Starting Comprehensive Benchmark ===")
+    println("")
+
+    // Math benchmarks
+    println("Running math benchmarks...")
+    int fib_result = 0
+    for (i, 1000) {
+        fib_result = fib_result + fibonacci(1000)
+    }
+    println("Fibonacci sum: " + str(fib_result))
+
+    int fact_result = 0
+    for (i, 10000) {
+        fact_result = fact_result + factorial(100)
+    }
+    println("Factorial sum: " + str(fact_result))
+
+    float pow_result = 0.0
+    for (i, 10000) {
+        pow_result = pow_result + power(5.7, 100)
+    }
+    println("Power sum: " + str(pow_result))
+
+    int gcd_sum = 0
+    for (i, 1000) {
+        gcd_sum = gcd_sum + gcd(48, 18)
+    }
+    println("GCD sum: " + str(gcd_sum))
+
+    int prime_count = 0
+    for (i, 10000) {
+        if (is_prime(i)) {
+            prime_count = prime_count + 1
+        }
+    }
+    println("Prime checks: " + str(prime_count))
+
+    println("")
+
+    // List benchmarks
+    println("Running list benchmarks...")
+    list test_list = build_list(1000)
+    int list_sum = 0
+    for (i, 1000) {
+        list_sum = list_sum + sum_list(test_list)
+    }
+    println("List sum total: " + str(list_sum))
+
+    list filtered = filter_even(test_list)
+    int filtered_sum = sum_list(filtered)
+    println("Filtered sum: " + str(filtered_sum))
+
+    list small_list = build_list(10)
+    list reversed = reverse_list(small_list)
+    println("Reversed list max: " + str(list_max(reversed)))
+
+    list merged = merge_lists(small_list, reversed)
+    println("Merged list length: " + str(len(merged)))
+
+    println("")
+
+    // String benchmarks
+    println("Running string benchmarks...")
+    str repeated = string_repeat("test", 100)
+    println("Repeated string length: " + str(len(repeated)))
+
+    str search_str = "the quick brown fox jumps over the lazy dog"
+    int char_count = count_char(search_str, "o")
+    println("Character count: " + str(char_count))
+
+    println("")
+
+    // Control flow benchmarks
+    println("Running control flow benchmarks...")
+    int nested_result = nested_loops(8)
+    println("Nested loops: " + str(nested_result))
+
+    int switch_result = switch_test(1000000)
+    println("Switch sum: " + str(switch_result))
+
+    int while_result = while_loop_test(50000)
+    println("While count: " + str(while_result))
+
+    int matrix_sum = matrix_multiply_sum(50)
+    println("Matrix sum: " + str(matrix_sum))
+
+    int cond_result = complex_conditions(10000)
+    println("Complex conditions: " + str(cond_result))
+
+    int bc_result = break_continue_test(10000)
+    println("Break/Continue sum: " + str(bc_result))
+
+    println("")
+    println("=== Benchmark Complete ===")
+}
