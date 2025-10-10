@@ -425,7 +425,7 @@ funcs:dict[ # Holy type annotations
         },
         "func": len,
         "return_type": "int",
-        "can_eval": True
+        "can_eval": False  # Cannot evaluate at parse time - arguments may be runtime values
     },
     'append': {
         "type": "builtin",
@@ -435,7 +435,7 @@ funcs:dict[ # Holy type annotations
         },
         "func": lambda lst, value: lst.append(value) or lst,
         "return_type": "list",
-        "can_eval": False
+        "can_eval": True
     },
     'pop': {
         "type": "builtin",

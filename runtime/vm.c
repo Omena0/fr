@@ -74,7 +74,7 @@ char* unescape_string(const char* str) {
 #define MAX_CODE 65536
 #define MAX_LABELS 512
 #define MAX_CALL_STACK 256
-#define MAX_STRING_LEN 4096
+#define MAX_STRING_LEN 65536  // Increased to support large list literals in bytecode
 
 // Forward declarations
 typedef struct Value Value;
@@ -301,6 +301,10 @@ typedef enum
     OP_LIST_SET,    // Set element at index (list, index, value -> list)
     OP_LIST_LEN,    // Get list length (list -> int)
     OP_LIST_POP,    // Pop last element (list -> value)
+    OP_LIST_NEW_I64,    // Create list with int64 values (count val1 val2 ... -> list)
+    OP_LIST_NEW_F64,    // Create list with float64 values (count val1 val2 ... -> list)
+    OP_LIST_NEW_STR,    // Create list with string values (count val1 val2 ... -> list)
+    OP_LIST_NEW_BOOL,   // Create list with boolean values (count val1 val2 ... -> list)
 
     // Break/Continue with levels
     OP_BREAK,    // Break from loop with level
@@ -994,12 +998,16 @@ void vm_free(VM *vm)
         // Free multi-arg constant instructions
         else if (vm->code[i].op == OP_CONST_I64_MULTI ||
                  vm->code[i].op == OP_CONST_F64_MULTI ||
-                 vm->code[i].op == OP_CONST_BOOL_MULTI)
+                 vm->code[i].op == OP_CONST_BOOL_MULTI ||
+                 vm->code[i].op == OP_LIST_NEW_I64 ||
+                 vm->code[i].op == OP_LIST_NEW_F64 ||
+                 vm->code[i].op == OP_LIST_NEW_BOOL)
         {
             if (vm->code[i].operand.ptr)
                 free(vm->code[i].operand.ptr);
         }
-        else if (vm->code[i].op == OP_CONST_STR_MULTI)
+        else if (vm->code[i].op == OP_CONST_STR_MULTI ||
+                 vm->code[i].op == OP_LIST_NEW_STR)
         {
             // Free each string in the array, then the array itself
             if (vm->code[i].operand.ptr)
@@ -2458,6 +2466,192 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_LIST_LEN;
             else if (strcmp(token, "LIST_POP") == 0)
                 inst.op = OP_LIST_POP;
+            else if (strcmp(token, "LIST_NEW_I64") == 0)
+            {
+                // LIST_NEW_I64 count val1 val2 val3 ...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_I64 requires count and values\n");
+                    exit(1);
+                }
+
+                // Parse count and values
+                int64_t values[10000];  // Support up to 10000 elements
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                
+                if (val_str == NULL) {
+                    fprintf(stderr, "Error: LIST_NEW_I64 missing count\n");
+                    exit(1);
+                }
+                
+                count = safe_atoi(val_str);
+                
+                // Now read the values
+                for (int j = 0; j < count && j < 10000; j++) {
+                    val_str = strtok(NULL, " ");
+                    if (val_str == NULL) {
+                        fprintf(stderr, "Error: LIST_NEW_I64 missing value %d\n", j);
+                        exit(1);
+                    }
+                    values[j] = safe_atoll(val_str);
+                }
+
+                // Create the multi-value struct
+                MultiInt64 *multi = malloc(sizeof(MultiInt64) + count * sizeof(int64_t));
+                multi->count = count;
+                for (int j = 0; j < count; j++)
+                {
+                    multi->values[j] = values[j];
+                }
+
+                inst.op = OP_LIST_NEW_I64;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "LIST_NEW_F64") == 0)
+            {
+                // LIST_NEW_F64 count val1 val2 val3 ...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_F64 requires count and values\n");
+                    exit(1);
+                }
+
+                double values[10000];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                
+                if (val_str == NULL) {
+                    fprintf(stderr, "Error: LIST_NEW_F64 missing count\n");
+                    exit(1);
+                }
+                
+                count = safe_atoi(val_str);
+                
+                for (int j = 0; j < count && j < 10000; j++) {
+                    val_str = strtok(NULL, " ");
+                    if (val_str == NULL) {
+                        fprintf(stderr, "Error: LIST_NEW_F64 missing value %d\n", j);
+                        exit(1);
+                    }
+                    values[j] = safe_atof(val_str);
+                }
+
+                MultiF64 *multi = malloc(sizeof(MultiF64) + count * sizeof(double));
+                multi->count = count;
+                for (int j = 0; j < count; j++)
+                {
+                    multi->values[j] = values[j];
+                }
+
+                inst.op = OP_LIST_NEW_F64;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "LIST_NEW_STR") == 0)
+            {
+                // LIST_NEW_STR count "str1" "str2" "str3" ...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_STR requires count and values\n");
+                    exit(1);
+                }
+
+                char *strings[10000];
+                int count = 0;
+                
+                // Parse count
+                char *p = rest_of_line;
+                while (*p == ' ' || *p == '\t') p++;
+                char *count_start = p;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                if (*p) *p++ = '\0';
+                count = safe_atoi(count_start);
+                
+                // Parse quoted strings
+                for (int j = 0; j < count && j < 10000; j++) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p != '"') {
+                        fprintf(stderr, "Error: LIST_NEW_STR expects quoted strings\n");
+                        exit(1);
+                    }
+                    p++; // Skip opening quote
+                    
+                    char *start = p;
+                    while (*p && (*p != '"' || (p > start && *(p-1) == '\\'))) {
+                        p++;
+                    }
+                    
+                    if (*p != '"') {
+                        fprintf(stderr, "Error: LIST_NEW_STR unterminated string\n");
+                        exit(1);
+                    }
+                    
+                    size_t len = p - start;
+                    char *temp = malloc(len + 1);
+                    strncpy(temp, start, len);
+                    temp[len] = '\0';
+                    strings[j] = unescape_string(temp);
+                    free(temp);
+                    
+                    p++; // Skip closing quote
+                }
+
+                MultiStr *multi = malloc(sizeof(MultiStr) + count * sizeof(char*));
+                multi->count = count;
+                for (int j = 0; j < count; j++)
+                {
+                    multi->values[j] = strings[j];
+                }
+
+                inst.op = OP_LIST_NEW_STR;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "LIST_NEW_BOOL") == 0)
+            {
+                // LIST_NEW_BOOL count val1 val2 val3 ...
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_BOOL requires count and values\n");
+                    exit(1);
+                }
+
+                int values[10000];
+                int count = 0;
+                char *val_str = strtok(rest_of_line, " ");
+                
+                if (val_str == NULL) {
+                    fprintf(stderr, "Error: LIST_NEW_BOOL missing count\n");
+                    exit(1);
+                }
+                
+                count = safe_atoi(val_str);
+                
+                for (int j = 0; j < count && j < 10000; j++) {
+                    val_str = strtok(NULL, " ");
+                    if (val_str == NULL) {
+                        fprintf(stderr, "Error: LIST_NEW_BOOL missing value %d\n", j);
+                        exit(1);
+                    }
+                    if (strcmp(val_str, "true") == 0 || strcmp(val_str, "1") == 0)
+                        values[j] = 1;
+                    else
+                        values[j] = 0;
+                }
+
+                MultiInt *multi = malloc(sizeof(MultiInt) + count * sizeof(int));
+                multi->count = count;
+                for (int j = 0; j < count; j++)
+                {
+                    multi->values[j] = values[j];
+                }
+
+                inst.op = OP_LIST_NEW_BOOL;
+                inst.operand.ptr = multi;
+            }
             // Struct operations
             else if (strcmp(token, "STRUCT_NEW") == 0)
             {
@@ -3323,6 +3517,10 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LIST_SET] = &&L_LIST_SET,
         [OP_LIST_LEN] = &&L_LIST_LEN,
         [OP_LIST_POP] = &&L_LIST_POP,
+        [OP_LIST_NEW_I64] = &&L_LIST_NEW_I64,
+        [OP_LIST_NEW_F64] = &&L_LIST_NEW_F64,
+        [OP_LIST_NEW_STR] = &&L_LIST_NEW_STR,
+        [OP_LIST_NEW_BOOL] = &&L_LIST_NEW_BOOL,
         [OP_STRUCT_NEW] = &&L_STRUCT_NEW,
         [OP_STRUCT_GET] = &&L_STRUCT_GET,
         [OP_STRUCT_SET] = &&L_STRUCT_SET,
@@ -5272,6 +5470,74 @@ L_LIST_POP: // OP_LIST_POP
     vm_push(vm, list_val);
     // Then push popped value (top of stack, will be stored first)
     vm_push(vm, popped_value);
+    DISPATCH();
+}
+
+L_LIST_NEW_I64: // OP_LIST_NEW_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt64 *multi = (MultiInt64*)inst.operand.ptr;
+    
+    List *list = list_new();
+    for (int i = 0; i < multi->count; i++)
+    {
+        Value val = value_make_int_si(multi->values[i]);
+        list_append(list, val);
+        value_free(val);
+    }
+    
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
+L_LIST_NEW_F64: // OP_LIST_NEW_F64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiF64 *multi = (MultiF64*)inst.operand.ptr;
+    
+    List *list = list_new();
+    for (int i = 0; i < multi->count; i++)
+    {
+        Value val = value_make_f64(multi->values[i]);
+        list_append(list, val);
+        value_free(val);
+    }
+    
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
+L_LIST_NEW_STR: // OP_LIST_NEW_STR
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiStr *multi = (MultiStr*)inst.operand.ptr;
+    
+    List *list = list_new();
+    for (int i = 0; i < multi->count; i++)
+    {
+        Value val = value_make_str(multi->values[i]);
+        list_append(list, val);
+        value_free(val);
+    }
+    
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
+L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt *multi = (MultiInt*)inst.operand.ptr;
+    
+    List *list = list_new();
+    for (int i = 0; i < multi->count; i++)
+    {
+        Value val = value_make_bool(multi->values[i] != 0);
+        list_append(list, val);
+        value_free(val);
+    }
+    
+    vm_push(vm, value_wrap_list(list));
     DISPATCH();
 }
 

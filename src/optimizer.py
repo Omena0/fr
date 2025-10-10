@@ -28,40 +28,43 @@ class BytecodeOptimizer:
         # Pass 3: Optimize variable copies (LOAD+STORE -> COPY_LOCAL_REF)
         lines = self.optimize_variable_copies(lines)
 
-        # Pass 4: Remove redundant LOAD/STORE pairs
+        # Pass 4: Optimize list creation patterns
+        lines = self.optimize_list_creation(lines)
+
+        # Pass 5: Remove redundant LOAD/STORE pairs
         lines = self.remove_redundant_loads(lines)
 
-        # Pass 5: Optimize negation patterns
+        # Pass 6: Optimize negation patterns
         lines = self.optimize_negation(lines)
 
-        # Pass 6: Optimize jump chains and redundant jumps
+        # Pass 7: Optimize jump chains and redundant jumps
         lines = self.optimize_jumps(lines)
 
-        # Pass 7: Remove dead stores
+        # Pass 8: Remove dead stores
         lines = self.remove_dead_stores(lines)
 
-        # Pass 8: Algebraic simplifications (identity operations)
+        # Pass 9: Algebraic simplifications (identity operations)
         lines = self.algebraic_simplifications(lines)
 
-        # Pass 9: Optimize comparison inversions (NOT after comparison)
+        # Pass 10: Optimize comparison inversions (NOT after comparison)
         lines = self.optimize_comparison_inversions(lines)
 
-        # Pass 10: Constant folding
+        # Pass 11: Constant folding
         lines = self.constant_folding(lines)
 
-        # Pass 11: Fuse repeated arithmetic+store blocks with differing operands
+        # Pass 12: Fuse repeated arithmetic+store blocks with differing operands
         lines = self.fuse_repeated_arith_store(lines)
 
-        # Pass 12: Optimize switch-case patterns
+        # Pass 13: Optimize switch-case patterns
         lines = self.optimize_switch_cases(lines)
 
-        # Pass 13: Fuse similar labeled blocks (switch case bodies with same pattern)
+        # Pass 14: Fuse similar labeled blocks (switch case bodies with same pattern)
         lines = self.fuse_similar_case_bodies(lines)
 
-        # Pass 14: Cache and reuse loaded values with DUP
+        # Pass 15: Cache and reuse loaded values with DUP
         lines = self.cache_loaded_values(lines)
 
-        # Pass 15: Eliminate redundant loop continuation labels
+        # Pass 16: Eliminate redundant loop continuation labels
         lines = self.eliminate_redundant_continue_labels(lines)
 
         return '\n'.join(lines)
@@ -1988,12 +1991,24 @@ class BytecodeOptimizer:
 
         return result
 
-
-
     def cache_loaded_values(self, lines: List[str]) -> List[str]:
-        """Cache loaded values using DUP to avoid redundant LOADs."""
+        """Cache loaded values using DUP to avoid redundant LOADs.
+        
+        This optimization is conservative and avoids DUP when there are
+        type-converting or stack-consuming operations between the LOADs.
+        """
         result: List[str] = []
         i = 0
+        
+        # Instructions that consume stack and may change types - not safe for DUP optimization
+        unsafe_for_dup = {
+            'BUILTIN_STR', 'TO_STR', 'TO_INT', 'TO_FLOAT', 'TO_BOOL',
+            'BUILTIN_LEN', 'LIST_POP', 'LIST_GET', 'STRUCT_GET',
+            'ADD_STR', 'ADD_I64', 'ADD_F64', 'SUB_I64', 'SUB_F64',
+            'MUL_I64', 'MUL_F64', 'DIV_I64', 'DIV_F64', 'MOD_I64',
+            'CMP_EQ', 'CMP_NE', 'CMP_LT', 'CMP_GT', 'CMP_LE', 'CMP_GE',
+            'AND', 'OR', 'NOT', 'NEG'
+        }
         
         while i < len(lines):
             line = lines[i].strip()
@@ -2014,22 +2029,35 @@ class BytecodeOptimizer:
                         next_line.startswith('STORE_CONST')):
                         break
                     
-                    # Found duplicate LOAD - replace with DUP
+                    # Stop if we hit an unsafe operation
+                    if any(next_line.startswith(unsafe) for unsafe in unsafe_for_dup):
+                        break
+                    
+                    # Found duplicate LOAD - check if it's safe to use DUP
                     if next_line == f'LOAD {var}':
-                        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-                        result.append(lines[i])  # Original LOAD
-                        result.append(f"{indent}DUP")  # Add DUP
-                        
-                        # Copy instructions between original and duplicate LOAD
+                        # Double-check: ensure no unsafe operations between
+                        has_unsafe = False
                         for k in range(i + 1, j):
-                            result.append(lines[k])
+                            check_line = lines[k].strip()
+                            if any(check_line.startswith(unsafe) for unsafe in unsafe_for_dup):
+                                has_unsafe = True
+                                break
                         
-                        # Skip the duplicate LOAD and continue from next instruction
-                        i = j + 1
-                        found_dup = True
+                        if not has_unsafe:
+                            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                            result.append(lines[i])  # Original LOAD
+                            result.append(f"{indent}DUP")  # Add DUP
+                            
+                            # Copy instructions between original and duplicate LOAD
+                            for k in range(i + 1, j):
+                                result.append(lines[k])
+                            
+                            # Skip the duplicate LOAD and continue from next instruction
+                            i = j + 1
+                            found_dup = True
                         break
                 
-                # If no duplicate found, just copy the line
+                # If no duplicate found or unsafe, just copy the line
                 if not found_dup:
                     result.append(lines[i])
                     i += 1
@@ -2070,6 +2098,98 @@ class BytecodeOptimizer:
                         i += 1
                         continue
             
+            result.append(lines[i])
+            i += 1
+        
+        return result
+
+    def optimize_list_creation(self, lines: List[str]) -> List[str]:
+        """Optimize patterns of LIST_NEW followed by many CONST+LIST_APPEND sequences.
+        
+        Pattern: LIST_NEW, CONST_I64 v1, LIST_APPEND, CONST_I64 v2, LIST_APPEND, ...
+        Replace with: LIST_NEW_I64 count v1 v2 v3 ...
+        
+        This drastically reduces bytecode size for const functions returning large lists.
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+
+            # Check for LIST_NEW followed by CONST+APPEND pattern
+            if line == 'LIST_NEW':
+                # Collect all the appends
+                values_i64 = []
+                values_f64 = []
+                values_str = []
+                values_bool = []
+                value_type = None
+                j = i + 1
+
+                # Scan for consecutive CONST + LIST_APPEND pairs
+                while j + 1 < len(lines):
+                    const_line = lines[j].strip()
+                    append_line = lines[j + 1].strip()
+
+                    # Must be CONST followed by LIST_APPEND
+                    if not append_line == 'LIST_APPEND':
+                        break
+
+                    # Extract constant value based on type
+                    if const_line.startswith('CONST_I64 '):
+                        val = const_line.split('CONST_I64 ', 1)[1]
+                        if value_type is None:
+                            value_type = 'i64'
+                        if value_type == 'i64':
+                            values_i64.append(val)
+                        else:
+                            break  # Mixed types, stop optimization
+                    elif const_line.startswith('CONST_F64 '):
+                        val = const_line.split('CONST_F64 ', 1)[1]
+                        if value_type is None:
+                            value_type = 'f64'
+                        if value_type == 'f64':
+                            values_f64.append(val)
+                        else:
+                            break
+                    elif const_line.startswith('CONST_STR '):
+                        val = const_line.split('CONST_STR ', 1)[1]
+                        if value_type is None:
+                            value_type = 'str'
+                        if value_type == 'str':
+                            values_str.append(val)
+                        else:
+                            break
+                    elif const_line.startswith('CONST_BOOL '):
+                        val = const_line.split('CONST_BOOL ', 1)[1]
+                        if value_type is None:
+                            value_type = 'bool'
+                        if value_type == 'bool':
+                            values_bool.append(val)
+                        else:
+                            break
+                    else:
+                        # Not a const, stop
+                        break
+
+                    j += 2  # Skip CONST and LIST_APPEND
+
+                # If we found at least 3 appends (to make it worthwhile), use optimized instruction
+                if value_type and (len(values_i64) >= 3 or len(values_f64) >= 3 or 
+                                   len(values_str) >= 3 or len(values_bool) >= 3):
+                    if value_type == 'i64':
+                        result.append(f"{indent}LIST_NEW_I64 {len(values_i64)} {' '.join(values_i64)}")
+                    elif value_type == 'f64':
+                        result.append(f"{indent}LIST_NEW_F64 {len(values_f64)} {' '.join(values_f64)}")
+                    elif value_type == 'str':
+                        result.append(f"{indent}LIST_NEW_STR {len(values_str)} {' '.join(values_str)}")
+                    elif value_type == 'bool':
+                        result.append(f"{indent}LIST_NEW_BOOL {len(values_bool)} {' '.join(values_bool)}")
+                    i = j  # Skip all the processed lines
+                    continue
+
             result.append(lines[i])
             i += 1
         

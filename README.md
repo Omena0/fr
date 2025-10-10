@@ -27,7 +27,7 @@ pip install frscript
 ### In version 7A:
 General performance upgrade.
 
-This version is ~20% faster than 6A.
+This version is ~10% faster than 6A.
 
 - Added signature help for user-defined functions in VSCode extension
 - Added float literal support to binary AST encoder/decoder
@@ -39,6 +39,7 @@ This version is ~20% faster than 6A.
 - Added SWITCH_JUMP_TABLE opcode to VM instruction set
 - Added parser for SWITCH_JUMP_TABLE with min/max bounds and label array
 - Added label resolution for SWITCH_JUMP_TABLE jump tables
+- Added warning when const functions contain non-evaluable builtins, automatically treating them as regular functions
 - Implemented OP_LOAD2_MUL_F64 instruction for optimized float multiplication
 - Implemented OP_SWITCH_JUMP_TABLE instruction for O(1) dense integer switch dispatch
 - Implemented OP_MOD_CONST_I64 instruction for modulo with constant operand
@@ -46,16 +47,21 @@ This version is ~20% faster than 6A.
 - Implemented ADD_CONST_F64, SUB_CONST_F64, MUL_CONST_F64, DIV_CONST_F64 VM instructions for optimized float arithmetic
 - Implemented LOAD2_ADD_F64, LOAD2_SUB_F64, LOAD2_MUL_F64, LOAD2_DIV_F64 fused instructions for float operations
 - Implemented SWITCH_JUMP_TABLE instruction for O(1) dense integer switch dispatch
+- Implemented LIST_NEW_I64, LIST_NEW_F64, LIST_NEW_STR, and LIST_NEW_BOOL instructions
 - Implemented cache_loaded_values optimization to detect duplicate LOAD instructions and use DUP
 - Improved hover information to display properly formatted function signatures
+- Increased VM bytecode buffer size from 4096 to 65536 characters to support long optimized list instructions
 - Optimized switch case bodies by fusing similar LOAD/ADD_CONST/STORE patterns into single arithmetic expression
 - Reduced switch statement overhead from 70+ instructions to ~12 instructions (83% reduction)
+- Increased VM bytecode buffer size from 4096 to 65536 characters to support long optimized list instructions
+- Constant list creation is now optimized to use only 1 instruction
 - Fixed critical label scoping bug in C VM causing jumps to resolve to wrong function
 - Fixed syntax highlighting for function parameter types using single-match pattern
 - Fixed function parameter type checking to correctly identify parameter types within function bodies
 - Fixed inlay hints showing parameter names in function definitions instead of just function calls
 - Fixed import path in compiler.py (from optimizer -> from src.optimizer)
 - Fixed ADD_CONST_I64 instruction not checking for integer overflow
+- Fixed len() function evaluating at parse time instead of runtime
 - Fixed the frscript extension type errors and highlighting
 - Fixed type errors
 

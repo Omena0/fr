@@ -1,0 +1,13 @@
+// none
+
+// Test: const function with non-evaluable builtin shows warning but still works
+
+const int get_length(list lst) {
+    return len(lst)  // len() cannot be evaluated at parse time
+}
+
+void main() {
+    list test = [1, 2, 3, 4, 5]
+    int length = get_length(test)
+    assert(length == 5)
+}
