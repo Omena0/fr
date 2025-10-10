@@ -24,7 +24,48 @@ pip install frscript
 
 ## What's New
 
-# In Version 6D
+### In version 7A:
+General performance upgrade.
+
+This version is ~10% faster than 6A.
+
+- Added signature help for user-defined functions in VSCode extension
+- Added float literal support to binary AST encoder/decoder
+- Added function-scoped label resolution to prevent cross-function jump collisions
+- Added SWITCH_JUMP_TABLE opcode with jump table optimization for switches with 5+ consecutive cases
+- Added function-scoped label resolution to prevent cross-function jump collisions
+- Added case body fusion pass for detecting similar labeled blocks
+- Added parser support for all CMP_*_CONST and arithmetic float const instructions in C VM
+- Added SWITCH_JUMP_TABLE opcode to VM instruction set
+- Added parser for SWITCH_JUMP_TABLE with min/max bounds and label array
+- Added label resolution for SWITCH_JUMP_TABLE jump tables
+- Added warning when const functions contain non-evaluable builtins, automatically treating them as regular functions
+- Implemented OP_LOAD2_MUL_F64 instruction for optimized float multiplication
+- Implemented OP_SWITCH_JUMP_TABLE instruction for O(1) dense integer switch dispatch
+- Implemented OP_MOD_CONST_I64 instruction for modulo with constant operand
+- Implemented CMP_LT_CONST, CMP_GT_CONST, CMP_LE_CONST, CMP_GE_CONST, CMP_EQ_CONST, CMP_NE_CONST instructions & f64 variants
+- Implemented ADD_CONST_F64, SUB_CONST_F64, MUL_CONST_F64, DIV_CONST_F64 VM instructions for optimized float arithmetic
+- Implemented LOAD2_ADD_F64, LOAD2_SUB_F64, LOAD2_MUL_F64, LOAD2_DIV_F64 fused instructions for float operations
+- Implemented SWITCH_JUMP_TABLE instruction for O(1) dense integer switch dispatch
+- Implemented LIST_NEW_I64, LIST_NEW_F64, LIST_NEW_STR, and LIST_NEW_BOOL instructions
+- Implemented cache_loaded_values optimization to detect duplicate LOAD instructions and use DUP
+- Improved hover information to display properly formatted function signatures
+- Increased VM bytecode buffer size from 4096 to 65536 characters to support long optimized list instructions
+- Optimized switch case bodies by fusing similar LOAD/ADD_CONST/STORE patterns into single arithmetic expression
+- Reduced switch statement overhead from 70+ instructions to ~12 instructions (83% reduction)
+- Increased VM bytecode buffer size from 4096 to 65536 characters to support long optimized list instructions
+- Constant list creation is now optimized to use only 1 instruction
+- Fixed critical label scoping bug in C VM causing jumps to resolve to wrong function
+- Fixed syntax highlighting for function parameter types using single-match pattern
+- Fixed function parameter type checking to correctly identify parameter types within function bodies
+- Fixed inlay hints showing parameter names in function definitions instead of just function calls
+- Fixed import path in compiler.py (from optimizer -> from src.optimizer)
+- Fixed ADD_CONST_I64 instruction not checking for integer overflow
+- Fixed len() function evaluating at parse time instead of runtime
+- Fixed the frscript extension type errors and highlighting
+- Fixed type errors
+
+### In Version 6D
 - Added runtime error handling
 - Added try-except statements.
 - Added raise statement
@@ -42,7 +83,7 @@ pip install frscript
 - Fixed float division by zero detection in C VM
 - Fixed test runner to properly handle exceptions vs partial output in C VM
 
-# In Version 6A
+### In Version 6A
 - Fixed Python SyntaxError handling for unclosed strings in parser
 
     The parser now properly catches and handles Python SyntaxErrors when parsing expressions with unclosed strings, providing better error messages.
@@ -50,7 +91,7 @@ pip install frscript
 - Improved error handling in expression parser
 - Updated README with improved installation instructions
 
-# In Version 5A
+### In Version 5A
 - Added comprehensive debugging support
 
     You can now debug FRScript code with step-by-step execution, breakpoints, and detailed variable tracking.
@@ -65,12 +106,12 @@ pip install frscript
 - Reorganized test cases into categorized folders (assertions, control_flow, data_structures, data_types, expressions, functions, io, math, misc, operators, python_interop, runtime_errors, syntax_errors)
 - Moved over 240 test files into organized directory structure
 
-# In Version 4E
+### In Version 4E
 - Fixed C runtime Python object handling
 - Improved optimizer for Python objects
 - Enhanced test suite stability
 
-# In Version 4D
+### In Version 4D
 - Added pyobj as type alias for pyobject
 
     You can now use the shorter `pyobj` keyword instead of `pyobject` for Python object types.
@@ -78,14 +119,14 @@ pip install frscript
 - Created test cases for pyobj usage
 - Updated examples to use shorter pyobj syntax
 
-# In Version 4C
+### In Version 4C
 - Added 9 test cases for Python object setattr functionality
 
     Comprehensive testing for setting Python object attributes from FRScript, covering all data types and edge cases.
 
 - Tests cover: basic setattr, boolean, float, list, multiple attributes, multiple objects, nested attributes, overwrite, string values
 
-# In Version 4B
+### In Version 4B
 - Fixed Python attribute access in both runtimes
 - Added Python module function call support
 
@@ -96,7 +137,7 @@ pip install frscript
 - Added method call statement support
 - Enhanced compiler with better Python integration
 
-# In Version 4A
+### In Version 4A
 - Full Python integration and interoperability
 
     You can now use any Python libraries from FRScript! Import Python modules, create Python objects, call functions, and access attributes seamlessly.
@@ -119,13 +160,13 @@ pip install frscript
 - Improved runtime with Python object handling
 - Updated README with Python integration examples
 
-# In Version 3B
+### In Version 3B
 - Bugfixes for HTTP server
 - Enhanced builtin functions
 - Improved CLI functionality
 - Fixed compiler edge cases
 
-# In Version 3A
+### In Version 3A
 - Added HTTP server example with static file serving
 
     Full-featured HTTP server implementation with routing, static file serving, and socket handling.
@@ -135,7 +176,7 @@ pip install frscript
 - Improved runtime with additional capabilities
 - Added comprehensive HTTP routing example
 
-# In Version 2B
+### In Version 2B
 - Added more I/O utility functions
 
     Enhanced file I/O with sequential reads, write returns, and improved socket handling for multiple connections.
@@ -148,7 +189,7 @@ pip install frscript
 - Enhanced parser with 120+ lines of improvements
 - Added var_in_function test case
 
-# In Version 2A
+### In Version 2A
 - Added comprehensive file I/O support
 
     Low-level file operations including read, write, append, and partial reads.
@@ -163,7 +204,7 @@ pip install frscript
 - Enhanced compiler with I/O bytecode generation
 - Added 10 I/O test cases
 
-# In Version A1
+### In Version A1
 - Initial release of FRScript
 
     A simple bytecode compiled C-style scripting language with Python runtime and C VM.
