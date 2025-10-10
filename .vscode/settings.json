@@ -2,4 +2,37 @@
     "python.analysis.typeCheckingMode": "standard",
     "C_Cpp.errorSquiggles": "disabled",
     "python.defaultInterpreterPath": "/home/omena0/Github/lang2/.venv/bin/python",
+    "files.associations": {
+        "*.toml": "toml",
+        "LICENCE": "plaintext",
+        "*.py": "python",
+        "*.ui": "python",
+        "*.int": "asm-intel-x86-generic",
+        "*.json5": "json",
+        "*.fn": "rust",
+        "*.mcfunction": "mcfunction",
+        "*.json": "jsonc",
+        "*.tcss": "css",
+        "*.lambda": "lambda",
+        "*.fr": "frscript",
+        "*.md": "markdown",
+        "future": "c",
+        "system_error": "c",
+        "math.h": "c"
+    },
+    "editor.tokenColorCustomizations": {
+        "textMateRules": [
+            {
+                "scope": [
+                    "storage.type.fr",
+                    "storage.type",
+                    "storage.type.function.fr"
+                ],
+                "settings": {
+                    "foreground": "#569CD6",
+                    "fontStyle": ""
+                }
+            }
+        ]
+    }
 }

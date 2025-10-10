@@ -4,8 +4,12 @@ Compiles typed functions to bytecode format specified in BYTECODE.md
 """
 
 from typing import Any, Dict, List, Optional
-from optimizer import BytecodeOptimizer
-from parser import parse, AstType, VarType
+try:
+    from src.optimizer import BytecodeOptimizer
+    from src.parser import parse, AstType, VarType
+except ImportError:
+    from optimizer import BytecodeOptimizer
+    from parser import parse, AstType, VarType
 import sys
 
 flags = sys.argv[1:]
@@ -1475,6 +1479,7 @@ class BytecodeCompiler:
         optimizer = BytecodeOptimizer()
         if '-O0' not in flags:
             bytecode = optimizer.optimize(bytecode)
+
         return bytecode
 
     def compile_ast(self, ast: AstType) -> str:

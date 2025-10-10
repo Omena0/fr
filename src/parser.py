@@ -451,6 +451,64 @@ def parse_expr(text: str):
 
         expr_dict = _ast_to_dict(expr)
 
+        def _replace_const_calls(node):
+            """Recursively replace const function calls with their evaluated values."""
+            if not isinstance(node, dict):
+                return node
+            
+            # First, recursively process all nested structures
+            result = {}
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    result[key] = _replace_const_calls(value)
+                elif isinstance(value, list):
+                    result[key] = [_replace_const_calls(item) for item in value]
+                else:
+                    result[key] = value
+            
+            # Now check if THIS node is a const function call that can be evaluated
+            if 'func' in result and 'args' in result:
+                func_ref = result['func']
+                func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                
+                if func_name and func_name in funcs:
+                    func = funcs[func_name]
+                    func_mods = func.get('mods', [])
+                    
+                    # Check if this is a const function
+                    if isinstance(func_mods, list) and 'const' in func_mods:
+                        # Try to evaluate the const function call
+                        try:
+                            # Extract literal values from argument nodes
+                            arg_values = result.get('args', [])
+                            
+                            # Check if all args are literals (have 'value' key with non-dict value, or are primitives)
+                            all_literal = True
+                            for arg in arg_values:
+                                if isinstance(arg, dict):
+                                    if 'value' not in arg:
+                                        all_literal = False
+                                        break
+                                    # Check if the value is itself a dict (complex expression)
+                                    val = arg.get('value')
+                                    if isinstance(val, dict) and ('op' in val or 'func' in val or 'id' in val):
+                                        all_literal = False
+                                        break
+                            
+                            if all_literal:
+                                # Evaluate the const function at parse time
+                                evaluated = _eval_func_at_parse_time(func_name, func, arg_values)
+                                # Return the evaluated value as a literal node
+                                return {'value': evaluated, 'type': get_type(evaluated)}
+                        except Exception:
+                            # Can't evaluate - return the recursively processed node
+                            pass
+            
+            return result
+
+        # Replace const function calls with their values
+        expr_dict = _replace_const_calls(expr_dict)
+
         # Try to evaluate constant expressions at parse time
         try:
             # Don't evaluate struct constructors at parse time
@@ -511,6 +569,13 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     scope = parse_scope(stream)
     stream.strip()
 
+    # Check if this is a const function with non-evaluable builtins
+    if 'const' in mods:
+        has_non_eval, builtin_name = _has_non_evaluable_builtins(scope)
+        if has_non_eval:
+            print(f"Warning: const function '{name}' contains non-evaluable builtin '{builtin_name}()'. Treating as regular function.")
+            # Remove 'const' from mods to treat it as a regular function
+            mods = [m for m in mods if m != 'const']
 
     funcs[name] = {
         "type": "func",
@@ -696,6 +761,51 @@ def cast_args(args: list, func: dict) -> list:
             args[i] = casted
 
     return args
+
+def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
+    """Check if a function body contains builtin calls that cannot be evaluated at parse time.
+    Returns (has_non_evaluable, first_builtin_name)"""
+    def check_node(node):
+        if not isinstance(node, dict):
+            return False, None
+        
+        # Check if this is a builtin function call (type='call')
+        if node.get('type') == 'call':
+            func_name = node.get('name')
+            if func_name and func_name in funcs:
+                func = funcs[func_name]
+                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                    return True, func_name
+        
+        # Check if this is a function call in expression format (has 'func' key)
+        if 'func' in node and 'args' in node:
+            func_ref = node['func']
+            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+            if func_name and func_name in funcs:
+                func = funcs[func_name]
+                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                    return True, func_name
+        
+        # Recursively check nested structures
+        for key, value in node.items():
+            if isinstance(value, dict):
+                has_non_eval, builtin_name = check_node(value)
+                if has_non_eval:
+                    return True, builtin_name
+            elif isinstance(value, list):
+                for item in value:
+                    has_non_eval, builtin_name = check_node(item)
+                    if has_non_eval:
+                        return True, builtin_name
+        
+        return False, None
+    
+    for statement in scope:
+        has_non_eval, builtin_name = check_node(statement)
+        if has_non_eval:
+            return True, builtin_name
+    
+    return False, None
 
 def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
     """Check if a function call can be evaluated at parse time."""

@@ -15,8 +15,8 @@ dist/
 
 # Runtime
 runtime/vm
-runtime/vm
 *.bc
+*.bin
 *.o
 *.gcda
 src/_version.py
