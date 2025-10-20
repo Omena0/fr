@@ -1,0 +1,7 @@
+// none
+
+void main() {
+    int sock = socket()
+    bytes data = sock.recv()
+    println("Received: " + data.decode())
+}

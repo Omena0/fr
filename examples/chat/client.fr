@@ -1,0 +1,35 @@
+py_import hashlib
+
+void recv_thread(int sock) {
+    bytes msg = b""
+    while (true) {
+        msg = sock.recv()
+        if (len(msg) == 0) {
+            return
+        }
+        print(msg.decode())
+    }
+}
+
+void main() {
+    str username = input('Username: ')
+    str password = input('Password: ')
+
+    password = hashlib.md5(password.encode()).hexdigest()
+
+    int sock = socket()
+
+    sock.connect("127.0.0.1", 8080)
+
+    sock.send(f"{username}\n{password}\n".encode())
+
+    if (fork() == 0) {
+        recv_thread(sock)
+    } else {
+        str msg = ""
+        while (true) {
+            msg = input("")
+            sock.send(msg.encode())
+        }
+    }
+}

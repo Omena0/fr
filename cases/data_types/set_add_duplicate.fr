@@ -1,0 +1,7 @@
+// !{1, 2, 3}
+
+void main() {
+    set s = {1, 2, 3}
+    s = set_add(s, 2)  // Adding duplicate should not change set
+    println(str(s))
+}

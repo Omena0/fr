@@ -13,6 +13,7 @@ This document describes all bytecode instructions supported by the fr VM.
 - [Function Calls](#function-calls)
 - [Stack Operations](#stack-operations)
 - [List Operations](#list-operations)
+- [Set Operations](#set-operations)
 - [Struct Operations](#struct-operations)
 - [Type Conversions](#type-conversions)
 - [String Operations](#string-operations)
@@ -84,6 +85,15 @@ Push multiple boolean constants onto the stack.
 
 **Stack:** `-> bool bool ...`
 
+### CONST_BYTES
+Push a bytes constant onto the stack.
+
+**Syntax:** `CONST_BYTES "data"`
+
+**Stack:** `-> bytes`
+
+**Description:** Creates a bytes value from the string literal data.
+
 ---
 
 ## Memory Operations
@@ -99,6 +109,20 @@ Load a local variable onto the stack.
 Pop a value from the stack and store it in a local variable.
 
 **Syntax:** `STORE <var_index>`
+
+**Stack:** `value ->`
+
+### LOAD_GLOBAL
+Load a global variable onto the stack.
+
+**Syntax:** `LOAD_GLOBAL <var_index>`
+
+**Stack:** `-> value`
+
+### STORE_GLOBAL
+Pop a value from the stack and store it in a global variable.
+
+**Syntax:** `STORE_GLOBAL <var_index>`
 
 **Stack:** `value ->`
 
@@ -412,6 +436,15 @@ Stop execution of the VM.
 
 **Stack:** `->`
 
+### GOTO_CALL
+Jump to a label and save return address for returning with a value.
+
+**Syntax:** `GOTO_CALL <label>`
+
+**Stack:** `-> (saves return address on call stack)`
+
+**Description:** Similar to CALL but for goto statements with return values. Jumps to the specified label and saves the return address so that a RETURN instruction will return to this point with a value on the stack.
+
 ---
 
 ## Function Calls
@@ -538,6 +571,70 @@ Pop the last element from a list.
 
 ---
 
+## Set Operations
+
+### SET_NEW
+Create a new empty set.
+
+**Syntax:** `SET_NEW`
+
+**Stack:** `-> set`
+
+**Description:** Creates a new empty set. Sets are unordered collections of unique elements.
+
+### SET_ADD
+Add a value to a set.
+
+**Syntax:** `SET_ADD`
+
+**Stack:** `set value -> set`
+
+**Description:** Adds a value to the set if it doesn't already exist. If the value already exists, the set is unchanged.
+
+### SET_REMOVE
+Remove a value from a set.
+
+**Syntax:** `SET_REMOVE`
+
+**Stack:** `set value -> set`
+
+**Description:** Removes a value from the set if it exists. If the value doesn't exist, the set is unchanged.
+
+### SET_CONTAINS
+Check if a set contains a value.
+
+**Syntax:** `SET_CONTAINS`
+
+**Stack:** `set value -> bool`
+
+**Description:** Returns `true` if the value exists in the set, `false` otherwise.
+
+### SET_LEN
+Get the number of elements in a set.
+
+**Syntax:** `SET_LEN`
+
+**Stack:** `set -> int64`
+
+**Description:** Returns the number of unique elements in the set.
+
+### CONTAINS
+Generic membership check for containers.
+
+**Syntax:** `CONTAINS`
+
+**Stack:** `container value -> bool`
+
+**Description:** Checks if a value exists in a container. Supports:
+- **Sets**: Returns `true` if the value exists in the set
+- **Dicts (Structs)**: Returns `true` if the string key exists as a field name
+- **Lists**: Returns `true` if the value exists in the list (uses value equality)
+- **Strings**: Returns `true` if the value (must be a string) is a substring
+
+This instruction is used by the `in` and `not in` operators. For `not in`, the result is followed by a `NOT` instruction.
+
+---
+
 ## Struct Operations
 
 ### STRUCT_NEW
@@ -592,6 +689,24 @@ Convert the top of stack to a string (alias for BUILTIN_STR).
 **Syntax:** `TO_STR`
 
 **Stack:** `value -> string`
+
+### ENCODE
+Encode a string to bytes using the specified encoding.
+
+**Syntax:** `ENCODE`
+
+**Stack:** `encoding string -> bytes`
+
+**Description:** Converts a string to bytes. Currently only UTF-8 encoding is supported (the encoding parameter is accepted but ignored).
+
+### DECODE
+Decode bytes to a string using the specified encoding.
+
+**Syntax:** `DECODE`
+
+**Stack:** `encoding bytes -> string`
+
+**Description:** Converts bytes to a string. Currently only UTF-8 encoding is supported (the encoding parameter is accepted but ignored).
 
 ---
 
@@ -849,6 +964,55 @@ Join multiple path components.
 **Syntax:** `FILE_JOIN`
 
 **Stack:** `list -> string`
+
+---
+
+## Process Management
+
+### FORK
+Fork the current process, creating a child process.
+
+**Syntax:** `FORK`
+
+**Stack:** `-> pid`
+
+**Returns:** 
+- `0` in the child process
+- Child's process ID in the parent process
+- `-1` on error
+
+### JOIN
+Wait for a child process to finish and get its exit status.
+
+**Syntax:** `JOIN`
+
+**Stack:** `pid -> exit_status`
+
+**Returns:** 
+- Exit status (0-255) if child exited normally
+- `-1` on error or abnormal termination
+
+### SLEEP
+Sleep for a specified number of seconds.
+
+**Syntax:** `SLEEP`
+
+**Stack:** `seconds -> void`
+
+**Parameters:**
+- `seconds`: Number of seconds to sleep (int or float, supports sub-second precision)
+
+### EXIT
+Exit the program with a specific exit code.
+
+**Syntax:** `EXIT`
+
+**Stack:** `code -> void` (never returns)
+
+**Parameters:**
+- `code`: Exit code (int, 0 means success, non-zero indicates error)
+
+**Note:** This terminates the program immediately.
 
 ---
 

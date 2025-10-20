@@ -75,6 +75,7 @@ class BytecodeCompiler:
         self.py_imports: Dict[str, Dict[str, Any]] = {}
         self.line_map: List[int] = []  # Maps bytecode instruction index to source line number
         self.current_line: int = 1  # Current source line being compiled
+        self.global_vars: Dict[str, Any] = {}  # Maps global variable names to their AST nodes
 
     def get_label(self, prefix: str = "L") -> str:
         """Generate a unique label"""
@@ -100,6 +101,22 @@ class BytecodeCompiler:
             self.var_mapping[name] = self.next_var_id
             self.next_var_id += 1
         return self.var_mapping[name]
+
+    def emit_load(self, var_name: str):
+        """Emit a LOAD or LOAD_GLOBAL instruction based on variable scope"""
+        var_id = self.get_var_id(var_name)
+        if var_name in self.global_vars:
+            self.emit(f"LOAD_GLOBAL {var_id}")
+        else:
+            self.emit(f"LOAD {var_id}")
+
+    def emit_store(self, var_name: str):
+        """Emit a STORE or STORE_GLOBAL instruction based on variable scope"""
+        var_id = self.get_var_id(var_name)
+        if var_name in self.global_vars:
+            self.emit(f"STORE_GLOBAL {var_id}")
+        else:
+            self.emit(f"STORE {var_id}")
 
     def check_function_typed(self, func_node: dict) -> bool:
         """Check if function has all arguments typed"""
@@ -133,6 +150,7 @@ class BytecodeCompiler:
             'void': 'void',
             'pyobject': 'i64',  # Python objects stored as generic value
             'pyobj': 'i64',     # Alias for pyobject
+            'dict': 'i64',      # Python dict stored as pyobject
             'any': 'i64',
         }
 
@@ -182,8 +200,7 @@ class BytecodeCompiler:
         if isinstance(expr, str):
             # Check if it's a variable reference or a literal string
             if expr in self.var_mapping:
-                var_id = self.get_var_id(expr)
-                self.emit(f"LOAD {var_id}")
+                self.emit_load(expr)
             else:
                 # Treat as string literal
                 value_str = escape_string_for_bytecode(str(expr))
@@ -193,6 +210,24 @@ class BytecodeCompiler:
         # Literal value in dict format
         if is_literal_value(expr):
             value = expr['value']
+
+            # Check for bytes literal in dict format
+            if expr.get('type') == 'bytes':
+                # Escape the bytes content for bytecode
+                value_str = escape_string_for_bytecode(str(value))
+                self.emit(f'CONST_BYTES "{value_str}"')
+                return
+
+            # Check for set literal in dict format
+            if expr.get('type') == 'set':
+                # Create new set
+                self.emit("SET_NEW")
+                # Add each element
+                if isinstance(value, list):
+                    for elem in value:
+                        self.compile_expr(elem, expr_type)  # Push element
+                        self.emit("SET_ADD")  # Add and push back set (set, elem -> set)
+                return
 
             # Check for list literal in dict format
             if isinstance(value, list):
@@ -231,12 +266,21 @@ class BytecodeCompiler:
                 self.emit("CONST_BOOL 0")
                 return
 
-            var_id = self.get_var_id(var_name)
-            self.emit(f"LOAD {var_id}")
+            self.emit_load(var_name)
             return
 
         # Complex expression
         if isinstance(expr, dict):
+            # Goto expression: int x = goto label
+            # Use GOTO_CALL to jump with return address saved
+            if expr.get('type') == 'goto':
+                label_name = expr.get('label', '')
+                # Jump to the label and save return address
+                # When a RETURN is hit at the target, it will return here with a value
+                self.emit(f"GOTO_CALL {label_name}")
+                # After return, the value will be on the stack
+                return
+            
             # Boolean operations (And, Or): {'op': 'And'/'Or', 'values': [...]}
             # Must check before f-string since both have 'values' key
             if 'op' in expr and expr['op'] in ('And', 'Or') and 'values' in expr:
@@ -364,7 +408,21 @@ class BytecodeCompiler:
                     op = ops[0]
                     right = comparators[0]
 
-                    # Compile operands
+                    # Handle 'in' and 'not in' operators separately
+                    if op in ('In', 'NotIn'):
+                        # For 'x in container', compile as a membership check
+                        # Stack: container, value -> bool
+                        self.compile_expr(right, expr_type)  # container on stack
+                        self.compile_expr(left, expr_type)   # value on stack
+                        # Now we need to check the type and emit appropriate opcode
+                        # For now, use STR_CONTAINS for strings, and emit a generic IN check
+                        # We'll emit a CONTAINS opcode that works for all types
+                        self.emit('CONTAINS')
+                        if op == 'NotIn':
+                            self.emit('NOT')
+                        return
+
+                    # Compile operands for regular comparisons
                     self.compile_expr(left, expr_type)
                     self.compile_expr(right, expr_type)
 
@@ -490,12 +548,45 @@ class BytecodeCompiler:
                     # Check if it's a method call (obj.method())
                     if isinstance(func_info, dict) and 'attr' in func_info and 'value' in func_info:
                         # This is a method call: obj.method(args)
-                        # Check if obj is a pyobject
+                        method_name = func_info['attr']
                         value_node = func_info['value']
                         is_pyobject = False
                         is_module = False
+                        is_builtin_method = False
 
-                        if isinstance(value_node, dict) and 'id' in value_node:
+                        # Check if this is a builtin string/bytes method that can be called on expressions
+                        builtin_methods = {
+                            'encode': 'ENCODE',
+                            'decode': 'DECODE',
+                            'upper': 'STR_UPPER',
+                            'lower': 'STR_LOWER',
+                            'strip': 'STR_STRIP',
+                            'split': 'STR_SPLIT',
+                            'join': 'STR_JOIN',
+                            'replace': 'STR_REPLACE',
+                        }
+
+                        # Check if method is a builtin method FIRST, before checking pyobject
+                        # This allows builtin methods to work on any expression, including variables and chained calls
+                        if method_name in builtin_methods:
+                            # Compile the expression
+                            self.compile_expr(value_node, expr_type)
+                            # Compile any arguments for the method
+                            for arg in args:
+                                self.compile_expr(arg, expr_type)
+                            
+                            # Add default parameters for methods that need them
+                            if method_name == 'encode' and len(args) == 0:
+                                # encode() defaults to utf-8
+                                self.emit('CONST_STR "utf-8"')
+                            elif method_name == 'decode' and len(args) == 0:
+                                # decode() defaults to utf-8
+                                self.emit('CONST_STR "utf-8"')
+                            
+                            # Emit the builtin instruction
+                            self.emit(builtin_methods[method_name])
+                            return
+                        elif isinstance(value_node, dict) and 'id' in value_node:
                             var_name = value_node['id']
                             var_type = self.var_types.get(var_name)
                             if var_type == 'pyobject':
@@ -503,6 +594,11 @@ class BytecodeCompiler:
                             # Check if it's a module alias or name
                             elif var_name in self.py_imports:
                                 is_module = True
+                        elif isinstance(value_node, dict) and ('func' in value_node or value_node.get('type') == 'call'):
+                            # The value is itself a method/function call that might return a pyobject
+                            # For example: hashlib.md5(password).hexdigest()
+                            # We need to compile the inner call first, then call the method on the result
+                            is_pyobject = True  # Assume it returns a pyobject
 
                         if is_module:
                             # Module function call: ui.Window() where ui is an imported module
@@ -598,6 +694,7 @@ class BytecodeCompiler:
                     'println': 'BUILTIN_PRINTLN',
                     'print': 'BUILTIN_PRINT',
                     'str': 'BUILTIN_STR',
+                    'input': 'INPUT',
                     'len': 'BUILTIN_LEN',
                     'sqrt': 'BUILTIN_SQRT',
                     'round': 'BUILTIN_ROUND',
@@ -607,6 +704,8 @@ class BytecodeCompiler:
                     'int': 'TO_INT',
                     'float': 'TO_FLOAT',
                     'bool': 'TO_BOOL',
+                    'encode': 'ENCODE',
+                    'decode': 'DECODE',
                     'upper': 'STR_UPPER',
                     'lower': 'STR_LOWER',
                     'strip': 'STR_STRIP',
@@ -638,6 +737,12 @@ class BytecodeCompiler:
                     'basename': 'FILE_BASENAME',
                     'dirname': 'FILE_DIRNAME',
                     'pathjoin': 'FILE_JOIN',
+                    # Process management
+                    'fork': 'FORK',
+                    'wait': 'JOIN',
+                    'sleep': 'SLEEP',
+                    'exit': 'EXIT',
+                    'getpid': 'GETPID',
                     # Socket I/O
                     'socket': 'SOCKET_CREATE',
                     'connect': 'SOCKET_CONNECT',
@@ -657,8 +762,37 @@ class BytecodeCompiler:
                 }
 
                 if func_name in builtin_map:
+                    # Special handling for functions that can be both builtin and set operations
+                    # set_remove() with 2 args is set operation
+                    if func_name == 'set_remove' and len(args) == 2:
+                        # This is set remove operation: set_remove(set, value)
+                        # Args are already on stack: set, value
+                        self.emit("SET_REMOVE")
+                        return
+                    
+                    # Special handling for socket() with default arguments
+                    if func_name == 'socket' and len(args) == 0:
+                        # Push default arguments: "inet" and "stream"
+                        self.emit('CONST_STR "inet"')
+                        self.emit('CONST_STR "stream"')
+                    # Special handling for recv() with default size
+                    elif func_name == 'recv' and len(args) == 1:
+                        # Push default size: 4096
+                        self.emit('CONST_I64 4096')
+                    # Special handling for exit() with default code
+                    elif func_name == 'exit' and len(args) == 0:
+                        # Push default exit code: 0
+                        self.emit('CONST_I64 0')
+                    # Special handling for encode() with default encoding
+                    elif func_name == 'encode' and len(args) == 1:
+                        # Push default encoding: "utf-8"
+                        self.emit('CONST_STR "utf-8"')
+                    # Special handling for decode() with default encoding
+                    elif func_name == 'decode' and len(args) == 1:
+                        # Push default encoding: "utf-8"
+                        self.emit('CONST_STR "utf-8"')
                     # Special handling for py_call which needs num_args at the end
-                    if func_name == 'py_call':
+                    elif func_name == 'py_call':
                         # py_call(module_name, func_name, arg1, arg2, ...)
                         # Stack should be: module_name, func_name, arg1, ..., argN, num_args
                         if len(args) < 2:
@@ -717,6 +851,18 @@ class BytecodeCompiler:
                     # pop(list) - special handling
                     # List is already on stack
                     self.emit("LIST_POP")
+                elif func_name == 'set_add':
+                    # set_add(set, value) - special handling for sets
+                    # Args are already on stack: set, value
+                    self.emit("SET_ADD")
+                elif func_name == 'set_remove':
+                    # set_remove(set, value) - special handling for sets
+                    # Args are already on stack: set, value
+                    self.emit("SET_REMOVE")
+                elif func_name == 'set_contains':
+                    # set_contains(set, value) - special handling for sets
+                    # Args are already on stack: set, value
+                    self.emit("SET_CONTAINS")
                 else:
                     self.emit(f"CALL {func_name} {len(args)}")
                 return
@@ -745,6 +891,19 @@ class BytecodeCompiler:
             if value and is_struct_instance(value):
                 value = value['value']
 
+            # Special handling for dict type with empty set literal (parser treats {} as empty set)
+            if (value_type_str == 'dict' and value and is_literal_value(value) and 
+                value.get('type') == 'set'):
+                set_value = value.get('value', [])
+                if len(set_value) == 0:
+                    # Empty dict: create Python dict using py_call("builtins", "dict")
+                    self.emit('CONST_STR "builtins"')
+                    self.emit('CONST_STR "dict"')
+                    self.emit('CONST_I64 0')  # 0 arguments
+                    self.emit('PY_CALL')
+                    self.emit_store(name)
+                    return
+
             # Special handling for pop(list) which modifies the list
             if value and is_function_call(value):
                 func_info = value.get('func', {})
@@ -759,10 +918,10 @@ class BytecodeCompiler:
                         arr_var = first_arg['id']
                         arr_var_id = self.get_var_id(arr_var)
 
-                        self.emit(f"LOAD {arr_var_id}")
+                        self.emit_load(arr_var)
                         self.emit("LIST_POP")  # Pushes [arr', elem]
-                        self.emit(f"STORE {var_id}")  # Store elem to v, leaves arr' on stack
-                        self.emit(f"STORE {arr_var_id}")  # Store arr' back
+                        self.emit_store(name)  # Store elem to v, leaves arr' on stack
+                        self.emit_store(arr_var)  # Store arr' back
                         return
 
             # Compile value expression
@@ -770,7 +929,7 @@ class BytecodeCompiler:
             self.compile_expr(value, value_type)
 
             # Store to variable
-            self.emit(f"STORE {var_id}")
+            self.emit_store(name)
 
         elif node_type == 'index_assign':
             target_name = node.get('target', '')
@@ -780,7 +939,7 @@ class BytecodeCompiler:
             var_id = self.get_var_id(target_name)
 
             # Load the list
-            self.emit(f"LOAD {var_id}")
+            self.emit_load(target_name)
             # Compile index
             self.compile_expr(index, 'i64')
             # Compile value
@@ -788,7 +947,7 @@ class BytecodeCompiler:
             # Set element and get modified list back
             self.emit("LIST_SET")
             # Store modified list back
-            self.emit(f"STORE {var_id}")
+            self.emit_store(target_name)
 
         elif node_type == 'field_assign':
             target_name = node.get('target', '')
@@ -800,7 +959,7 @@ class BytecodeCompiler:
                 # Python module attribute assignment: ui.debug = False
                 # Load the module object (stored as a variable)
                 var_id = self.get_var_id(target_name)
-                self.emit(f"LOAD {var_id}")
+                self.emit_load(target_name)
                 
                 # Push attribute name
                 escaped_attr = escape_string_for_bytecode(field_name)
@@ -822,7 +981,7 @@ class BytecodeCompiler:
             if var_type == 'pyobject':
                 # Python object attribute assignment: window.debug = False
                 # Load the pyobject
-                self.emit(f"LOAD {var_id}")
+                self.emit_load(target_name)
                 
                 # Push attribute name
                 escaped_attr = escape_string_for_bytecode(field_name)
@@ -838,7 +997,7 @@ class BytecodeCompiler:
                 return
 
             # Load the struct
-            self.emit(f"LOAD {var_id}")
+            self.emit_load(target_name)
             
             field_idx = next(
                 (
@@ -858,7 +1017,7 @@ class BytecodeCompiler:
             self.emit(f"STRUCT_SET {field_idx}")
 
             # Store modified struct back
-            self.emit(f"STORE {var_id}")
+            self.emit_store(target_name)
 
         elif node_type == 'return':
             value = node.get('value')
@@ -1070,7 +1229,7 @@ class BytecodeCompiler:
 
             # Initialize loop variable
             self.compile_expr(start_val, 'i64')
-            self.emit(f"STORE {var_id}")
+            self.emit_store(var_name)
 
             self.emit(f"LABEL {loop_start}")
 
@@ -1088,7 +1247,7 @@ class BytecodeCompiler:
             elif isinstance(step_expr, (int, float)):
                 step_is_negative = step_expr < 0
 
-            self.emit(f"LOAD {var_id}")
+            self.emit_load(var_name)
             self.compile_expr(end_expr, 'i64')
 
             if step_is_negative:
@@ -1106,10 +1265,10 @@ class BytecodeCompiler:
             self.emit(f"LABEL {loop_continue}")
 
             # Increment loop variable by step
-            self.emit(f"LOAD {var_id}")
+            self.emit_load(var_name)
             self.compile_expr(step_expr, 'i64')
             self.emit("ADD_I64")  # Works for both positive and negative steps
-            self.emit(f"STORE {var_id}")
+            self.emit_store(var_name)
 
             # Jump back to start
             self.emit(f"JUMP {loop_start}")
@@ -1143,17 +1302,17 @@ class BytecodeCompiler:
 
             # Initialize index to 0
             self.emit("CONST_I64 0")
-            self.emit(f"STORE {idx_var_id}")
+            self.emit(f"STORE {idx_var_id}")  # Index is always local
 
             self.emit(f"LABEL {loop_start}")
 
             # Check condition: idx < len(iterable)
-            self.emit(f"LOAD {idx_var_id}")
+            self.emit(f"LOAD {idx_var_id}")  # Index is always local
 
             # Get iterable and compute its length
             if iterable_var_id is not None:
-                # Variable reference
-                self.emit(f"LOAD {iterable_var_id}")
+                # Variable reference - iterable is the variable name string
+                self.emit_load(iterable)  # iterable is str when iterable_var_id is set
             else:
                 # Expression
                 self.compile_expr(iterable)
@@ -1164,13 +1323,13 @@ class BytecodeCompiler:
 
             # Get current item: var = iterable[idx]
             if iterable_var_id is not None:
-                self.emit(f"LOAD {iterable_var_id}")
+                self.emit_load(iterable)  # iterable is str when iterable_var_id is set
             else:
                 self.compile_expr(iterable)
 
-            self.emit(f"LOAD {idx_var_id}")
+            self.emit(f"LOAD {idx_var_id}")  # Index is always local
             self.emit("LIST_GET")
-            self.emit(f"STORE {var_id}")
+            self.emit_store(var_name)
 
             # Compile loop body
             for stmt in scope:
@@ -1180,10 +1339,10 @@ class BytecodeCompiler:
             self.emit(f"LABEL {loop_continue}")
 
             # Increment index
-            self.emit(f"LOAD {idx_var_id}")
+            self.emit(f"LOAD {idx_var_id}")  # Index is always local
             self.emit("CONST_I64 1")
             self.emit("ADD_I64")
-            self.emit(f"STORE {idx_var_id}")
+            self.emit(f"STORE {idx_var_id}")  # Index is always local
 
             # Jump back to start
             self.emit(f"JUMP {loop_start}")
@@ -1202,13 +1361,27 @@ class BytecodeCompiler:
                 if is_var_ref(first_arg):
                     # Get the variable name
                     var_name = first_arg['id']
-                    var_id = self.get_var_id(var_name)
 
                     # Compile the expression (will generate LIST_APPEND)
                     self.compile_expr(node)
 
                     # Store result back to the variable
-                    self.emit(f"STORE {var_id}")
+                    self.emit_store(var_name)
+                    return
+            
+            # Special handling for set-modifying functions
+            if func_name in ('set_add', 'set_remove') and len(node.get('args', [])) >= 1:
+                # set_add(set, value) / set_remove(set, value) - modifies set in place
+                first_arg = node['args'][0]
+                if is_var_ref(first_arg):
+                    # Get the variable name
+                    var_name = first_arg['id']
+
+                    # Compile the expression (will generate SET_ADD/SET_REMOVE)
+                    self.compile_expr(node)
+
+                    # Store result back to the variable
+                    self.emit_store(var_name)
                     return
 
             self.compile_expr(node)
@@ -1226,10 +1399,33 @@ class BytecodeCompiler:
                 self.emit("POP")
 
         elif 'func' in node and 'args' in node:
-            # This is a call expression node from Python's AST
+            # This is a call expression node from Python's AST (or transformed method call)
             self.compile_expr(node)
-            # Always pop the result since we're using it as a statement
-            self.emit("POP")
+            
+            # Check if this is a void function - don't pop if it returns None
+            func_ref = node.get('func', {})
+            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+            
+            if func_name:
+                try:
+                    from src.builtin_funcs import funcs as builtin_funcs
+                except ImportError:
+                    from builtin_funcs import funcs as builtin_funcs
+                
+                # Check if it's a builtin function with void/none return type
+                if func_name in builtin_funcs:
+                    return_type = builtin_funcs[func_name].get('return_type', '')
+                    if return_type not in ('void', 'None', 'none'):
+                        # Pop result since we're not using it and it's not void
+                        self.emit("POP")
+                # For user-defined functions, we don't have easy access to their return type here,
+                # so we'll assume they return a value and pop it. Void user functions should use
+                # the 'type': 'call' path instead.
+                else:
+                    self.emit("POP")
+            else:
+                # Unknown function, assume it returns a value
+                self.emit("POP")
 
         elif node_type == 'break':
             level = node.get('level', 1)
@@ -1260,6 +1456,23 @@ class BytecodeCompiler:
 
             # Emit assert instruction
             self.emit("ASSERT")
+
+        elif node_type == 'label':
+            # #label name - just emit a LABEL directive
+            label_name = node.get('name', '')
+            self.emit(f"LABEL {label_name}")
+
+        elif node_type == 'goto':
+            # goto label - emit a JUMP to the label
+            label_name = node.get('label', '')
+            self.emit(f"JUMP {label_name}")
+
+        elif node_type == 'bytecode_block':
+            # #bytecode { ... } - emit raw bytecode instructions
+            bytecode_lines = node.get('bytecode', [])
+            for line in bytecode_lines:
+                # Emit without the usual indentation prefix since these are already formatted
+                self.output.append(f"  {line}")
 
     def infer_parameter_types(self, func_node: dict) -> dict:
         """Infer types for untyped parameters based on usage in function body.
@@ -1353,8 +1566,16 @@ class BytecodeCompiler:
 
         return inferred_types
 
-    def compile_function(self, func_node: dict) -> Optional[str]:
-        """Compile a function node to bytecode. Returns bytecode string or None if can't compile."""
+    def compile_function(self, func_node: dict, global_vars: list | None = None) -> Optional[str]:
+        """Compile a function node to bytecode. Returns bytecode string or None if can't compile.
+        
+        Args:
+            func_node: The function AST node to compile
+            global_vars: List of global variable declarations to inject at the start (for main function)
+        """
+        if global_vars is None:
+            global_vars = []
+            
         func_name = func_node.get('name', 'unknown')
 
         if inferred_types := self.infer_parameter_types(func_node):
@@ -1407,6 +1628,11 @@ class BytecodeCompiler:
         self.label_counter = 0
         self.var_mapping = {}
         self.next_var_id = 0
+        
+        # DO NOT pre-allocate variable IDs for globals here!
+        # Global variables use LOAD_GLOBAL/STORE_GLOBAL with their own indices,
+        # separate from local variable indices.
+        # The emit_load/emit_store helpers will handle this distinction.
 
         # Extract function info (func_name already extracted above)
         return_type = self.map_type(func_node.get('return'))
@@ -1431,19 +1657,39 @@ class BytecodeCompiler:
                 var_name = stmt.get('name', '')
                 if var_name not in self.var_mapping:
                     locals_found.add(var_name)
+        # Add global variables as locals to ALL functions (not just main)
+        # Global variable IDs are pre-allocated, so they're already in var_mapping
+        # But we DON'T emit them as .local since they're .global
+        # Just add to locals_found to track their usage
+        # Actually, we should NOT add them to locals_found since they're not locals
 
-        # Emit local variable declarations
+        # Emit local variable declarations (exclude globals)
         for local_name in sorted(locals_found):
+            # Skip global variables - they're declared at module level
+            if local_name in self.global_vars:
+                continue
+                
             var_id = self.get_var_id(local_name)
-            local_type = next(
-                (
-                    self.map_type(stmt.get('value_type'))
-                    for stmt in scope
-                    if stmt.get('type') == 'var' and stmt.get('name') == local_name
-                ),
-                'i64',
-            )
+            
+            # Check if this is a global variable passed to main
+            global_var_node = next((gv for gv in global_vars if gv.get('name') == local_name), None)
+            if global_var_node:
+                local_type = self.map_type(global_var_node.get('value_type'))
+            else:
+                local_type = next(
+                    (
+                        self.map_type(stmt.get('value_type'))
+                        for stmt in scope
+                        if stmt.get('type') == 'var' and stmt.get('name') == local_name
+                    ),
+                    'i64',
+                )
             self.emit(f"  .local {local_name} {local_type}")
+
+        # If this is main function and we have global variables, initialize them first
+        if func_name == 'main' and global_vars:
+            for global_var in global_vars:
+                self.compile_statement(global_var, return_type)
 
         # If this is main function and we have Python imports, initialize them
         if func_name == 'main' and self.py_imports:
@@ -1485,10 +1731,19 @@ class BytecodeCompiler:
     def compile_ast(self, ast: AstType) -> str:
         """Compile entire AST to bytecode"""
         results = [".version 1", ""]
+        
+        # Collect global variable declarations
+        global_vars = []
+        
+        # Collect raw bytecode blocks
+        bytecode_blocks = []
 
-        # First pass: Register all struct definitions and Python imports
+        # First pass: Register all struct definitions, Python imports, global variables, and bytecode blocks
         for node in ast:
-            if node.get('type') == 'struct_def':
+            if node.get('type') == 'bytecode_block':
+                # Collect bytecode blocks to emit after directives
+                bytecode_blocks.append(node)
+            elif node.get('type') == 'struct_def':
                 struct_name = node.get('name', '')
                 fields = node.get('fields', [])
 
@@ -1529,6 +1784,12 @@ class BytecodeCompiler:
                             'module': module_name,
                             'type': 'module'
                         }
+            elif node.get('type') == 'var':
+                # Collect global variable declarations
+                var_name = node.get('name', '')
+                global_vars.append(node)
+                # Store in global_vars dict for access by all functions
+                self.global_vars[var_name] = node
 
         # Emit struct definitions as bytecode directives
         for struct_name, struct_def in self.struct_defs.items():
@@ -1540,21 +1801,40 @@ class BytecodeCompiler:
         if self.struct_defs:
             results.append("")
 
+        # Emit global variable declarations
+        for var_name in sorted(self.global_vars.keys()):
+            var_node = self.global_vars[var_name]
+            var_type = self.map_type(var_node.get('value_type'))
+            results.append(f".global {var_name} {var_type}")
+
+        if self.global_vars:
+            results.append("")
+
+        # Emit raw bytecode blocks (these may define functions)
+        for block in bytecode_blocks:
+            bytecode_lines = block.get('bytecode', [])
+            for line in bytecode_lines:
+                results.append(line)
+            if bytecode_lines:
+                results.append("")  # Add spacing after block
+
         # Compile all functions
         entry_point = None
         for node in ast:
             if node.get('type') == 'function':
                 func_name = node.get('name', '')
 
-                if bytecode := self.compile_function(node):
+                # Pass global variables to main function
+                inject_globals = global_vars if func_name == 'main' else []
+                if bytecode := self.compile_function(node, inject_globals):
                     results.append(bytecode)
 
                     # Mark 'main' as entry point
                     if func_name == 'main':
                         entry_point = func_name
 
-        # Emit entry point
-        if entry_point:
+        # Emit entry point (only if not already defined by bytecode blocks)
+        if entry_point and not any('.entry' in line for block in bytecode_blocks for line in block.get('bytecode', [])):
             results.append(f".entry {entry_point}")
 
         return '\n'.join(results)

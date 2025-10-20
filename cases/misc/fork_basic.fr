@@ -1,0 +1,13 @@
+// !fork returned: true
+// Test basic fork functionality (just verify fork returns a value)
+
+void main() {
+    int pid = fork()
+    
+    // Just verify fork returned something (parent or child)
+    if (pid >= 0) {
+        println("fork returned: true")
+    } else {
+        println("fork returned: false")
+    }
+}

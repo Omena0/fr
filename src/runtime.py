@@ -431,6 +431,10 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         if value in vars:
             var_value = vars[value].get('value')
             return var_value if var_value is not None else value
+        # At parse time, if variable not found, return the node unchanged
+        # This prevents treating undefined variables as string literals
+        if not runtime:
+            return node
         return value
     
     # Function call (from parse_expr - has 'func' key)
@@ -517,6 +521,12 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     if 'type' in node and node['type'] == NODE_TYPE_STRING:
         return node.get('value', '')
 
+    # Set literal: {'type': 'set', 'value': [...]}
+    if 'type' in node and node['type'] == 'set':
+        # Convert to Python set, evaluating each element
+        elements = node.get('value', [])
+        return set(eval_expr_node(elem) for elem in elements)
+
     # Direct value
     if 'value' in node:
         return node['value']
@@ -553,6 +563,10 @@ def eval_expr_calc(left, op, right):
         return left >= right
     elif op == 'LtE':
         return left <= right
+    elif op == 'In':
+        return left in right
+    elif op == 'NotIn':
+        return left not in right
     elif op == 'Or':
         return bool(left or right)
     elif op == 'And':
@@ -712,8 +726,11 @@ def _execute_node_var(node: dict):
     
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
+        # Check if it's a set/list literal that needs evaluation
+        if value.get('type') in ('set', 'list'):
+            value = eval_expr_node(value)
         # Check if it's a runtime expression (has slice, attr, or other runtime features)
-        if 'slice' in value or 'attr' in value or ('values' in value and 'value' not in value):
+        elif 'slice' in value or 'attr' in value or ('values' in value and 'value' not in value):
             value = eval_expr_node(value)
         elif 'value' not in value:
             value = eval_expr_node(value)

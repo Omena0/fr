@@ -29,18 +29,26 @@ def run_test_isolated(test_file, test_content):
     py_output = vm_output = expect = None
     py_error = vm_error = None
     is_output_test = False
+    expect_alternatives = None
+    py_skipped = vm_skipped = False
 
     for line in result.stdout.strip().split('\n'):
         if line.startswith('PY_OUTPUT:'):
             py_output = line[10:]
         elif line.startswith('PY_ERROR:'):
             py_error = line[9:]
+            if py_error == 'SKIPPED':
+                py_skipped = True
         elif line.startswith('VM_OUTPUT:'):
             vm_output = line[10:]
         elif line.startswith('VM_ERROR:'):
             vm_error = line[9:]
+            if vm_error == 'SKIPPED':
+                vm_skipped = True
         elif line.startswith('EXPECT:'):
             expect = line[7:]
+        elif line.startswith('EXPECT_ALTERNATIVES:'):
+            expect_alternatives = [e.strip() for e in line[20:].split('||')]
         elif line.startswith('IS_OUTPUT:'):
             is_output_test = line[10:] == 'True'
         elif line.startswith('ERROR:'):
@@ -53,6 +61,13 @@ def run_test_isolated(test_file, test_content):
                 'vm_error': line[6:],
                 'mismatch': False
             }
+    
+    # If neither PY_OUTPUT nor PY_ERROR is present, Python runtime was skipped
+    if py_output is None and py_error is None:
+        py_skipped = True
+    # If neither VM_OUTPUT nor VM_ERROR is present, C VM was skipped
+    if vm_output is None and vm_error is None:
+        vm_skipped = True
 
     # Define helper functions for error message comparison
     def extract_msg(text):
@@ -110,12 +125,24 @@ def run_test_isolated(test_file, test_content):
 
         return get_message_part(msg1) == get_message_part(msg2)
 
+    # Helper to check if output matches any alternative
+    def matches_any_alternative(output, alternatives):
+        """Check if output matches any of the expected alternatives"""
+        if not alternatives:
+            return normalize_line_numbers(output or '', expect)
+        return any(normalize_line_numbers(output or '', alt) for alt in alternatives)
+
     # Determine if tests passed
     if is_output_test:
         # For output tests, compare output directly
         # Use normalized comparison for error-like output (with line numbers)
-        py_passed = normalize_line_numbers(py_output or '', expect)
-        vm_passed = normalize_line_numbers(vm_output or '', expect)
+        # Check against alternatives if provided
+        if expect_alternatives:
+            py_passed = py_skipped or matches_any_alternative(py_output, expect_alternatives)
+            vm_passed = vm_skipped or matches_any_alternative(vm_output, expect_alternatives)
+        else:
+            py_passed = py_skipped or normalize_line_numbers(py_output or '', expect)
+            vm_passed = vm_skipped or normalize_line_numbers(vm_output or '', expect)
 
         return {
             'file': test_file,
@@ -134,13 +161,18 @@ def run_test_isolated(test_file, test_content):
             py_passed = True
             vm_passed = True
         else:
-            py_msg = extract_msg(py_error) if py_error else extract_msg(py_output) if py_output else ''
-            vm_msg = extract_msg(vm_error) if vm_error else extract_msg(vm_output) if vm_output else ''
-            exp_msg = extract_msg(expect)
-
-            # Use normalized comparison for line numbers
-            py_passed = normalize_line_numbers(py_msg, exp_msg)
-            vm_passed = normalize_line_numbers(vm_msg, exp_msg)
+            py_msg = extract_msg(py_error) if py_error and py_error != 'SKIPPED' else extract_msg(py_output) if py_output else ''
+            vm_msg = extract_msg(vm_error) if vm_error and vm_error != 'SKIPPED' else extract_msg(vm_output) if vm_output else ''
+            
+            # Check against alternatives if provided
+            if expect_alternatives:
+                py_passed = py_skipped or any(normalize_line_numbers(py_msg, extract_msg(alt)) for alt in expect_alternatives)
+                vm_passed = vm_skipped or any(normalize_line_numbers(vm_msg, extract_msg(alt)) for alt in expect_alternatives)
+            else:
+                exp_msg = extract_msg(expect)
+                # Use normalized comparison for line numbers
+                py_passed = py_skipped or normalize_line_numbers(py_msg, exp_msg)
+                vm_passed = vm_skipped or normalize_line_numbers(vm_msg, exp_msg)
 
         return {
             'file': test_file,

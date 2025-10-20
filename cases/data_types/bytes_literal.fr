@@ -1,0 +1,7 @@
+// none
+
+void main() {
+    bytes data = b"Hello, World!"
+    println(data)
+}
+// Output: b"Hello, World!"

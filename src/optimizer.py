@@ -299,6 +299,7 @@ class BytecodeOptimizer:
 
             # Check for consecutive CONST_STR instructions
             # Note: These need special handling due to quoted strings
+            # BUT: Don't merge if they're arguments to PY_CALL (module_name, func_name)
             if line.startswith('CONST_STR "'):
                 constants = []
                 j = i
@@ -309,7 +310,12 @@ class BytecodeOptimizer:
                     constants.append(const_str)
                     j += 1
 
-                if len(constants) >= 2:
+                # Check if the next non-whitespace line after the CONST_STR sequence is PY_CALL
+                # If so, don't merge - these strings are separate arguments
+                next_line = lines[j].strip() if j < len(lines) else ""
+                is_py_call_args = next_line.startswith('CONST_I64 ') and j + 1 < len(lines) and lines[j + 1].strip() == 'PY_CALL'
+                
+                if len(constants) >= 2 and not is_py_call_args:
                     result.append(f"{indent}CONST_STR {' '.join(constants)}")
                     i = j
                     continue

@@ -1,0 +1,8 @@
+// !Socket closed
+// Test method call syntax on socket (integer value)
+
+void main() {
+    sock = socket("inet", "stream")
+    sock.sclose()
+    println("Socket closed")
+}

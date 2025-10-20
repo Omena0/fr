@@ -1,0 +1,9 @@
+// none
+
+void main() {
+    str original = "Test string"
+    bytes encoded = encode(original, "utf-8")
+    str decoded = decode(encoded, "utf-8")
+    println(decoded)
+}
+// Output: Test string

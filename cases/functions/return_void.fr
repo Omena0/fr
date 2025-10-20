@@ -1,0 +1,9 @@
+// none
+
+void test() {
+    // Just an empty function that returns void
+}
+
+void main() {
+    test()
+}

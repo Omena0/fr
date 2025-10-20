@@ -16,13 +16,81 @@ pip install frscript
 ```
 
 ## Features:
-- Command line launcher (`fr`)
-- **File and Socket I/O**. Low-level file operations and sockets.
-- Python integration - You can use any Python libraries with Frscript.
-- **Aggressive optimization**. Bytecode and AST optimizations, fused operations, fast C runtime. Stack-based VM.
-
+- **Command line launcher** (`fr`)
+- **File and Socket I/O** - Low-level file operations and sockets.
+- **Multiprocessing**. - Easy threading with fork() and wait().
+- **Python integration** - You can use any Python libraries with Frscript.
+- **Aggressive optimization** - Bytecode-level optimizations. Faster than python.
+- **Stack-based VM** - Fast and memory efficient.
+- **Readable bytecode** - Optimize hot code manually
 
 ## What's New
+
+### In version 8A:
+Major new update.
+
+This update brings the speed of the fibonacci benchmark faster than python.
+
+#### Major changes:
+- Added `goto` - Allows jumping to specific parts of code
+- Added `<type> <var> = goto <label>` syntax, gotos can return values.
+- Added compiler directives:
+  - #label    - Allows to create labels where gotos can jump
+  - #bytecode - Allows inline bytecode
+- Added `print()` - Prints a line without a newline
+- Added C runtime support for a lot of unimplemented features
+- Added fork() and wait()
+- Added bytes and set types
+- Added support for basic global vars
+
+#### Full changelog:
+- Added OP_LOAD_GLOBAL and OP_STORE_GLOBAL bytecode instructions
+- Added global_vars array to VM struct for shared variable storage across function calls
+- Added .global directive for declaring global variables in bytecode
+- Added print() function
+- Added support for chained method calls on expressions (e.g., f"text".encode().decode())
+- Added default 'utf-8' encoding parameter for encode() and decode() methods when called without arguments
+- Added support for 'in' operator with Python objects (dict, etc.) in C VM
+- Added support for dict type annotation mapping to Python dict objects
+- Added default UTF-8 encoding for encode() and decode() methods
+- Added 'in' operator support for Python objects including dicts in C VM
+- Added len() support for bytes type in C VM
+- Added SET_NEW, SET_ADD, SET_REMOVE, SET_CONTAINS, SET_LEN bytecode instructions
+- Added VAL_SET type and Set data structure using hash table with linear probing
+- Added builtin method detection for expressionsImplemented reference counting for strings and lists to eliminate expensive deep copying
+- Added set support to BUILTIN_LEN instructionImplemented CONTAINS bytecode instruction for generic membership checking
+- Added support for 'in' and 'not in' operators with lists, strings, and setsImplemented FORK and WAIT bytecode instructions for process management
+- Added OP_FORK to fork child processes and OP_WAIT to wait for child completionImplemented ENCODE and DECODE bytecode instructions for string encoding operations
+- Added runtime filter parsing in test runner to skip unsupported runtimesAdded #label directive for defining jump targets in code
+- Added GOTO_CALL instruction for goto with return values (int x = goto label)
+- Added support for goto expressions that can capture return values from labeled code blocksImplemented #bytecode blocks for inline raw bytecode in source files
+- Optimized comparison operations with direct int64 comparison in fast path
+- Optimized OP_LOAD handler to avoid unnecessary copy operations for immutable types
+- Fixed optimizer incorrectly merging CONST_STR instructions before PY_CALL
+- Fixed stack underflow when calling builtin methods (encode, decode, upper, lower, strip, etc.) on expressions like f-strings
+- Fixed bytes type not being properly converted to Python bytes when passed to Python functions
+- Fixed len() function to support bytes type in C VM
+- Fixed Python bytes objects not being properly converted to fr bytes type when returned from Python functions
+- Fixed global variable declarations not being initialized in main function
+- Fixed bytes type conversion between fr and Python in both directions
+- Fixed dict variable initialization with {} to create Python dict instead of empty set
+- Fixed method chaining on f-strings and expressions
+- Fixed optimizer incorrectly merging CONST_STR instructions for PY_CALL arguments
+- Fixed 13 failing C VM tests related to sets, membership operators, fstrings, and process managementAdded @c-only and @python-only test markers for runtime-specific tests
+- Inlined arithmetic operations for int64 fast path to avoid function call overhead
+- Implemented proper global variable support with dedicated VM storage
+- Implemented arena allocator for batch allocation/deallocation of temporary values (64KB blocks)
+- Implemented set operations in value_to_string, value_copy, value_free, and value_print
+- Implemented string interning for constant strings to eliminate duplicate allocationsAdded support for OR operator in test expectations using || syntax
+- Implemented goto statement for unconditional jumps to labels
+- Improved value_copy performance by eliminating deep copies for ref-counted types
+- Reduced memory allocations by using refcount increment instead of duplication
+- Updated test runner to parse and check against alternative expected valuesImplemented SET operations in C VM runtime with hash table for O(1) performance
+- Updated C VM socket functions to use bytes type (send() now accepts bytes, recv() now returns bytes)
+- Updated for_in loops to use global variable helpers
+- Updated socket functions to work with bytes type (send accepts bytes, recv returns bytes)
+- Changed socket recv() to return bytes instead of string
+- Modified compiler to emit LOAD_GLOBAL/STORE_GLOBAL for global variables
 
 ### In version 7B:
 Bugfixes and performance.

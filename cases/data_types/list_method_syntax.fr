@@ -1,0 +1,8 @@
+// !5
+// Test method call syntax on list
+
+void main() {
+    list nums = [1, 2, 3, 4]
+    nums = nums.append(5)
+    println(nums[4])
+}

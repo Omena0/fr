@@ -11,6 +11,21 @@ AstType = list[dict[str, Any]]
 # Python module cache for py_import/py_call
 _python_modules = {}
 
+# I/O helper functions
+def _print(text: str) -> None:
+    """Print text without newline"""
+    import sys as _sys
+    _sys.stdout.write(str(text))
+    _sys.stdout.flush()
+
+def _encode(text: str, encoding: str = 'utf-8') -> bytes:
+    """Encode a string to bytes"""
+    return text.encode(encoding)
+
+def _decode(data: bytes, encoding: str = 'utf-8') -> str:
+    """Decode bytes to a string"""
+    return data.decode(encoding)
+
 # File I/O helper functions
 def _file_open(path: str, mode: str = 'r'):
     """Open a file and return file handle (as integer fd)"""
@@ -117,6 +132,49 @@ def _file_join(*paths: str):
     """Join path components"""
     return _os.path.join(*paths)
 
+# Process management functions
+def _fork() -> int:
+    """Fork the current process. Returns 0 in child, child PID in parent, -1 on error."""
+    try:
+        pid = _os.fork()
+        if pid == 0:
+            # Child process: set up to receive SIGTERM when parent dies
+            # This is Linux-specific
+            try:
+                import ctypes
+                libc = ctypes.CDLL('libc.so.6')
+                PR_SET_PDEATHSIG = 1
+                SIGTERM = 15
+                libc.prctl(PR_SET_PDEATHSIG, SIGTERM)
+            except (ImportError, OSError, AttributeError):
+                # prctl not available, skip (likely not Linux)
+                pass
+        return pid
+    except OSError:
+        return -1
+
+def _wait(pid: int) -> int:
+    """Wait for a child process to finish. Returns exit status."""
+    try:
+        _, status = _os.waitpid(pid, 0)
+        return _os.WEXITSTATUS(status)
+    except (OSError, ChildProcessError):
+        return -1
+
+def _sleep(seconds: float) -> None:
+    """Sleep for specified number of seconds."""
+    import time as _time
+    _time.sleep(seconds)
+
+def _exit(code: int = 0) -> None:
+    """Exit the program with the given exit code."""
+    import sys as _sys
+    _sys.exit(code)
+
+def _getpid() -> int:
+    """Get the current process ID."""
+    return _os.getpid()
+
 # Socket I/O helper functions
 _socket_map = {}  # Map integer IDs to socket objects
 _next_socket_id = 1
@@ -140,6 +198,8 @@ def _socket_create(family: str = 'inet', type_: str = 'stream'):
     else:
         typ = _socket.SOCK_RAW
     sock = _socket.socket(fam, typ)
+    # Enable SO_REUSEADDR to allow quick restart without "Address already in use" error
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
     sock_id = _next_socket_id
     _next_socket_id += 1
     _socket_map[sock_id] = sock
@@ -181,12 +241,12 @@ def _socket_accept(sock_id: int):
     _socket_map[conn_id] = conn
     return conn_id
 
-def _socket_send(sock_id: int, data: str):
+def _socket_send(sock_id: int, data: bytes):
     """Send data through socket"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
-    return sock.send(data.encode('utf-8'))
+    return sock.send(data)
 
 def _socket_recv(sock_id: int, size = 4096):
     """Receive data from socket"""
@@ -194,7 +254,7 @@ def _socket_recv(sock_id: int, size = 4096):
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
     data = sock.recv(int(size))
-    return data.decode('utf-8', errors='replace')
+    return data
 
 def _socket_close(sock_id: int):
     """Close socket"""
@@ -373,6 +433,15 @@ funcs:dict[ # Holy type annotations
         str | dict[str,str] | Callable | bool | AstType | list[str] | list[tuple[str, str | None]]
     ]
 ] = {
+    'print': {
+        "type": "builtin",
+        "args": {
+            "text": "string"
+        },
+        "func": _print,
+        "return_type": "none",
+        "can_eval": False
+    },
     'println': {
         "type": "builtin",
         "args": {
@@ -381,6 +450,26 @@ funcs:dict[ # Holy type annotations
         "func": print,
         "return_type": "none",
         "can_eval": False
+    },
+    'encode': {
+        "type": "builtin",
+        "args": {
+            "text": "str",
+            "encoding": "str"
+        },
+        "func": _encode,
+        "return_type": "bytes",
+        "can_eval": True
+    },
+    'decode': {
+        "type": "builtin",
+        "args": {
+            "data": "bytes",
+            "encoding": "str"
+        },
+        "func": _decode,
+        "return_type": "str",
+        "can_eval": True
     },
     'sqrt': {
         "type": "builtin",
@@ -414,7 +503,14 @@ funcs:dict[ # Holy type annotations
         "args": {
             "value": "any"
         },
-        "func": lambda value: 'true' if value is True else ('false' if value is False else str(value)),
+        "func": lambda value: (
+            'true' if value is True else 
+            'false' if value is False else 
+            '{}' if isinstance(value, set) and len(value) == 0 else
+            '{' + ', '.join(str(x) if not isinstance(x, str) else x for x in sorted(value, key=lambda x: (type(x).__name__, str(x)))) + '}' if isinstance(value, set) else
+            repr(value) if isinstance(value, bytes) else
+            str(value)
+        ),
         "return_type": "string",
         "can_eval": True
     },
@@ -445,6 +541,36 @@ funcs:dict[ # Holy type annotations
         "func": lambda lst: lst.pop() if lst else None,
         "return_type": "any",
         "can_eval": False
+    },
+    'set_add': {
+        "type": "builtin",
+        "args": {
+            "s": "set",
+            "value": "any"
+        },
+        "func": lambda s, value: s.add(value) or s,
+        "return_type": "set",
+        "can_eval": True
+    },
+    'set_remove': {
+        "type": "builtin",
+        "args": {
+            "s": "set",
+            "value": "any"
+        },
+        "func": lambda s, value: s.discard(value) or s,
+        "return_type": "set",
+        "can_eval": True
+    },
+    'set_contains': {
+        "type": "builtin",
+        "args": {
+            "s": "set",
+            "value": "any"
+        },
+        "func": lambda s, value: value in s,
+        "return_type": "bool",
+        "can_eval": True
     },
     'int': {
         "type": "builtin",
@@ -814,13 +940,47 @@ funcs:dict[ # Holy type annotations
         "can_eval": False
     },
 
+    # Process management functions
+    'fork': {
+        "type": "builtin",
+        "args": {},
+        "func": _fork,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'wait': {
+        "type": "builtin",
+        "args": {"pid": "int"},
+        "func": _wait,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'sleep': {
+        "type": "builtin",
+        "args": {"seconds": "float"},
+        "func": _sleep,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'exit': {
+        "type": "builtin",
+        "args": {},  # Optional argument with default: code=0
+        "func": _exit,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'getpid': {
+        "type": "builtin",
+        "args": {},
+        "func": _getpid,
+        "return_type": "int",
+        "can_eval": False
+    },
+
     # Socket I/O functions
     'socket': {
         "type": "builtin",
-        "args": {
-            "family": "string",
-            "type": "string"
-        },
+        "args": {},  # Optional arguments with defaults: family="inet", type="stream"
         "func": _socket_create,
         "return_type": "int",
         "can_eval": False
@@ -870,7 +1030,7 @@ funcs:dict[ # Holy type annotations
         "type": "builtin",
         "args": {
             "sock_id": "int",
-            "data": "string"
+            "data": "bytes"
         },
         "func": _socket_send,
         "return_type": "int",
@@ -883,7 +1043,7 @@ funcs:dict[ # Holy type annotations
             "size": "int"
         },
         "func": _socket_recv,
-        "return_type": "string",
+        "return_type": "bytes",
         "can_eval": False
     },
     'sclose': {

@@ -1,0 +1,8 @@
+// none
+
+void main() {
+    str text = "Hello"
+    bytes data = encode(text, "utf-8")
+    println(data)
+}
+// Output: b"Hello"
