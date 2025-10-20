@@ -1,0 +1,10 @@
+// @c-only !Result: 28980
+
+void main() {
+    int x = goto bing
+    println(f"Result: {x}")
+    
+    #label bing
+        int result = 69 * 420
+        return result
+}

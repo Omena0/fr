@@ -4,7 +4,7 @@
 
 // ============= Mathematical Functions =============
 
-const int fibonacci(int n) {
+int fibonacci(int n) {
     // Iterative version using for loop - O(n)
     if (n <= 1) {
         return n
@@ -20,7 +20,7 @@ const int fibonacci(int n) {
     return b
 }
 
-const int factorial(int n) {
+int factorial(int n) {
     // Iterative version - O(n)
     if (n <= 1) {
         return 1
@@ -32,7 +32,7 @@ const int factorial(int n) {
     return result
 }
 
-const float power(float base, int exp) {
+float power(float base, int exp) {
     if (exp == 0) {
         return 1.0
     }
@@ -43,7 +43,7 @@ const float power(float base, int exp) {
     return result
 }
 
-const int gcd(int a, int b) {
+int gcd(int a, int b) {
     // Greatest common divisor using Euclidean algorithm
     while (b != 0) {
         int temp = b
@@ -53,7 +53,7 @@ const int gcd(int a, int b) {
     return a
 }
 
-const int is_prime(int n) {
+int is_prime(int n) {
     // Prime check - returns 1 if prime, 0 if not
     if (n <= 1) {
         return 0
@@ -78,7 +78,7 @@ const int is_prime(int n) {
 
 // ============= List Operations =============
 
-const list build_list(int size) {
+list build_list(int size) {
     list result = []
     for (i, size) {
         result = append(result, i * 2)
@@ -142,7 +142,7 @@ int list_max(list lst) {
 
 // ============= String Operations =============
 
-const str string_repeat(str s, int n) {
+str string_repeat(str s, int n) {
     // Repeat string n times
     str result = ""
     for (i, n) {
@@ -165,7 +165,7 @@ int count_char(str s, str ch) {
 
 // ============= Control Flow Stress Tests =============
 
-const int switch_test(int iterations) {
+int switch_test(int iterations) {
     int sum = 0
     for (i, iterations) {
         int val = i % 10
@@ -197,7 +197,7 @@ const int switch_test(int iterations) {
     return sum
 }
 
-const int while_loop_test(int n) {
+int while_loop_test(int n) {
     int count = 0
     for (i, n) {
         count = count + 1
@@ -205,7 +205,7 @@ const int while_loop_test(int n) {
     return count
 }
 
-const int nested_loops(int n) {
+int nested_loops(int n) {
     int result = 0
     for (i, n) {
         for (j, n) {
@@ -217,7 +217,7 @@ const int nested_loops(int n) {
     return result
 }
 
-const int matrix_multiply_sum(int size) {
+int matrix_multiply_sum(int size) {
     // Simulate matrix operations
     int sum = 0
     for (i, size) {
@@ -228,7 +228,7 @@ const int matrix_multiply_sum(int size) {
     return sum
 }
 
-const int complex_conditions(int n) {
+int complex_conditions(int n) {
     // Test complex boolean conditions
     int count = 0
     for (i, n) {
@@ -242,7 +242,7 @@ const int complex_conditions(int n) {
     return count
 }
 
-const int break_continue_test(int n) {
+int break_continue_test(int n) {
     // Test break and continue
     int sum = 0
     for (i, n) {

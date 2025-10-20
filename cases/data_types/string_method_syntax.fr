@@ -1,0 +1,8 @@
+// !5
+// Test method call syntax with string
+
+void main() {
+    str text = "hello"
+    int length = text.len()
+    println(length)
+}

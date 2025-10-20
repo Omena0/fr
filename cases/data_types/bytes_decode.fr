@@ -1,0 +1,8 @@
+// none
+
+void main() {
+    bytes data = b"World"
+    str text = decode(data, "utf-8")
+    println(text)
+}
+// Output: World

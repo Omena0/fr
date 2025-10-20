@@ -1,0 +1,18 @@
+// !yes
+// !no
+
+void main() {
+    set s = {1, 2, 3}
+    
+    // Test positive case
+    if (2 in s) {
+        println("yes")
+    }
+    
+    // Test negative case
+    if (5 in s) {
+        println("no")
+    } else {
+        println("no")
+    }
+}

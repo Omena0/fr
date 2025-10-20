@@ -1,0 +1,7 @@
+// !{1, 2, 3, 4}
+
+void main() {
+    set s = {1, 2, 3}
+    s = set_add(s, 4)
+    println(str(s))
+}

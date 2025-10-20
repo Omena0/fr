@@ -10,7 +10,8 @@ void main(str argv) {
         int cs = accept(sock)
 
         // Read the entire HTTP request at once
-        str request = recv(cs, 4096)
+        bytes request_bytes = recv(cs, 4096)
+        str request = request_bytes.decode()
 
         // Extract just the first line (method + path)
         list lines = split(request, "\r\n")
@@ -33,7 +34,7 @@ void main(str argv) {
         }
 
         // Send HTTP response
-        send(cs, response + "\r\n\r\n")
+        send(cs, (response + "\r\n\r\n").encode())
         sclose(cs)
     }
 

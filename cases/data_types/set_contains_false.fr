@@ -1,0 +1,7 @@
+// !false
+
+void main() {
+    set s = {1, 2, 3}
+    bool result = set_contains(s, 5)
+    println(str(result))
+}

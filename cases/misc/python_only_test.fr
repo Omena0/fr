@@ -1,0 +1,5 @@
+// @python-only !Hello from Python
+
+void main() {
+    println("Hello from Python")
+}

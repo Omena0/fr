@@ -1,21 +1,74 @@
 
-struct Message {
-    str author
-    str text
-    int timestamp
-}
-
 struct User {
     str username
     str password_hash
     int join_time
 }
 
-void main() {
+set clients = {}
+dict logins = {}
+
+void broadcast(str msg) {
+    for (client in clients) {
+        client.send(msg.encode())
+    }
+}
+
+void csHandler(int cs) {
+    bytes header_bytes = cs.recv()
+    str header = header_bytes.decode()
+    str username = header.split('\n')[0]
+    str password = header.split('\n')[1]
+    str rest     = header.split("\n")[2]
+
+    println(logins)
+
+    if (username in logins) {
+        if (password != logins[username]) {
+            cs.send("Wrong password.\n".encode())
+            return
+        }
+    } else {
+        logins[username] = password
+    }
+
+    if (len(rest) != 0) {
+        broadcast(f"<{username}> {rest}")
+    }
+
+    while (true) {
+        bytes msg_bytes = cs.recv()
+        str msg = msg_bytes.decode()
+        if (msg == "") {
+            // Client disconnected
+            println(f"Client {username} disconnected")
+            return
+        }
+        broadcast(f"<{username}> {msg}")
+    }
+}
+
+int main() {
     println("Starting server..")
 
     int sock = socket()
+    sock.bind("0.0.0.0", 8080)
+    sock.listen(5)
 
-    
+    while (true) {
+        int cs = sock.accept()
+        if (cs == -1) {
+            sock.sclose()
+            return 1
+        }
 
+        println("Client connected: " + str(cs))
+
+        int pid = fork()
+        if (pid == 0) {
+            csHandler(cs)
+            cs.sclose()
+            exit(0)
+        }
+    }
 }

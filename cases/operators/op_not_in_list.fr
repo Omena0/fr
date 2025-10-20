@@ -1,0 +1,18 @@
+// !yes
+// !no
+
+void main() {
+    list l = [1, 2, 3]
+    
+    // Test positive case
+    if (5 not in l) {
+        println("yes")
+    }
+    
+    // Test negative case  
+    if (2 not in l) {
+        println("no")
+    } else {
+        println("no")
+    }
+}

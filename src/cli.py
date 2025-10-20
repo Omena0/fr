@@ -118,7 +118,7 @@ def compile_cmd(args=None):
         args = sys.argv[1:]
 
     if len(args) < 1:
-        print("   or: fr compile <ast.bin|ast.json> [-o output.bc]")
+        print("Usage: fr compile <file.fr|ast.bin|ast.json> [-o output.bc]")
         sys.exit(1)
 
     input_file = args[0]
@@ -139,8 +139,21 @@ def compile_cmd(args=None):
     elif file_type == 'binary_ast':
         with open(input_file, 'rb') as f:
             ast = decode_binary(f.read())
+    elif input_file.endswith('.fr'):
+        # Parse source file to AST first
+        try:
+            with open(input_file) as f:
+                source = f.read()
+            ast = parse(source, file=input_file)
+        except SyntaxError as e:
+            print(f'Parse error: {e}')
+            sys.exit(1)
+        except FileNotFoundError:
+            print(f"Error: File not found: {input_file}")
+            sys.exit(1)
     else:
         print(f"Error: Cannot compile {input_file} - unknown format")
+        print("Expected: .fr, .json, or binary AST file")
         sys.exit(1)
 
     try:
@@ -238,7 +251,7 @@ def main():
         print("                                   -py: Force Python backend runtime")
         print("                                --debug: Run in debug mode (for debugger)")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
-        print("  fr compile <ast.json|ast.bin> [-o out.bc] - Compile AST to bytecode")
+        print("  fr compile <file.fr|ast.json|ast.bin> [-o out.bc] - Compile to bytecode")
         print("  fr run <file>                   - Run file (auto-detect type)")
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")

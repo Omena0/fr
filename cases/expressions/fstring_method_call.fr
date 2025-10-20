@@ -1,0 +1,21 @@
+// Hello World
+// HELLO WORLD
+// hello world
+// 'test'
+
+void main() {
+    str name = "World"
+    
+    // Test encode on f-string
+    println(f"Hello {name}".encode().decode())
+    
+    // Test upper on f-string
+    println(f"hello {name}".upper())
+    
+    // Test lower on f-string
+    println(f"HELLO {name}".lower())
+    
+    // Test strip on f-string with spaces
+    str text = "test"
+    println(f"'{f"  {text}  ".strip()}'")
+}

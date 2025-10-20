@@ -32,6 +32,7 @@
 #include <dirent.h>
 #include <libgen.h>
 #include <limits.h>
+#include <sys/wait.h>
 
 // Python C API for embedding Python interpreter
 #define PY_SSIZE_T_CLEAN
@@ -79,6 +80,7 @@ char* unescape_string(const char* str) {
 // Forward declarations
 typedef struct Value Value;
 typedef struct List List;
+typedef struct Set Set;
 typedef struct Struct Struct;
 typedef struct VM VM;  // Forward declare VM
 
@@ -137,6 +139,7 @@ typedef enum
     VAL_BOOL,
     VAL_VOID,
     VAL_LIST,   // List/Array type
+    VAL_SET,    // Set type (unordered collection of unique elements)
     VAL_STRUCT, // Struct/Object type
     VAL_PYOBJECT // Python object type (PyObject*)
 } ValueType;
@@ -169,10 +172,28 @@ typedef struct Value
         char *str;
         bool boolean;
         List *list;     // List pointer
+        Set *set;       // Set pointer
         Struct *struct_val; // Struct pointer
         PyObject *pyobj;    // Python object pointer
     } as;
 } Value;
+
+// Hash table entry for Set (must be after Value definition)
+typedef struct SetEntry
+{
+    Value key;
+    bool occupied;
+    bool deleted;  // For tombstone marking
+} SetEntry;
+
+// Set structure (hash table for O(1) operations)
+typedef struct Set
+{
+    SetEntry *entries;  // Hash table entries
+    int length;         // Number of elements in set
+    int capacity;       // Allocated capacity
+    int tombstones;     // Count of deleted entries
+} Set;
 
 // Variable storage
 typedef struct
@@ -220,6 +241,7 @@ typedef enum
     OP_JUMP,
     OP_JUMP_IF_FALSE,
     OP_JUMP_IF_TRUE,
+    OP_GOTO_CALL,
     OP_CALL,
     OP_RETURN,
     OP_RETURN_VOID,
@@ -306,6 +328,16 @@ typedef enum
     OP_LIST_NEW_STR,    // Create list with string values (count val1 val2 ... -> list)
     OP_LIST_NEW_BOOL,   // Create list with boolean values (count val1 val2 ... -> list)
 
+    // Set operations (hash table for O(1) operations)
+    OP_SET_NEW,      // Create new empty set (-> set)
+    OP_SET_ADD,      // Add value to set (set, value -> set)
+    OP_SET_REMOVE,   // Remove value from set (set, value -> set)
+    OP_SET_CONTAINS, // Check if set contains value (set, value -> bool)
+    OP_SET_LEN,      // Get set length (set -> int)
+
+    // Container membership check
+    OP_CONTAINS,     // Generic membership check (container, value -> bool)
+
     // Break/Continue with levels
     OP_BREAK,    // Break from loop with level
     OP_CONTINUE, // Continue loop with level
@@ -323,6 +355,8 @@ typedef enum
     OP_STR_SPLIT,   // Split string (str, sep -> list)
     OP_STR_JOIN,    // Join list with separator (sep, list -> str)
     OP_STR_REPLACE, // Replace substring (str, old, new -> str)
+    OP_ENCODE,      // Encode string to bytes (str, encoding -> str)
+    OP_DECODE,      // Decode bytes to string (str, encoding -> str)
 
     // Math functions
     OP_ABS,   // Absolute value
@@ -376,6 +410,10 @@ typedef enum
     OP_SOCKET_RECV,       // Receive data (sock_id, size -> string)
     OP_SOCKET_CLOSE,      // Close socket (sock_id -> void)
     OP_SOCKET_SETSOCKOPT, // Set socket option (sock_id, level, option, value -> void)
+
+    // Process management
+    OP_FORK,              // Fork process (-> pid)
+    OP_WAIT,              // Wait for child process (-> status)
 
     // Python library integration
     OP_PY_IMPORT,         // Import a Python module (module_name -> module_object)
@@ -515,7 +553,158 @@ typedef struct VM
     char *debug_current_func;        // Current function name for error reporting
     int *debug_line_map;             // Maps PC to source line number
     int debug_line_map_count;        // Number of entries in line map
+    
+    // Performance optimizations
+    struct Arena *arena;             // Arena allocator for temporary allocations
+    struct StringIntern *string_intern; // String interning table for constants
 } VM;
+
+// ============================================================================
+// ARENA ALLOCATOR - Batch allocate/free temporary values
+// ============================================================================
+#define ARENA_BLOCK_SIZE (64 * 1024)  // 64KB blocks
+
+typedef struct ArenaBlock {
+    char *memory;
+    size_t used;
+    size_t capacity;
+    struct ArenaBlock *next;
+} ArenaBlock;
+
+typedef struct Arena {
+    ArenaBlock *current;
+    ArenaBlock *first;
+    size_t total_allocated;
+} Arena;
+
+// Create new arena
+Arena* arena_create() {
+    Arena *arena = malloc(sizeof(Arena));
+    arena->first = malloc(sizeof(ArenaBlock));
+    arena->first->memory = malloc(ARENA_BLOCK_SIZE);
+    arena->first->used = 0;
+    arena->first->capacity = ARENA_BLOCK_SIZE;
+    arena->first->next = NULL;
+    arena->current = arena->first;
+    arena->total_allocated = ARENA_BLOCK_SIZE;
+    return arena;
+}
+
+// Allocate from arena
+void* arena_alloc(Arena *arena, size_t size) {
+    // Align to 8 bytes
+    size = (size + 7) & ~7;
+    
+    // If current block doesn't have space, create new block
+    if (arena->current->used + size > arena->current->capacity) {
+        size_t block_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
+        ArenaBlock *new_block = malloc(sizeof(ArenaBlock));
+        new_block->memory = malloc(block_size);
+        new_block->used = 0;
+        new_block->capacity = block_size;
+        new_block->next = NULL;
+        arena->current->next = new_block;
+        arena->current = new_block;
+        arena->total_allocated += block_size;
+    }
+    
+    void *ptr = arena->current->memory + arena->current->used;
+    arena->current->used += size;
+    return ptr;
+}
+
+// Reset arena (keep memory, reset used counters)
+void arena_reset(Arena *arena) {
+    ArenaBlock *block = arena->first;
+    while (block) {
+        block->used = 0;
+        block = block->next;
+    }
+    arena->current = arena->first;
+}
+
+// Destroy arena
+void arena_destroy(Arena *arena) {
+    ArenaBlock *block = arena->first;
+    while (block) {
+        ArenaBlock *next = block->next;
+        free(block->memory);
+        free(block);
+        block = next;
+    }
+    free(arena);
+}
+
+// ============================================================================
+// STRING INTERNING - Deduplicate constant strings
+// ============================================================================
+#define STRING_INTERN_SIZE 1024
+
+typedef struct InternedString {
+    char *str;
+    size_t hash;
+    struct InternedString *next;
+} InternedString;
+
+typedef struct StringIntern {
+    InternedString *buckets[STRING_INTERN_SIZE];
+    int count;
+} StringIntern;
+
+// Simple hash function
+static inline size_t hash_string(const char *str) {
+    size_t hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    return hash;
+}
+
+// Create string intern table
+StringIntern* string_intern_create() {
+    StringIntern *intern = malloc(sizeof(StringIntern));
+    memset(intern->buckets, 0, sizeof(intern->buckets));
+    intern->count = 0;
+    return intern;
+}
+
+// Intern a string (return canonical pointer)
+const char* string_intern_add(StringIntern *intern, const char *str) {
+    size_t hash = hash_string(str);
+    int bucket = hash % STRING_INTERN_SIZE;
+    
+    // Check if already interned
+    InternedString *entry = intern->buckets[bucket];
+    while (entry) {
+        if (strcmp(entry->str, str) == 0) {
+            return entry->str; // Return existing interned string
+        }
+        entry = entry->next;
+    }
+    
+    // Not found, add new entry
+    InternedString *new_entry = malloc(sizeof(InternedString));
+    new_entry->str = strdup(str);
+    new_entry->hash = hash;
+    new_entry->next = intern->buckets[bucket];
+    intern->buckets[bucket] = new_entry;
+    intern->count++;
+    return new_entry->str;
+}
+
+// Destroy string intern table
+void string_intern_destroy(StringIntern *intern) {
+    for (int i = 0; i < STRING_INTERN_SIZE; i++) {
+        InternedString *entry = intern->buckets[i];
+        while (entry) {
+            InternedString *next = entry->next;
+            free(entry->str);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(intern);
+}
 
 // Forward declarations for helper functions
 void value_free(Value v);
@@ -782,6 +971,187 @@ void list_free(List *list) {
     free(list);
 }
 
+// ============================================================================
+// Set operations (hash table implementation for O(1) operations)
+// ============================================================================
+
+// Hash function for values
+static uint64_t value_hash(Value v) {
+    switch (v.type) {
+        case VAL_INT:
+            // Simple integer hash
+            return (uint64_t)v.as.int64;
+        case VAL_F64: {
+            // Hash the bits of the double
+            uint64_t bits;
+            memcpy(&bits, &v.as.f64, sizeof(double));
+            return bits;
+        }
+        case VAL_STR: {
+            // FNV-1a hash for strings
+            uint64_t hash = 14695981039346656037ULL;
+            const char *str = v.as.str;
+            while (*str) {
+                hash ^= (uint64_t)*str++;
+                hash *= 1099511628211ULL;
+            }
+            return hash;
+        }
+        case VAL_BOOL:
+            return v.as.boolean ? 1 : 0;
+        default:
+            // For other types, use pointer address
+            return (uint64_t)(uintptr_t)&v;
+    }
+}
+
+// Compare two values for equality
+static bool value_equals(Value a, Value b) {
+    if (a.type != b.type)
+        return false;
+    
+    switch (a.type) {
+        case VAL_INT:
+            return a.as.int64 == b.as.int64;
+        case VAL_F64:
+            return a.as.f64 == b.as.f64;
+        case VAL_STR:
+            return strcmp(a.as.str, b.as.str) == 0;
+        case VAL_BOOL:
+            return a.as.boolean == b.as.boolean;
+        case VAL_VOID:
+            return true;
+        default:
+            // For complex types, compare pointers
+            return a.as.list == b.as.list;
+    }
+}
+
+Set *set_new() {
+    Set *set = malloc(sizeof(Set));
+    if (!set) {
+        fprintf(stderr, "Error: Failed to allocate set\n");
+        exit(1);
+    }
+    set->capacity = 16;  // Start with capacity of 16
+    set->length = 0;
+    set->tombstones = 0;
+    set->entries = calloc(set->capacity, sizeof(SetEntry));
+    if (!set->entries) {
+        fprintf(stderr, "Error: Failed to allocate set entries\n");
+        exit(1);
+    }
+    return set;
+}
+
+// Find entry in hash table
+static SetEntry* set_find_entry(SetEntry *entries, int capacity, Value key) {
+    uint64_t hash = value_hash(key);
+    uint32_t index = (uint32_t)(hash % capacity);
+    SetEntry *tombstone = NULL;
+    
+    for (;;) {
+        SetEntry *entry = &entries[index];
+        
+        if (!entry->occupied) {
+            if (!entry->deleted) {
+                // Empty entry found
+                return tombstone != NULL ? tombstone : entry;
+            } else {
+                // Tombstone found
+                if (tombstone == NULL) tombstone = entry;
+            }
+        } else if (value_equals(entry->key, key)) {
+            // Key found
+            return entry;
+        }
+        
+        // Linear probing
+        index = (index + 1) % capacity;
+    }
+}
+
+// Resize the hash table
+static void set_resize(Set *set, int new_capacity) {
+    SetEntry *new_entries = calloc(new_capacity, sizeof(SetEntry));
+    if (!new_entries) {
+        fprintf(stderr, "Error: Failed to allocate new set entries\n");
+        exit(1);
+    }
+    
+    // Rehash all entries
+    set->length = 0;
+    set->tombstones = 0;
+    for (int i = 0; i < set->capacity; i++) {
+        SetEntry *entry = &set->entries[i];
+        if (!entry->occupied) continue;
+        
+        SetEntry *dest = set_find_entry(new_entries, new_capacity, entry->key);
+        dest->key = entry->key;
+        dest->occupied = true;
+        dest->deleted = false;
+        set->length++;
+    }
+    
+    free(set->entries);
+    set->entries = new_entries;
+    set->capacity = new_capacity;
+}
+
+bool set_add(Set *set, Value value) {
+    // Resize if load factor exceeds 0.75
+    if (set->length + set->tombstones + 1 > set->capacity * 0.75) {
+        set_resize(set, set->capacity * 2);
+    }
+    
+    SetEntry *entry = set_find_entry(set->entries, set->capacity, value);
+    bool is_new = !entry->occupied;
+    
+    if (is_new) {
+        if (entry->deleted) set->tombstones--;
+        entry->key = value_copy(value);
+        entry->occupied = true;
+        entry->deleted = false;
+        set->length++;
+    }
+    
+    return is_new;
+}
+
+bool set_remove(Set *set, Value value) {
+    if (set->length == 0) return false;
+    
+    SetEntry *entry = set_find_entry(set->entries, set->capacity, value);
+    if (!entry->occupied) return false;
+    
+    // Mark as tombstone
+    value_free(entry->key);
+    entry->occupied = false;
+    entry->deleted = true;
+    set->tombstones++;
+    set->length--;
+    return true;
+}
+
+bool set_contains(Set *set, Value value) {
+    if (set->length == 0) return false;
+    
+    SetEntry *entry = set_find_entry(set->entries, set->capacity, value);
+    return entry->occupied;
+}
+
+void set_free(Set *set) {
+    if (!set) return;
+    
+    for (int i = 0; i < set->capacity; i++) {
+        if (set->entries[i].occupied) {
+            value_free(set->entries[i].key);
+        }
+    }
+    free(set->entries);
+    free(set);
+}
+
 Value value_make_list() {
     Value v;
     v.type = VAL_LIST;
@@ -793,6 +1163,20 @@ Value value_wrap_list(List *list) {
     Value v;
     v.type = VAL_LIST;
     v.as.list = list;
+    return v;
+}
+
+Value value_make_set() {
+    Value v;
+    v.type = VAL_SET;
+    v.as.set = set_new();
+    return v;
+}
+
+Value value_wrap_set(Set *set) {
+    Value v;
+    v.type = VAL_SET;
+    v.as.set = set;
     return v;
 }
 
@@ -809,6 +1193,10 @@ void value_free(Value v) {
     else if (v.type == VAL_LIST && v.as.list)
     {
         list_free(v.as.list);
+    }
+    else if (v.type == VAL_SET && v.as.set)
+    {
+        set_free(v.as.set);
     }
     else if (v.type == VAL_STRUCT && v.as.struct_val)
     {
@@ -854,6 +1242,21 @@ Value value_copy(Value v)
         for (int i = 0; i < v.as.list->length; i++)
         {
             list_append(result.as.list, v.as.list->items[i]);
+        }
+        return result;
+    }
+    else if (v.type == VAL_SET)
+    {
+        // Deep copy set
+        Value result;
+        result.type = VAL_SET;
+        result.as.set = set_new();
+        for (int i = 0; i < v.as.set->capacity; i++)
+        {
+            if (v.as.set->entries[i].occupied)
+            {
+                set_add(result.as.set, v.as.set->entries[i].key);
+            }
         }
         return result;
     }
@@ -944,6 +1347,10 @@ void vm_init(VM *vm)
     vm->debug_current_func = strdup("<module>");
     vm->debug_line_map = NULL;
     vm->debug_line_map_count = 0;
+    
+    // Initialize performance optimizations
+    vm->arena = arena_create();
+    vm->string_intern = string_intern_create();
 
     // Initialize Python interpreter
     if (!Py_IsInitialized()) {
@@ -986,9 +1393,11 @@ void vm_free(VM *vm)
     // Free string values in code
     for (int i = 0; i < vm->code_count; i++)
     {
+        // Note: OP_CONST_STR operands are interned strings - don't free them
+        // They will be freed when string_intern is destroyed
         if (vm->code[i].op == OP_CONST_STR && vm->code[i].operand.str_val)
         {
-            free(vm->code[i].operand.str_val);
+            // Interned strings - don't free here
         }
         // Free TRY_BEGIN and RAISE operands
         else if ((vm->code[i].op == OP_TRY_BEGIN || vm->code[i].op == OP_RAISE) && vm->code[i].operand.str_val)
@@ -1009,16 +1418,12 @@ void vm_free(VM *vm)
         else if (vm->code[i].op == OP_CONST_STR_MULTI ||
                  vm->code[i].op == OP_LIST_NEW_STR)
         {
-            // Free each string in the array, then the array itself
+            // Free the MultiStr structure but not the interned strings
             if (vm->code[i].operand.ptr)
             {
                 MultiStr *multi = (MultiStr*)vm->code[i].operand.ptr;
-                for (int j = 0; j < multi->count; j++)
-                {
-                    if (multi->values[j])
-                        free(multi->values[j]);
-                }
-                free(multi);
+                // Strings are interned - don't free them
+                free(multi); // Just free the struct itself
             }
         }
     }
@@ -1037,6 +1442,12 @@ void vm_free(VM *vm)
     }
     if (vm->debug_line_map)
         free(vm->debug_line_map);
+    
+    // Free performance optimization structures
+    if (vm->arena)
+        arena_destroy(vm->arena);
+    if (vm->string_intern)
+        string_intern_destroy(vm->string_intern);
 
     // Finalize Python interpreter
     if (Py_IsInitialized()) {
@@ -1225,6 +1636,21 @@ void value_print(Value val)
         }
         printf("]");
         break;
+    case VAL_SET:
+        printf("{");
+        int count = 0;
+        for (int i = 0; i < val.as.set->capacity; i++)
+        {
+            if (val.as.set->entries[i].occupied)
+            {
+                if (count > 0)
+                    printf(", ");
+                value_print(val.as.set->entries[i].key);
+                count++;
+            }
+        }
+        printf("}");
+        break;
     case VAL_STRUCT:
         // Print struct in a simple format (can be improved)
         printf("<struct>");
@@ -1291,6 +1717,30 @@ Value value_to_string(Value val)
             value_free(str_val);
         }
         offset += sprintf(buffer + offset, "]");
+        result.as.str = strdup(buffer);
+        free(buffer);
+        break;
+    }
+    case VAL_SET:
+    {
+        // Build string representation of set
+        char *buffer = malloc(4096);
+        int offset = 0;
+        offset += sprintf(buffer + offset, "{");
+        int count = 0;
+        for (int i = 0; i < val.as.set->capacity; i++)
+        {
+            if (val.as.set->entries[i].occupied)
+            {
+                if (count > 0)
+                    offset += sprintf(buffer + offset, ", ");
+                Value str_val = value_to_string(val.as.set->entries[i].key);
+                offset += sprintf(buffer + offset, "%s", str_val.as.str);
+                value_free(str_val);
+                count++;
+            }
+        }
+        offset += sprintf(buffer + offset, "}");
         result.as.str = strdup(buffer);
         free(buffer);
         break;
@@ -2154,7 +2604,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     // Single CONST_STR - use original instruction
                     inst.op = OP_CONST_STR;
-                    inst.operand.str_val = strings[0];
+                    // Intern the string constant
+                    const char *interned = string_intern_add(vm->string_intern, strings[0]);
+                    free(strings[0]); // Free the duplicate
+                    inst.operand.str_val = (char*)interned; // Store interned pointer
                 }
                 else
                 {
@@ -2164,7 +2617,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     multi->count = count;
                     for (int j = 0; j < count; j++)
                     {
-                        multi->values[j] = strings[j];
+                        // Intern each string
+                        const char *interned = string_intern_add(vm->string_intern, strings[j]);
+                        free(strings[j]); // Free the duplicate
+                        multi->values[j] = (char*)interned; // Store interned pointer
                     }
                     inst.operand.ptr = multi;
                 }
@@ -2426,6 +2882,12 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_JUMP_IF_TRUE;
                 inst.operand.str_val = strdup(label);
             }
+            else if (strcmp(token, "GOTO_CALL") == 0)
+            {
+                char *label = strtok(NULL, " ");
+                inst.op = OP_GOTO_CALL;
+                inst.operand.str_val = strdup(label);
+            }
             else if (strcmp(token, "CALL") == 0)
             {
                 char *name = strtok(NULL, " ");
@@ -2466,6 +2928,18 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_LIST_LEN;
             else if (strcmp(token, "LIST_POP") == 0)
                 inst.op = OP_LIST_POP;
+            else if (strcmp(token, "SET_NEW") == 0)
+                inst.op = OP_SET_NEW;
+            else if (strcmp(token, "SET_ADD") == 0)
+                inst.op = OP_SET_ADD;
+            else if (strcmp(token, "SET_REMOVE") == 0)
+                inst.op = OP_SET_REMOVE;
+            else if (strcmp(token, "SET_CONTAINS") == 0)
+                inst.op = OP_SET_CONTAINS;
+            else if (strcmp(token, "SET_LEN") == 0)
+                inst.op = OP_SET_LEN;
+            else if (strcmp(token, "CONTAINS") == 0)
+                inst.op = OP_CONTAINS;
             else if (strcmp(token, "LIST_NEW_I64") == 0)
             {
                 // LIST_NEW_I64 count val1 val2 val3 ...
@@ -2684,6 +3158,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_STR_LOWER;
             else if (strcmp(token, "STR_STRIP") == 0)
                 inst.op = OP_STR_STRIP;
+            else if (strcmp(token, "ENCODE") == 0)
+                inst.op = OP_ENCODE;
+            else if (strcmp(token, "DECODE") == 0)
+                inst.op = OP_DECODE;
             else if (strcmp(token, "STR_SPLIT") == 0)
                 inst.op = OP_STR_SPLIT;
             else if (strcmp(token, "ABS") == 0)
@@ -2758,6 +3236,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_SOCKET_CLOSE;
             else if (strcmp(token, "SOCKET_SETSOCKOPT") == 0)
                 inst.op = OP_SOCKET_SETSOCKOPT;
+            else if (strcmp(token, "FORK") == 0)
+                inst.op = OP_FORK;
+            else if (strcmp(token, "WAIT") == 0)
+                inst.op = OP_WAIT;
             else if (strcmp(token, "STR_JOIN") == 0)
                 inst.op = OP_STR_JOIN;
             else if (strcmp(token, "STR_REPLACE") == 0)
@@ -3318,7 +3800,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
     for (int i = 0; i < vm->code_count; i++)
     {
         Instruction *inst = &vm->code[i];
-        if (inst->op == OP_JUMP || inst->op == OP_JUMP_IF_FALSE || inst->op == OP_JUMP_IF_TRUE)
+        if (inst->op == OP_JUMP || inst->op == OP_JUMP_IF_FALSE || inst->op == OP_JUMP_IF_TRUE || inst->op == OP_GOTO_CALL)
         {
             int func_index = vm_find_function_for_pc(vm, i);
             int target = vm_find_label(vm, inst->operand.str_val, func_index);
@@ -3439,6 +3921,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_JUMP] = &&L_JUMP,
         [OP_JUMP_IF_FALSE] = &&L_JUMP_IF_FALSE,
         [OP_JUMP_IF_TRUE] = &&L_JUMP_IF_TRUE,
+        [OP_GOTO_CALL] = &&L_GOTO_CALL,
         [OP_CALL] = &&L_CALL,
         [OP_RETURN] = &&L_RETURN,
         [OP_RETURN_VOID] = &&L_RETURN_VOID,
@@ -3512,6 +3995,12 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LIST_NEW_F64] = &&L_LIST_NEW_F64,
         [OP_LIST_NEW_STR] = &&L_LIST_NEW_STR,
         [OP_LIST_NEW_BOOL] = &&L_LIST_NEW_BOOL,
+        [OP_SET_NEW] = &&L_SET_NEW,
+        [OP_SET_ADD] = &&L_SET_ADD,
+        [OP_SET_REMOVE] = &&L_SET_REMOVE,
+        [OP_SET_CONTAINS] = &&L_SET_CONTAINS,
+        [OP_SET_LEN] = &&L_SET_LEN,
+        [OP_CONTAINS] = &&L_CONTAINS,
         [OP_STRUCT_NEW] = &&L_STRUCT_NEW,
         [OP_STRUCT_GET] = &&L_STRUCT_GET,
         [OP_STRUCT_SET] = &&L_STRUCT_SET,
@@ -3530,6 +4019,8 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_STR_SPLIT] = &&L_STR_SPLIT,
         [OP_STR_JOIN] = &&L_STR_JOIN,
         [OP_STR_REPLACE] = &&L_STR_REPLACE,
+        [OP_ENCODE] = &&L_ENCODE,
+        [OP_DECODE] = &&L_DECODE,
         [OP_FILE_OPEN] = &&L_FILE_OPEN,
         [OP_FILE_READ] = &&L_FILE_READ,
         [OP_FILE_WRITE] = &&L_FILE_WRITE,
@@ -3559,6 +4050,8 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_SOCKET_RECV] = &&L_SOCKET_RECV,
         [OP_SOCKET_CLOSE] = &&L_SOCKET_CLOSE,
         [OP_SOCKET_SETSOCKOPT] = &&L_SOCKET_SETSOCKOPT,
+        [OP_FORK] = &&L_FORK,
+        [OP_WAIT] = &&L_WAIT,
         [OP_PY_IMPORT] = &&L_PY_IMPORT,
         [OP_PY_CALL] = &&L_PY_CALL,
         [OP_PY_GETATTR] = &&L_PY_GETATTR,
@@ -3987,6 +4480,24 @@ L_JUMP_IF_TRUE: // OP_JUMP_IF_TRUE
         DISPATCH();
     }
 }
+L_GOTO_CALL: // OP_GOTO_CALL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    {
+        // Save current position as return address but don't create a full call frame
+        // We'll use a lightweight call frame that just tracks the return PC
+        CallFrame *frame = &vm->call_stack[vm->call_stack_top++];
+        frame->func = current_frame->func; // Same function context
+        frame->return_pc = vm->pc; // Save return address
+        frame->vars.var_count = 0; // No local variables for goto
+        
+        // Jump to the label
+        vm->pc = inst.operand.int64;
+        
+        // Don't update current_frame since we're staying in the same function context
+        DISPATCH();
+    }
+}
 L_CALL: // OP_CALL
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -4110,6 +4621,10 @@ L_BUILTIN_LEN: // OP_BUILTIN_LEN
         else if (v.type == VAL_LIST)
         {
             vm_push(vm, value_make_int_si(v.as.list->length));
+        }
+        else if (v.type == VAL_SET)
+        {
+            vm_push(vm, value_make_int_si(v.as.set->length));
         }
         value_free(v);
         DISPATCH();
@@ -5464,6 +5979,120 @@ L_LIST_POP: // OP_LIST_POP
     DISPATCH();
 }
 
+// Set operations
+L_SET_NEW: // OP_SET_NEW
+{
+    vm_push(vm, value_make_set());
+    DISPATCH();
+}
+
+L_SET_ADD: // OP_SET_ADD
+{
+    Value value = vm_pop(vm);
+    Value set_val = vm_pop(vm);
+
+    if (set_val.type != VAL_SET)
+    {
+        fprintf(stderr, "Error: Cannot add to non-set type\n");
+        exit(1);
+    }
+
+    set_add(set_val.as.set, value);
+    value_free(value);
+    vm_push(vm, set_val);
+    DISPATCH();
+}
+
+L_SET_REMOVE: // OP_SET_REMOVE
+{
+    Value value = vm_pop(vm);
+    Value set_val = vm_pop(vm);
+
+    if (set_val.type != VAL_SET)
+    {
+        fprintf(stderr, "Error: Cannot remove from non-set type\n");
+        exit(1);
+    }
+
+    set_remove(set_val.as.set, value);
+    value_free(value);
+    vm_push(vm, set_val);
+    DISPATCH();
+}
+
+L_SET_CONTAINS: // OP_SET_CONTAINS
+{
+    Value value = vm_pop(vm);
+    Value set_val = vm_pop(vm);
+
+    if (set_val.type != VAL_SET)
+    {
+        fprintf(stderr, "Error: Cannot check containment in non-set type\n");
+        exit(1);
+    }
+
+    bool contains = set_contains(set_val.as.set, value);
+    value_free(value);
+    value_free(set_val);
+    vm_push(vm, value_make_bool(contains));
+    DISPATCH();
+}
+
+L_SET_LEN: // OP_SET_LEN
+{
+    Value set_val = vm_pop(vm);
+
+    if (set_val.type != VAL_SET)
+    {
+        fprintf(stderr, "Error: Cannot get length of non-set type\n");
+        exit(1);
+    }
+
+    Value result = value_make_int_si(set_val.as.set->length);
+    value_free(set_val);
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_CONTAINS: // OP_CONTAINS - Generic membership check
+{
+    Value value = vm_pop(vm);
+    Value container = vm_pop(vm);
+    bool contains = false;
+
+    if (container.type == VAL_LIST)
+    {
+        // Check if value is in list
+        for (int i = 0; i < container.as.list->length; i++)
+        {
+            if (value_equals(container.as.list->items[i], value))
+            {
+                contains = true;
+                break;
+            }
+        }
+    }
+    else if (container.type == VAL_SET)
+    {
+        contains = set_contains(container.as.set, value);
+    }
+    else if (container.type == VAL_STR && value.type == VAL_STR)
+    {
+        // Check if substring exists
+        contains = (strstr(container.as.str, value.as.str) != NULL);
+    }
+    else
+    {
+        fprintf(stderr, "Error: Cannot check membership in type\n");
+        exit(1);
+    }
+
+    value_free(value);
+    value_free(container);
+    vm_push(vm, value_make_bool(contains));
+    DISPATCH();
+}
+
 L_LIST_NEW_I64: // OP_LIST_NEW_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -5978,6 +6607,46 @@ L_STR_REPLACE: // OP_STR_REPLACE - Replace substring (str, old, new -> str)
     value_free(old_str);
     value_free(new_str);
     vm_push(vm, value_make_str(result));
+    DISPATCH();
+}
+
+L_ENCODE: // OP_ENCODE - Encode string to bytes (str, encoding -> str)
+{
+    Value encoding = vm_pop(vm);
+    Value str = vm_pop(vm);
+
+    if (str.type != VAL_STR || encoding.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: encode() expects (string, string)\n");
+        value_free(str);
+        value_free(encoding);
+        exit(1);
+    }
+
+    // In C runtime, strings are already UTF-8 bytes, so this is a no-op
+    // Just free the encoding parameter and keep the string
+    value_free(encoding);
+    vm_push(vm, str);
+    DISPATCH();
+}
+
+L_DECODE: // OP_DECODE - Decode bytes to string (str, encoding -> str)
+{
+    Value encoding = vm_pop(vm);
+    Value str = vm_pop(vm);
+
+    if (str.type != VAL_STR || encoding.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: decode() expects (string, string)\n");
+        value_free(str);
+        value_free(encoding);
+        exit(1);
+    }
+
+    // In C runtime, strings are already UTF-8, so this is a no-op
+    // Just free the encoding parameter and keep the string
+    value_free(encoding);
+    vm_push(vm, str);
     DISPATCH();
 }
 
@@ -6766,6 +7435,22 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
     value_free(level_val);
     value_free(option_val);
     value_free(value_val);
+    DISPATCH();
+}
+
+L_FORK: // OP_FORK - Fork process (-> pid)
+{
+    pid_t pid = fork();
+    vm_push(vm, value_make_int_si((int64_t)pid));
+    DISPATCH();
+}
+
+L_WAIT: // OP_WAIT - Wait for child process (-> status)
+{
+    int status = 0;
+    wait(&status);
+    // Return the exit status
+    vm_push(vm, value_make_int_si((int64_t)WEXITSTATUS(status)));
     DISPATCH();
 }
 

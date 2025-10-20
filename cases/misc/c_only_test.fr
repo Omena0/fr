@@ -1,0 +1,5 @@
+// @c-only !Hello from C VM
+
+void main() {
+    println("Hello from C VM")
+}

@@ -106,13 +106,33 @@ def main():
     # Replace the expectation line with a blank line so line numbers match the file
     code = '\n' + lines[1] if lines[1] else '\n'
 
+    # Check for runtime-specific test markers
+    runtime_filter = None  # None means run on both, 'python' or 'c' for specific
+    if '@python-only' in expect_line or '@python' in expect_line:
+        runtime_filter = 'python'
+    elif '@c-only' in expect_line or '@c' in expect_line:
+        runtime_filter = 'c'
+
     # Extract expectation
     expect = expect_line.replace('//', '').strip()
+    # Remove runtime markers from expectation
+    expect = expect.replace('@python-only', '').replace('@python', '').replace('@c-only', '').replace('@c', '').strip()
+
     is_output_test = expect.startswith('!')
-    if is_output_test:
-        expect = expect[1:].strip().replace('\\n', '\n')
+
+    # Split by || to get alternative expected outputs first
+    if '||' in expect:
+        expect_alternatives = [e.strip() for e in expect.split('||')]
+        # Remove ! from each alternative if this is an output test
+        if is_output_test:
+            expect_alternatives = [e[1:].strip().replace('\\n', '\n') if e.startswith('!') else e.strip().replace('\\n', '\n') for e in expect_alternatives]
+        expect = expect_alternatives[0]  # Use first alternative as primary
     else:
-        expect = expect.rstrip('.')
+        if is_output_test:
+            expect = expect[1:].strip().replace('\\n', '\n')
+        else:
+            expect = expect.rstrip('.')
+        expect_alternatives = [expect]
 
     # Special case: if expect is "none", test passes if parsing succeeds
     # Don't run the code to avoid timeouts from infinite loops
@@ -148,105 +168,117 @@ def main():
         print(f"IS_OUTPUT:{is_output_test}")
         return 0
 
-    # Run on Python runtime
-    old_stdout = sys.stdout
-    string_io = StringIO()
-    sys.stdout = string_io
-    py_error = None
-    try:
-        run(ast, file=test_filename, source=code)
-        py_output = string_io.getvalue().strip()
-    except Exception as e:
+    # Run on Python runtime (unless filtered out)
+    if runtime_filter != 'c':
+        old_stdout = sys.stdout
+        string_io = StringIO()
+        sys.stdout = string_io
+        py_error = None
+        try:
+            run(ast, file=test_filename, source=code)
+            py_output = string_io.getvalue().strip()
+        except Exception as e:
+            py_output = None
+            # Format runtime errors properly
+            if isinstance(e, RuntimeError):
+                formatted_error = format_runtime_exception(e)
+                # Extract the message in ?line:message format
+                py_error = extract_error_message(formatted_error)
+            else:
+                py_error = str(e)
+        finally:
+            sys.stdout = old_stdout
+    else:
+        # Skip Python runtime for C-only tests
         py_output = None
-        # Format runtime errors properly
-        if isinstance(e, RuntimeError):
-            formatted_error = format_runtime_exception(e)
-            # Extract the message in ?line:message format
-            py_error = extract_error_message(formatted_error)
-        else:
-            py_error = str(e)
-    finally:
-        sys.stdout = old_stdout
+        py_error = "SKIPPED"
 
-    # Run on C VM runtime
+    # Run on C VM runtime (unless filtered out)
     vm_error = None
     vm_output = None
-    try:
-        bytecode, line_map = compile_ast_to_bytecode(ast)
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
-            bc_file = f.name
-            f.write(bytecode)
-
-        # Try to find VM path
-        vm_path = None
-        # Try new package location
+    if runtime_filter != 'python':
         try:
-            import importlib.util
-            spec = importlib.util.find_spec('runtime')
-            if spec and spec.origin:
+            bytecode, line_map = compile_ast_to_bytecode(ast)
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
+                bc_file = f.name
+                f.write(bytecode)
+
+            # Try to find VM path
+            vm_path = None
+            # Try new package location
+            try:
+                import importlib.util
+                spec = importlib.util.find_spec('runtime')
+                if spec and spec.origin:
+                    from pathlib import Path
+                    runtime_pkg_path = Path(spec.origin).parent
+                    vm_candidate = runtime_pkg_path / 'vm'
+                    if vm_candidate.exists():
+                        vm_path = str(vm_candidate)
+            except (ImportError, AttributeError):
+                pass
+
+            # Fall back to development locations
+            if not vm_path:
                 from pathlib import Path
-                runtime_pkg_path = Path(spec.origin).parent
-                vm_candidate = runtime_pkg_path / 'vm'
-                if vm_candidate.exists():
-                    vm_path = str(vm_candidate)
-        except (ImportError, AttributeError):
-            pass
+                vm_candidate = Path('runtime/vm')
+                vm_path = str(vm_candidate) if vm_candidate.exists() else 'runtime/vm'
+            # Prepare debug info for VM
+            import json
+            debug_info = json.dumps({
+                'file': test_filename,
+                'source': code,
+                'line_map': line_map
+            })
 
-        # Fall back to development locations
-        if not vm_path:
-            from pathlib import Path
-            vm_candidate = Path('runtime/vm')
-            vm_path = str(vm_candidate) if vm_candidate.exists() else 'runtime/vm'
-        # Prepare debug info for VM
-        import json
-        debug_info = json.dumps({
-            'file': test_filename,
-            'source': code,
-            'line_map': line_map
-        })
+            result = subprocess.run(
+                [vm_path, '--debug-info', bc_file],
+                input=debug_info,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
 
-        result = subprocess.run(
-            [vm_path, '--debug-info', bc_file],
-            input=debug_info,
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+            os.unlink(bc_file)
 
-        os.unlink(bc_file)
+            # Capture output even if program crashes (e.g., stack overflow after main returns)
+            vm_output = result.stdout.strip() if result.stdout else ""
 
-        # Capture output even if program crashes (e.g., stack overflow after main returns)
-        vm_output = result.stdout.strip() if result.stdout else ""
+            if result.returncode != 0:
+                stderr_text = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
+                # Extract the error message from stderr
+                vm_error = extract_error_message(stderr_text)
 
-        if result.returncode != 0:
-            stderr_text = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
-            # Extract the error message from stderr
-            vm_error = extract_error_message(stderr_text)
-            
-            # If there's an error in stderr (exception, runtime error), discard partial stdout
-            # to match Python runtime behavior where exceptions override partial output
-            if stderr_text and "Exception:" in stderr_text:
-                vm_output = None
-            # If we don't have valid output and no exception, mark as None
-            elif not vm_output:
-                vm_output = None
-    except subprocess.TimeoutExpired:
-        vm_error = "Timeout"
+                # If there's an error in stderr (exception, runtime error), discard partial stdout
+                # to match Python runtime behavior where exceptions override partial output
+                if (stderr_text and "Exception:" in stderr_text or not vm_output):
+                    vm_output = None
+
+        except subprocess.TimeoutExpired:
+            vm_error = "Timeout"
+            vm_output = None
+        except Exception as e:
+            vm_error = str(e)
+            vm_output = None
+    else:
+        # Skip C VM runtime for python-only tests
         vm_output = None
-    except Exception as e:
-        vm_error = str(e)
-        vm_output = None
+        vm_error = "SKIPPED"
 
     # Output results
-    if py_error:
+    if py_error and py_error != "SKIPPED":
         print(f"PY_ERROR:{py_error}")
-    else:
+    elif py_error != "SKIPPED":
         print(f"PY_OUTPUT:{py_output if py_output is not None else ''}")
+    # Don't output PY results if skipped
 
     # For VM: prioritize output over error if we have valid output
     # This handles cases where program outputs correctly but crashes during cleanup
-    if vm_output is not None:
+    if vm_error == "SKIPPED":
+        # Don't output VM results if skipped
+        pass
+    elif vm_output is not None:
         # Has output (could be empty string)
         print(f"VM_OUTPUT:{vm_output}")
     elif vm_error:
@@ -254,9 +286,10 @@ def main():
         print(f"VM_ERROR:{vm_error}")
     else:
         # No output and no error
-        print(f"VM_OUTPUT:")
+        print("VM_OUTPUT:")
 
     print(f"EXPECT:{expect}")
+    print(f"EXPECT_ALTERNATIVES:{'||'.join(expect_alternatives)}")
     print(f"IS_OUTPUT:{is_output_test}")
     return 0
 

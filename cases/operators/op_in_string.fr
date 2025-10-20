@@ -1,0 +1,18 @@
+// !yes
+// !no
+
+void main() {
+    str s = "hello world"
+    
+    // Test positive case
+    if ("world" in s) {
+        println("yes")
+    }
+    
+    // Test negative case
+    if ("foo" in s) {
+        println("no")
+    } else {
+        println("no")
+    }
+}

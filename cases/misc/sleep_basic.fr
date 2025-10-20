@@ -1,0 +1,8 @@
+// !Before sleep\nAfter sleep
+// Test: sleep basic
+
+void main() {
+    println("Before sleep")
+    sleep(0.1)
+    println("After sleep")
+}

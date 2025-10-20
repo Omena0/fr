@@ -1,0 +1,6 @@
+// !{hello, world} || !{world, hello}
+
+void main() {
+    set s = {"hello", "world"}
+    println(str(s))
+}

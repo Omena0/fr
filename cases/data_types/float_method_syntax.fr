@@ -1,0 +1,8 @@
+// !4.0
+// Test method call syntax on float
+
+void main() {
+    float x = 16.0
+    float result = x.sqrt()
+    println(result)
+}

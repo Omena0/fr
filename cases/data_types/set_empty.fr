@@ -1,0 +1,6 @@
+// !{}
+
+void main() {
+    set s = {}
+    println(str(s))
+}
