@@ -1,0 +1,33 @@
+{
+    "native": {
+        "enabled": true,
+        "timeout": 10,
+        "ignore": [
+            "runtime_errors",
+            "syntax_errors",
+            "python_interop",
+            "runtime",
+            "error_handling"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    },
+    "c": {
+        "enabled": true,
+        "timeout": 5,
+        "ignore": [
+            "syntax_errors"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    },
+    "py": {
+        "enabled": true,
+        "timeout": 10,
+        "ignore": [
+            "runtime"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    }
+}

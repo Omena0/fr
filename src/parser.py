@@ -986,10 +986,19 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
     # Try to evaluate at parse time if possible
     if _can_eval_at_parse_time(func, arg_values):
         value = _eval_func_at_parse_time(name, func, arg_values)
-        node = make_node(stream,
-            type=get_type(value),
-            value=value
-        )
+        # For void functions that return None, still create a CALL node for runtime execution
+        if value is None and func.get('return_type') == 'void':
+            node = make_node(stream,
+                type="call",
+                name=name,
+                args=arg_values,
+                return_type="void"
+            )
+        else:
+            node = make_node(stream,
+                type=get_type(value),
+                value=value
+            )
         node['line'] = call_line
         return node
 

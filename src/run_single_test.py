@@ -10,6 +10,9 @@ import tempfile
 import subprocess
 from io import StringIO
 
+# Save original argv before modifying it
+original_argv = sys.argv.copy()
+
 # Setup paths
 sys.path.insert(0, 'src')
 sys.argv = [sys.argv[0], '-d']  # Enable debug mode
@@ -18,6 +21,7 @@ sys.argv = [sys.argv[0], '-d']  # Enable debug mode
 from parser import parse
 from compiler import compile_ast_to_bytecode
 from runtime import run, format_runtime_exception
+from native import compile as compile_to_native, create_minimal_runtime
 
 def extract_error_message(error_text):
     """Extract and normalize error message to match expected format"""
@@ -90,7 +94,12 @@ def extract_error_message(error_text):
 
 def main():
     # Filename can be passed as first argument
-    test_filename = sys.argv[1] if len(sys.argv) > 1 else ''
+    test_filename = original_argv[1] if len(original_argv) > 1 else ''
+
+    # Check for skip flags
+    skip_py = '--skip-py' in original_argv
+    skip_c = '--skip-c' in original_argv
+    skip_native = '--skip-native' in original_argv
 
     # Test content is read from stdin
     content = sys.stdin.read()
@@ -139,9 +148,10 @@ def main():
     if expect.lower() == 'none' and not is_output_test:
         try:
             ast = parse(code)
-            # Parse succeeded - both runtimes pass
+            # Parse succeeded - all runtimes pass
             print("PY_OUTPUT:none")
             print("VM_OUTPUT:none")
+            print("NATIVE_OUTPUT:none")
             print("EXPECT:none")
             print("IS_OUTPUT:False")
             return 0
@@ -149,6 +159,7 @@ def main():
             err_msg = extract_error_message(str(e))
             print(f"PY_ERROR:{err_msg}")
             print(f"VM_ERROR:{err_msg}")
+            print(f"NATIVE_ERROR:{err_msg}")
             print("EXPECT:none")
             print("IS_OUTPUT:False")
             return 0
@@ -164,16 +175,18 @@ def main():
         # This matches old test runner behavior where parse errors are compared with expected
         print(f"PY_OUTPUT:{err_msg}")
         print(f"VM_OUTPUT:{err_msg}")
+        print(f"NATIVE_OUTPUT:{err_msg}")
         print(f"EXPECT:{expect}")
         print(f"IS_OUTPUT:{is_output_test}")
         return 0
 
-    # Run on Python runtime (unless filtered out)
-    if runtime_filter != 'c':
+    # Run on Python runtime (unless filtered out or skipped)
+    py_error = None
+    py_output = None
+    if runtime_filter != 'c' and not skip_py:
         old_stdout = sys.stdout
         string_io = StringIO()
         sys.stdout = string_io
-        py_error = None
         try:
             run(ast, file=test_filename, source=code)
             py_output = string_io.getvalue().strip()
@@ -189,14 +202,14 @@ def main():
         finally:
             sys.stdout = old_stdout
     else:
-        # Skip Python runtime for C-only tests
+        # Skip Python runtime for C-only tests or if --skip-py was specified
         py_output = None
         py_error = "SKIPPED"
 
-    # Run on C VM runtime (unless filtered out)
+    # Run on C VM runtime (unless filtered out or skipped)
     vm_error = None
     vm_output = None
-    if runtime_filter != 'python':
+    if runtime_filter != 'python' and not skip_c:
         try:
             bytecode, line_map = compile_ast_to_bytecode(ast)
 
@@ -266,6 +279,92 @@ def main():
         vm_output = None
         vm_error = "SKIPPED"
 
+    # Run on native compiler (unless skipped)
+    native_error = None
+    native_output = None
+    if not skip_native:
+        try:
+            # Compile to bytecode (reuse from VM compilation)
+            bytecode, line_map = compile_ast_to_bytecode(ast)
+
+            # Compile bytecode to x86_64 assembly
+            assembly, runtime_deps = compile_to_native(bytecode, optimize=False)
+
+            # Create minimal runtime with only needed functions
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+                runtime_file = f.name
+            
+            create_minimal_runtime(runtime_deps, runtime_file)
+
+            # Write assembly to temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.s', delete=False) as f:
+                asm_file = f.name
+                f.write(assembly)
+
+            # Find runtime library header (for compilation)
+            from pathlib import Path
+            runtime_h = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.h'
+            runtime_include_dir = str(runtime_h.parent)
+
+            # Compile assembly and runtime to binary using gcc
+            with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
+                native_bin = f.name
+
+            compile_cmd = ['gcc', '-I' + runtime_include_dir, '-o', native_bin, asm_file, runtime_file, '-lm', '-no-pie']
+
+            result = subprocess.run(
+                compile_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                native_error = extract_error_message(result.stderr)
+                native_output = None
+            else:
+                # Run the compiled binary
+                result = subprocess.run(
+                    [native_bin],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+
+                native_output = result.stdout.strip() if result.stdout else ""
+
+                if result.returncode != 0:
+                    stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
+                    native_error = extract_error_message(stderr_text)
+
+                    # If there's an error in stderr, discard partial stdout to match Python runtime behavior
+                    if stderr_text and not native_output:
+                        native_output = None
+
+                # Clean up binary
+                try:
+                    os.unlink(native_bin)
+                except:
+                    pass
+
+            # Clean up temporary files
+            try:
+                os.unlink(asm_file)
+                os.unlink(runtime_file)
+            except:
+                pass
+
+        except subprocess.TimeoutExpired:
+            native_error = "Timeout"
+            native_output = None
+        except Exception as e:
+            native_error = str(e)
+            native_output = None
+    else:
+        # Skip native compiler if requested
+        native_output = None
+        native_error = "SKIPPED"
+
     # Output results
     if py_error and py_error != "SKIPPED":
         print(f"PY_ERROR:{py_error}")
@@ -287,6 +386,20 @@ def main():
     else:
         # No output and no error
         print("VM_OUTPUT:")
+
+    # For native: prioritize output over error if we have valid output
+    if native_error == "SKIPPED":
+        # Don't output native results if skipped
+        pass
+    elif native_output is not None:
+        # Has output (could be empty string)
+        print(f"NATIVE_OUTPUT:{native_output}")
+    elif native_error:
+        # Has error and no output
+        print(f"NATIVE_ERROR:{native_error}")
+    else:
+        # No output and no error
+        print("NATIVE_OUTPUT:")
 
     print(f"EXPECT:{expect}")
     print(f"EXPECT_ALTERNATIVES:{'||'.join(expect_alternatives)}")
