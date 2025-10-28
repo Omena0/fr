@@ -1737,10 +1737,25 @@ class X86Compiler:
         self.emit("push rax")
 
     def _compile_contains(self, args: List[str]):
-        """Check if list/string contains value"""
+        """Check if list/string/set contains value"""
+        # Before we pop, check the container type
+        # Stack should be: [..., container, value] with value on top
+        # So container type is at stack_types[-2]
+        container_type = 'i64'  # default
+        if len(self.stack_types) >= 2:
+            container_type = self.stack_types[-2]
+        
         self.emit("pop rsi   # value")
-        self.emit("pop rdi   # list/string")
-        self.emit_runtime_call("runtime_contains")
+        self.emit("pop rdi   # list/string/set")
+        
+        # Determine which runtime function to call based on container type
+        if container_type == 'set':
+            self.emit_runtime_call("runtime_set_contains")
+        elif container_type == 'str':
+            self.emit_runtime_call("runtime_str_contains")
+        else:  # Default to list
+            self.emit_runtime_call("runtime_contains")
+        
         self.emit("push rax   # bool result")
         # Pop value and container, push bool result
         if len(self.stack_types) >= 2:
@@ -2163,48 +2178,22 @@ def create_minimal_runtime(runtime_deps: set, output_path: str|None = None) -> s
                     all_needed.add(dep_func)
                     to_check.append(dep_func)
 
-    # Analyze which includes are needed by the functions
-    all_func_code = '\n'.join(functions[fn] for fn in all_needed if fn in functions)
-    needed_includes = set()
-    
-    # Map includes to their likely usage patterns
-    include_patterns = {
-        '#include <stdio.h>': ['printf', 'scanf', 'fprintf', 'sprintf'],
-        '#include <stdlib.h>': ['malloc', 'free', 'calloc', 'atoi', 'exit'],
-        '#include <string.h>': ['strlen', 'strcmp', 'strcpy', 'memcpy', 'memset', 'strstr', 'strdup', 'strtok'],
-        '#include <math.h>': ['sin', 'cos', 'sqrt', 'pow', 'tan', 'floor', 'ceil', 'round', 'fabs', 'fmod', 'exp', 'log'],
-        '#include <ctype.h>': ['isalpha', 'isdigit', 'toupper', 'tolower'],
-        '#include "runtime_lib.h"': [''],  # Always needed for type defs
-    }
-
-    # Check which includes are used
-    for include_line, patterns in include_patterns.items():
-        if include_line == '#include "runtime_lib.h"':
-            needed_includes.add(include_line)
-        else:
-            for pattern in patterns:
-                if pattern and pattern in all_func_code:
-                    needed_includes.add(include_line)
-                    break
-    
-    # Rebuild includes section with only needed ones
+    # Build minimal runtime with all necessary includes
+    # GCC will optimize away unused functions during linking
     filtered_includes = [line for line in file_header]
     filtered_includes.append('')
     
-    # Add the runtime header first
-    if '#include "runtime_lib.h"' in needed_includes:
-        filtered_includes.append('#include "runtime_lib.h"')
-    
-    # Add system headers in standard order
-    for include in sorted(needed_includes):
-        if include != '#include "runtime_lib.h"':
-            filtered_includes.append(include)
+    # Include the runtime header first
+    filtered_includes.append('#include "runtime_lib.h"')
+    filtered_includes.append('#include <stdio.h>')
+    filtered_includes.append('#include <stdlib.h>')
+    filtered_includes.append('#include <string.h>')
+    filtered_includes.append('#include <math.h>')
+    filtered_includes.append('#include <ctype.h>')
 
     # Build minimal runtime with only needed functions
     minimal_parts = filtered_includes
-    minimal_parts.append('')
-
-    # Add all needed functions (use all_needed instead of runtime_deps)
+    minimal_parts.append('')    # Add all needed functions (use all_needed instead of runtime_deps)
     for func_name in sorted(all_needed):
         if func_name in functions:
             minimal_parts.extend((functions[func_name], '\n'))
