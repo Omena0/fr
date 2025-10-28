@@ -2166,7 +2166,7 @@ def create_minimal_runtime(runtime_deps: set, output_path: str|None = None) -> s
         '#include <stdio.h>': ['printf', 'scanf', 'fprintf', 'sprintf'],
         '#include <stdlib.h>': ['malloc', 'free', 'calloc', 'atoi', 'exit'],
         '#include <string.h>': ['strlen', 'strcmp', 'strcpy', 'memcpy', 'memset', 'strstr'],
-        '#include <math.h>': ['sin', 'cos', 'sqrt', 'pow', 'tan', 'floor', 'ceil'],
+        '#include <math.h>': ['sin', 'cos', 'sqrt', 'pow', 'tan', 'floor', 'ceil', 'round', 'fabs', 'fmod', 'exp', 'log'],
         '#include <ctype.h>': ['isalpha', 'isdigit', 'toupper', 'tolower'],
         '#include "runtime_lib.h"': [''],  # Always needed for type defs
     }

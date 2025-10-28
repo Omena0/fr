@@ -633,7 +633,13 @@ void runtime_sleep(double seconds) {
 
 void runtime_assert(bool condition, const char* message) {
     if (!condition) {
-        fprintf(stderr, "Assertion failed: %s\n", message ? message : "(no message)");
+        if (message && message[0] != '\0') {
+            // If message is provided, just print it
+            printf("%s\n", message);
+        } else {
+            // If no message, print default message to stderr
+            fprintf(stderr, "Assertion failed\n");
+        }
         exit(1);
     }
 }
