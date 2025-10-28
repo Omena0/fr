@@ -240,6 +240,131 @@ def decode_cmd(args):
 
     print(f"Decoded to JSON: {output_file}")
 
+def native_cmd(args):
+    """Compile bytecode to x86_64 native binary"""
+    if len(args) < 1:
+        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--minimal]")
+        print("  -a, --asm:  Keep assembly file")
+        print("  --minimal:  Use static linking with syscalls (smaller, no libc)")
+        sys.exit(1)
+
+    input_file = args[0]
+    keep_asm = '-a' in args or '--asm' in args
+    use_minimal = '--minimal' in args or '-min' in args or '-m' in args
+
+    # Determine output filename
+    if '-o' in args:
+        output_idx = args.index('-o') + 1
+        output_base = args[output_idx] if output_idx < len(args) else 'out'
+    else:
+        output_base = 'out'
+
+    asm_file = output_base if output_base.endswith('.asm') else f'{output_base}.asm'
+    exe_file = output_base.replace('.asm', '').replace('.s', '')
+
+    # Ensure input is bytecode
+    file_type = detect_file_type(input_file)
+    if file_type != 'bytecode':
+        print(f"Error: Input must be bytecode file (.bc), got {file_type}")
+        sys.exit(1)
+
+    # Read bytecode
+    with open(input_file, 'r') as f:
+        bytecode = f.read()
+
+    # Compile to x86_64
+    try:
+        import native
+        asm, runtime_deps = native.compile(bytecode)
+
+        # Always write assembly to temp file for building
+        with open(asm_file, 'w') as f:
+            f.write(asm)
+
+        if keep_asm:
+            print(f"Compiled to x86_64 assembly: {asm_file}")
+
+        # When using minimal syscall runtime, remove the entry stub (_start)
+        if use_minimal:
+            with open(asm_file, 'r') as f:
+                lines = f.readlines()
+
+            result_lines = []
+            skip_until_section = False
+            for i, line in enumerate(lines):
+                # Replace .global _start with .global main
+                if line.strip() == '.global _start':
+                    result_lines.append(line.replace('_start', 'main'))
+                    continue
+                # Find and remove the _start stub that was generated
+                if line.strip() == '_start:' and i > 50:  # After main() function
+                    skip_until_section = True
+                    continue
+                # Stop skipping when we hit the next section
+                if skip_until_section and line.startswith('.section'):
+                    skip_until_section = False
+                if skip_until_section:
+                    continue
+                result_lines.append(line)
+
+            with open(asm_file, 'w') as f:
+                f.writelines(result_lines)
+
+        # Build binary by default
+        try:
+            # Assemble to object file
+            obj_file = asm_file.replace('.s', '.o').replace('.asm', '.o')
+            subprocess.run(['as', asm_file, '-o', obj_file], check=True, 
+                         capture_output=True)
+
+            # Create minimal runtime library with only needed functions
+            runtime_lib = native.create_minimal_runtime(runtime_deps)
+            runtime_dir = os.path.dirname(os.path.abspath(runtime_lib))
+            
+            if use_minimal:
+                # Use selective C runtime with aggressive size optimization for static linking
+                gcc_flags = [
+                    'gcc', obj_file, str(runtime_lib), '-o', exe_file,
+                    f'-I{runtime_dir}',
+                    '-Oz', '-march=native', '-flto',
+                    '-ffunction-sections', '-fdata-sections',
+                    '-Wl,--gc-sections', '-Wl,-z,noseparate-code', '-s',
+                    '-static', '-no-pie',
+                    '-fno-asynchronous-unwind-tables', '-fno-unwind-tables'
+                ]
+            else:
+                # Use full minimal runtime with dynamic linking
+                gcc_flags = [
+                    'gcc', obj_file, str(runtime_lib), '-o', exe_file,
+                    f'-I{runtime_dir}',
+                    '-Os', '-march=native', '-flto',
+                    '-ffunction-sections', '-fdata-sections',
+                    '-Wl,--gc-sections', '-s',
+                    '-lm', '-no-pie'
+                ]
+
+            # Build native binary executable
+            subprocess.run(gcc_flags, check=True, capture_output=True)
+
+            print(f"Built executable: {exe_file}")
+
+            # Clean up intermediate files
+            os.remove(obj_file)
+            if not keep_asm:
+                os.remove(asm_file)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Build error: {e}")
+            if e.stderr:
+                print(e.stderr.decode())
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"Compilation error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
 def main():
     """Main CLI entry point"""
     if len(sys.argv) < 2:
@@ -252,6 +377,7 @@ def main():
         print("                                --debug: Run in debug mode (for debugger)")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file.fr|ast.json|ast.bin> [-o out.bc] - Compile to bytecode")
+        print("  fr native <file.bc> [-o out] [-a|--asm] [--minimal] - Compile bytecode to native binary")
         print("  fr run <file>                   - Run file (auto-detect type)")
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")
@@ -264,6 +390,8 @@ def main():
         parse_cmd(args)
     elif cmd == 'compile':
         compile_cmd(args)
+    elif cmd == 'native':
+        native_cmd(args)
     elif cmd == 'run':
         run_cmd(args)
     elif cmd == 'encode':

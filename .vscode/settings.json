@@ -6,7 +6,7 @@
         "**/cases/**"
     ],
     "C_Cpp.errorSquiggles": "disabled",
-    "python.defaultInterpreterPath": "/home/omena0/Github/lang2/.venv/bin/python",
+    "python.defaultInterpreterPath": "/home/omena0/Github/frscript/.venv/bin/python",
     "files.associations": {
         "*.toml": "toml",
         "LICENCE": "plaintext",

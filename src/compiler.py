@@ -516,6 +516,8 @@ class BytecodeCompiler:
                     '*': f'MUL{type_suffix}',  # Support literal '*' operator
                     'Div': f'DIV{type_suffix}',
                     '/': f'DIV{type_suffix}',  # Support literal '/' operator
+                    'Pow': 'POW',
+                    '**': 'POW',  # Support literal '**' operator
                     'Mod': 'MOD_I64',
                     '%': 'MOD_I64',  # Support literal '%' operator
                     'Eq': 'CMP_EQ',

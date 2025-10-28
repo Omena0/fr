@@ -19,7 +19,7 @@ If adding a new bytecode instruction, remember to update doc/vm_instructions.md.
 
 Clean up after you're done.
 
-# Workspace-specific details
+## Workspace-specific details
 
 src/cli.py is installed via pipx as `fr` command.
 src/run_single_test.py expects code into stdin, not a file argument
@@ -28,7 +28,7 @@ The project uses a virtual environment at `.venv`, vscode might not activate it 
 
 ## How to use the cli
 
-```
+```cli
 ➜  lang2 git:(main) ✗ fr
 Fr - Fast bytecode-compiled language
 
@@ -47,3 +47,5 @@ Usage:
 it will always try to use the C runtime over python.
 parse creates `out.bin`
 compile creates `out.bc`
+
+!! DO NOT COMMIT EVER !!
