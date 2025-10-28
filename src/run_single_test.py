@@ -20,7 +20,7 @@ sys.argv = [sys.argv[0], '-d']  # Enable debug mode
 # Import after path setup
 from parser import parse
 from compiler import compile_ast_to_bytecode
-from runtime import run, format_runtime_exception
+from runtime import run, format_runtime_exception # type: ignore
 from native import compile as compile_to_native, create_minimal_runtime
 
 def extract_error_message(error_text):
@@ -293,7 +293,7 @@ def main():
             # Create minimal runtime with only needed functions
             with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
                 runtime_file = f.name
-            
+
             create_minimal_runtime(runtime_deps, runtime_file)
 
             # Write assembly to temporary file
@@ -310,7 +310,16 @@ def main():
             with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
                 native_bin = f.name
 
-            compile_cmd = ['gcc', '-I' + runtime_include_dir, '-o', native_bin, asm_file, runtime_file, '-lm', '-no-pie']
+            compile_cmd = [
+                'gcc',
+                f'-I{runtime_include_dir}',
+                '-o',
+                native_bin,
+                asm_file,
+                runtime_file,
+                '-lm',
+                '-no-pie',
+            ]
 
             result = subprocess.run(
                 compile_cmd,

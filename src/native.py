@@ -822,10 +822,15 @@ class X86Compiler:
                 # STORE: pop from stack and store to variable
                 self.emit("pop rax")
                 self.emit(f"mov [rbp - {offset}], rax")
+                # Pop type from stack
+                if self.stack_types:
+                    self.stack_types.pop()
             else:
                 # LOAD: load from variable and push to stack
                 self.emit(f"mov rax, [rbp - {offset}]")
                 self.emit("push rax")
+                # Push i64 type (we don't know the actual type of locals, assume i64)
+                self.stack_types.append('i64')
 
     def _compile_inc_local(self, args: List[str]):
         """Increment local variable by 1"""
@@ -1539,6 +1544,7 @@ class X86Compiler:
         """Create new empty list"""
         self.emit_runtime_call("runtime_list_new")
         self.emit("push rax")
+        self.stack_types.append('list')
 
     def _compile_list_append(self, args: List[str]):
         """Append value to list"""
@@ -2165,12 +2171,12 @@ def create_minimal_runtime(runtime_deps: set, output_path: str|None = None) -> s
     include_patterns = {
         '#include <stdio.h>': ['printf', 'scanf', 'fprintf', 'sprintf'],
         '#include <stdlib.h>': ['malloc', 'free', 'calloc', 'atoi', 'exit'],
-        '#include <string.h>': ['strlen', 'strcmp', 'strcpy', 'memcpy', 'memset', 'strstr'],
+        '#include <string.h>': ['strlen', 'strcmp', 'strcpy', 'memcpy', 'memset', 'strstr', 'strdup', 'strtok'],
         '#include <math.h>': ['sin', 'cos', 'sqrt', 'pow', 'tan', 'floor', 'ceil', 'round', 'fabs', 'fmod', 'exp', 'log'],
         '#include <ctype.h>': ['isalpha', 'isdigit', 'toupper', 'tolower'],
         '#include "runtime_lib.h"': [''],  # Always needed for type defs
     }
-    
+
     # Check which includes are used
     for include_line, patterns in include_patterns.items():
         if include_line == '#include "runtime_lib.h"':
