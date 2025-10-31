@@ -21,7 +21,7 @@ sys.argv = [sys.argv[0], '-d']  # Enable debug mode
 from parser import parse
 from compiler import compile_ast_to_bytecode
 from runtime import run, format_runtime_exception # type: ignore
-from native import compile as compile_to_native, create_minimal_runtime
+from native import compile as compile_to_native
 
 def extract_error_message(error_text):
     """Extract and normalize error message to match expected format"""
@@ -290,11 +290,14 @@ def main():
             # Compile bytecode to x86_64 assembly
             assembly, runtime_deps = compile_to_native(bytecode, optimize=False)
 
-            # Create minimal runtime with only needed functions
+            # Create runtime file with library code
             with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
                 runtime_file = f.name
-
-            create_minimal_runtime(runtime_deps, runtime_file)
+                # Write runtime library code
+                from pathlib import Path
+                runtime_lib_path = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.c'
+                with open(runtime_lib_path, 'r') as runtime_src:
+                    f.write(runtime_src.read())
 
             # Write assembly to temporary file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.s', delete=False) as f:
