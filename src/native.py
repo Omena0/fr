@@ -42,6 +42,7 @@ class X86Compiler:
         self.struct_counter = 0  # Counter for allocating struct instances
         self.struct_data_offset = 0  # Offset into the struct data area
         self.last_struct_id: Optional[int] = None  # Track the struct_id from the last STRUCT_NEW
+        self.in_label = False  # Track if we're inside a LABEL (for GOTO_CALL)
 
     def emit(self, line: str, indent: int = 1):
         """Emit a line of assembly code"""
@@ -59,9 +60,30 @@ class X86Compiler:
         self.runtime_dependencies.add(func_name)
 
     def emit_runtime_call(self, func_name: str):
-        """Emit a call to a runtime function and track the dependency"""
+        """Emit a call to a runtime function and track the dependency
+        Ensures stack is 16-byte aligned before the call"""
         self.emit_dependency(func_name)
+        # Check stack alignment: (rsp & 15) == 0 means aligned
+        # We need to align the stack before calling runtime functions
+        # that might use SSE instructions
+        # The x86-64 ABI requires 16-byte alignment before call
+        # After function prologue (push rbp; sub rsp, 256), we have:
+        #   - return address (8 bytes)
+        #   - saved rbp (8 bytes) 
+        #   - local space (256 bytes)
+        # Total: 272 bytes from original rsp, which is 16-byte aligned
+        # But after each push (8 bytes), we alternate between aligned and misaligned
+        # To ensure alignment, we can test and adjust:
+        self.emit("test rsp, 8")  # Test if bit 3 is set (misaligned)
+        self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
+        self.emit("sub rsp, 8  # Align stack")
         self.emit(f"call {func_name}")
+        self.emit("add rsp, 8  # Restore stack")
+        self.emit(f"jmp .L{func_name}_done_{self.label_counter}")
+        self.emit(f".L{func_name}_aligned_{self.label_counter}:", 0)
+        self.emit(f"call {func_name}")
+        self.emit(f".L{func_name}_done_{self.label_counter}:", 0)
+        self.label_counter += 1
 
     def get_string_label(self, string: str) -> str:
         """Get or create a label for a string constant"""
@@ -204,7 +226,8 @@ class X86Compiler:
             'stack_offset': 0,
             'max_stack': 0,
             'local_count': 0,
-            'arg_count': 0
+            'arg_count': 0,
+            'skip_label_emitted': False  # Track if skip label was emitted
         }
         self.local_types = {}  # Reset local types for new function
 
@@ -214,12 +237,19 @@ class X86Compiler:
         # Function prologue
         self.emit("push rbp")
         self.emit("mov rbp, rsp")
-        # Reserve stack space (will be patched later when we see .end)
-        # For now, reserve 256 bytes
+        # Reserve stack space - ensure 16-byte alignment
+        # After push rbp, stack is 16-byte aligned
+        # We want to keep it aligned, so reserve a multiple of 16
         self.emit("sub rsp, 256")
 
     def _compile_end(self, args: List[str]):
         """End a function definition (.end)"""
+        # Emit skip label if it hasn't been emitted yet (in case function has no RETURN_VOID)
+        if self.current_function and not self.current_function.get('skip_label_emitted', False):
+            func_name = self.current_function['name']
+            self.emit(f".L{func_name}_skip_labels:", 0)
+            self.current_function['skip_label_emitted'] = True
+        
         # Function epilogue is emitted by RETURN
         self.current_function = None
 
@@ -233,7 +263,26 @@ class X86Compiler:
         # Convert bytecode label to asm label
         asm_label = f".L{label}"
         self.label_map[label] = asm_label
+        
+        # Only emit jump to skip labels for GOTO_CALL targets
+        # Loop/control flow labels should not be skipped
+        # These include: for_, forin_, loop_, while_, if_, else_, end, switch_, case_, etc.
+        is_control_flow_label = any(x in label for x in [
+            'for_', 'forin_', 'loop_', 'while_', 'if_', 'else_', 'end',
+            'switch_', 'case_', 'break_', 'continue_'
+        ])
+        
+        if not is_control_flow_label and self.current_function:
+            # This is likely a GOTO_CALL target - emit jump to skip fall-through
+            func_name = self.current_function['name']
+            self.emit(f"jmp .L{func_name}_skip_labels", 1)
+        
         self.emit(f"{asm_label}:", 0)
+        
+        # Mark that we're inside a label (for GOTO_CALL returns) only if not a control flow label
+        if not is_control_flow_label:
+            self.in_label = True
+        
         # Clear type stack at labels since we don't know which path leads here
         self.stack_types = []
 
@@ -383,16 +432,33 @@ class X86Compiler:
     # ============================================================================
 
     def _compile_add_i64(self, args: List[str]):
-        """Add two 64-bit integers"""
-        self.emit("pop rbx")
-        self.emit("pop rax")
-        self.emit("add rax, rbx")
-        self.emit("push rax")
-        # Update type stack
-        if self.stack_types and len(self.stack_types) >= 2:
-            self.stack_types.pop()  # pop operand 2
-            self.stack_types.pop()  # pop operand 1
-        self.stack_types.append('i64')
+        """Add two 64-bit integers or concatenate strings"""
+        # Check if both operands are strings
+        second_type = self.stack_types[-1] if self.stack_types else 'i64'
+        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
+        
+        if first_type == 'str' and second_type == 'str':
+            # String concatenation
+            self.emit("pop rsi")  # Second string
+            self.emit("pop rdi")  # First string
+            self.emit_runtime_call("runtime_str_concat_checked")
+            self.emit("push rax")
+            # Update type stack
+            if self.stack_types and len(self.stack_types) >= 2:
+                self.stack_types.pop()  # pop operand 2
+                self.stack_types.pop()  # pop operand 1
+            self.stack_types.append('str')
+        else:
+            # Integer addition
+            self.emit("pop rbx")
+            self.emit("pop rax")
+            self.emit("add rax, rbx")
+            self.emit("push rax")
+            # Update type stack
+            if self.stack_types and len(self.stack_types) >= 2:
+                self.stack_types.pop()  # pop operand 2
+                self.stack_types.pop()  # pop operand 1
+            self.stack_types.append('i64')
 
     def _compile_sub_i64(self, args: List[str]):
         """Subtract two 64-bit integers"""
@@ -670,16 +736,29 @@ class X86Compiler:
         self.emit("push rax")
 
     def _compile_return(self, args: List[str]):
-        """Return from function"""
+        """Return from function or label"""
         # Pop return value into rax
         self.emit("pop rax")
-        # Function epilogue
-        self.emit("mov rsp, rbp")
-        self.emit("pop rbp")
-        self.emit("ret")
+        
+        # If we're in a label (GOTO_CALL), just return without full epilogue
+        # The function epilogue belongs to the containing function, not the label
+        if self.in_label:
+            self.emit("ret")
+            self.in_label = False  # Reset flag after return from label
+        else:
+            # Full function epilogue for regular returns
+            self.emit("mov rsp, rbp")
+            self.emit("pop rbp")
+            self.emit("ret")
 
     def _compile_return_void(self, args: List[str]):
         """Return void from function"""
+        # Emit skip label for labels that might be jumped over (only once per function)
+        if self.current_function and not self.current_function.get('skip_label_emitted', False):
+            func_name = self.current_function['name']
+            self.emit(f".L{func_name}_skip_labels:", 0)
+            self.current_function['skip_label_emitted'] = True
+        
         self.emit("xor rax, rax")
         self.emit("mov rsp, rbp")
         self.emit("pop rbp")
@@ -700,9 +779,11 @@ class X86Compiler:
 
     def _compile_goto_call(self, args: List[str]):
         """Jump to label and save return address (like CALL but for goto with return)"""
-        label = args[0]
+        label = args[0].rstrip(':')
+        # Map bytecode label to asm label
+        asm_label = f".L{label}"
         # Similar to CALL but doesn't set up a new frame
-        self.emit(f"call {label}")
+        self.emit(f"call {asm_label}")
         self.emit("push rax")
 
     def _compile_select(self, args: List[str]):
@@ -890,15 +971,17 @@ class X86Compiler:
                 # STORE: pop from stack and store to variable
                 self.emit("pop rax")
                 self.emit(f"mov [rbp - {offset}], rax")
-                # Pop type from stack
+                # Track the type being stored
                 if self.stack_types:
-                    self.stack_types.pop()
+                    stored_type = self.stack_types.pop()
+                    self.local_types[var_id] = stored_type
             else:
                 # LOAD: load from variable and push to stack
                 self.emit(f"mov rax, [rbp - {offset}]")
                 self.emit("push rax")
-                # Push i64 type (we don't know the actual type of locals, assume i64)
-                self.stack_types.append('i64')
+                # Push the correct type based on what we know about the local
+                var_type = self.local_types.get(var_id, 'i64')
+                self.stack_types.append(var_type)
 
     def _compile_fused_load_store(self, args: List[str]):
         """Interleaved load/store operations (FUSED_LOAD_STORE var0 var1 var2 ...)
@@ -912,15 +995,17 @@ class X86Compiler:
                 # LOAD: load from variable and push to stack
                 self.emit(f"mov rax, [rbp - {offset}]")
                 self.emit("push rax")
-                # Push i64 type (we don't know the actual type of locals, assume i64)
-                self.stack_types.append('i64')
+                # Push the correct type based on what we know about the local
+                var_type = self.local_types.get(var_id, 'i64')
+                self.stack_types.append(var_type)
             else:
                 # STORE: pop from stack and store to variable
                 self.emit("pop rax")
                 self.emit(f"mov [rbp - {offset}], rax")
-                # Pop type from stack
+                # Track the type being stored
                 if self.stack_types:
-                    self.stack_types.pop()
+                    stored_type = self.stack_types.pop()
+                    self.local_types[var_id] = stored_type
 
     def _compile_inc_local(self, args: List[str]):
         """Increment local variable by 1"""
@@ -1477,76 +1562,70 @@ class X86Compiler:
     # ============================================================================
 
     def _compile_add_str(self, args: List[str]):
-        """Concatenate two strings - convert operands if needed"""
+        """Concatenate two strings or add integers and convert to string"""
+        # Check types based on compile-time type information
+        second_type = self.stack_types[-1] if self.stack_types else 'str'
+        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'str'
+        
         # Pop operands
         self.emit("pop rsi")  # Second operand (top of stack)
         self.emit("pop rdi")  # First operand
         
-        # Check types and convert if needed
-        second_type = self.stack_types[-1] if self.stack_types else 'i64'
-        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
+        # Handle different type combinations
+        if first_type == 'i64' and second_type == 'i64':
+            # Both are integers - add them and convert result to string
+            self.emit("add rdi, rsi")  # Add the integers
+            self.emit_runtime_call("runtime_int_to_str")  # Convert result to string
+            self.emit("push rax")
+        elif first_type == 'f64' and second_type == 'f64':
+            # Both are floats - add them and convert result to string
+            self.emit("movq xmm0, rdi")
+            self.emit("movq xmm1, rsi")
+            self.emit("addsd xmm0, xmm1")
+            self.emit_runtime_call("runtime_float_to_str")
+            self.emit("push rax")
+        elif first_type == 'str' and second_type == 'str':
+            # Both are strings - concatenate them
+            self.emit_runtime_call("runtime_str_concat_checked")
+            self.emit("push rax")
+        else:
+            # Mixed types - convert each to string first, then concatenate
+            # Save second operand
+            self.emit("push rsi")
+            
+            # Convert first operand to string if needed
+            if first_type != 'str':
+                if first_type == 'i64' or first_type == 'bool':
+                    self.emit_runtime_call("runtime_int_to_str")
+                    self.emit("mov rdi, rax")
+                elif first_type == 'f64':
+                    self.emit("movq xmm0, rdi")
+                    self.emit_runtime_call("runtime_float_to_str")
+                    self.emit("mov rdi, rax")
+            
+            # Get second operand and convert to string if needed
+            self.emit("pop rsi")
+            if second_type != 'str':
+                self.emit("push rdi")  # Save first string
+                if second_type == 'i64' or second_type == 'bool':
+                    self.emit("mov rdi, rsi")
+                    self.emit_runtime_call("runtime_int_to_str")
+                    self.emit("mov rsi, rax")
+                elif second_type == 'f64':
+                    self.emit("movq xmm0, rsi")
+                    self.emit_runtime_call("runtime_float_to_str")
+                    self.emit("mov rsi, rax")
+                self.emit("pop rdi")  # Restore first string
+            
+            # Now both are strings - concatenate
+            self.emit_runtime_call("runtime_str_concat_checked")
+            self.emit("push rax")
         
-        # Generate unique labels
-        label_num = self.label_counter
-        self.label_counter += 1
-        
-        # Special case: if both are small integers (< 0x100000), add them first then convert
-        self.emit("cmp rdi, 0x100000")
-        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
-        self.emit("cmp rsi, 0x100000")
-        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
-        # Both are small integers, add them then convert to string
-        self.emit("mov rax, rdi")
-        self.emit("add rax, rsi")
-        self.emit("mov rdi, rax")
-        self.emit_runtime_call("runtime_int_to_str")
-        self.emit("push rax")
-        # Result is a string
+        # Result is always a string
         if self.stack_types and len(self.stack_types) >= 2:
             self.stack_types.pop()
             self.stack_types.pop()
         self.stack_types.append('str')
-        self.emit(f"jmp .Ladd_str_done_{label_num}")
-        
-        # Convert non-strings to strings if needed
-        self.emit(f".Ladd_str_need_concat_{label_num}:", 0)
-        
-        if second_type != 'str':
-            # Check if rsi is a small integer (< 0x100000 and positive, not a pointer)
-            self.emit("cmp rsi, 0x100000")
-            self.emit(f"jl .Ladd_str_int_rsi_{label_num}")
-            self.emit(f"jmp .Ladd_str_not_int_rsi_{label_num}")
-            self.emit(f".Ladd_str_int_rsi_{label_num}:", 0)
-            # rsi is a small integer, convert it to string
-            self.emit("mov rax, rsi")
-            self.emit("mov rdi, rax")
-            self.emit_runtime_call("runtime_int_to_str")
-            self.emit("mov rsi, rax")
-            self.emit(f".Ladd_str_not_int_rsi_{label_num}:", 0)
-        
-        if first_type != 'str':
-            # Check if rdi is a small integer
-            self.emit("cmp rdi, 0x100000")
-            self.emit(f"jl .Ladd_str_int_rdi_{label_num}")
-            self.emit(f"jmp .Ladd_str_not_int_rdi_{label_num}")
-            self.emit(f".Ladd_str_int_rdi_{label_num}:", 0)
-            # rdi is a small integer, convert it to string
-            self.emit("mov rax, rdi")
-            self.emit("mov rdi, rax")
-            self.emit_runtime_call("runtime_int_to_str")
-            self.emit("mov rdi, rax")
-            self.emit(f".Ladd_str_not_int_rdi_{label_num}:", 0)
-        
-        # Now both rdi and rsi should be strings
-        self.emit_runtime_call("runtime_str_concat_checked")
-        self.emit("push rax")
-        # Result is a string
-        if self.stack_types and len(self.stack_types) >= 2:
-            self.stack_types.pop()
-            self.stack_types.pop()
-        self.stack_types.append('str')
-        
-        self.emit(f".Ladd_str_done_{label_num}:", 0)
 
     def _compile_str_upper(self, args: List[str]):
         """Convert string to uppercase"""
@@ -1612,15 +1691,27 @@ class X86Compiler:
 
     def _compile_encode(self, args: List[str]):
         """Encode string to bytes"""
-        self.emit("pop rdi")
+        self.emit("pop rsi   # encoding")
+        self.emit("pop rdi   # string")
         self.emit_runtime_call("runtime_str_encode")
         self.emit("push rax")
+        # Pop both encoding and string, push bytes
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # encoding
+            self.stack_types.pop()  # string
+        self.stack_types.append('bytes')
 
     def _compile_decode(self, args: List[str]):
         """Decode bytes to string"""
-        self.emit("pop rdi")
+        self.emit("pop rsi   # encoding")
+        self.emit("pop rdi   # bytes")
         self.emit_runtime_call("runtime_str_decode")
         self.emit("push rax")
+        # Pop both encoding and bytes, push string
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # encoding
+            self.stack_types.pop()  # bytes
+        self.stack_types.append('str')
 
     # ============================================================================
     # Math Operations
@@ -1966,15 +2057,21 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        
+        # Set elem_type to 0 (integer) - rax has the list pointer
+        self.emit("mov dword ptr [rax + 24], 0  # elem_type = 0 (int)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value in values:
-            # Pop list, set up parameters, call append, push list back
-            self.emit("pop rdi")  # list (first param)
+            # Peek at list pointer without popping
+            self.emit("mov rdi, [rsp]")  # Load list pointer to rdi (first param)
             self.emit(f"mov rsi, {value}")  # value (second param)
             self.emit_runtime_call("runtime_list_append_int")
-            self.emit("push rdi")  # Push list back on stack
+        
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -1986,10 +2083,14 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
         
-        # Append each value - but first we need to check if append_float exists
-        # If not, we'll need to use append_int and cast
+        # Set elem_type to 2 (float)
+        self.emit("mov dword ptr [rax + 24], 2  # elem_type = 2 (float)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
+        
+        # Append each value
         for value in values:
             # Create a label for the float constant
             label = f".FLOAT{self.string_counter}"
@@ -1997,13 +2098,13 @@ class X86Compiler:
             self.data_section.append(f"{label}:")
             self.data_section.append(f"    .double {value}")
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load float value and append
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"movsd xmm0, [{label}]")  # value in xmm0
-            # For float append, need to cast double to int64 bits
             self.emit("movq rsi, xmm0")  # Move xmm0 to rsi as int64 bits
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append to store bits
-            self.emit("push rdi")  # Push list back on stack
+            self.emit_runtime_call("runtime_list_append_int")
+        
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2016,7 +2117,12 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        
+        # Set elem_type to 1 (string)
+        self.emit("mov dword ptr [rax + 24], 1  # elem_type = 1 (string)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value_str in values:
@@ -2026,11 +2132,12 @@ class X86Compiler:
             
             label = self.get_string_label(value_str)
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load string pointer and append
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"lea rsi, [{label}]")  # value as string pointer
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append to store pointer
-            self.emit("push rdi")  # Push list back on stack
+            self.emit_runtime_call("runtime_list_append_int")
+        
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2042,23 +2149,27 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        
+        # Set elem_type to 3 (bool)
+        self.emit("mov dword ptr [rax + 24], 3  # elem_type = 3 (bool)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value in values:
             # Convert bool string to value
             bool_val = "1" if value in ("1", "true") else "0"
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load bool value and append
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"mov rsi, {bool_val}")  # value
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append for bools too
-            self.emit("push rdi")  # Push list back on stack
+            self.emit_runtime_call("runtime_list_append_int")
+        
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
-        self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")
 
     def _compile_contains(self, args: List[str]):
         """Check if list/string/set contains value"""
@@ -2097,9 +2208,19 @@ class X86Compiler:
 
     def _compile_set_add(self, args: List[str]):
         """Add value to set"""
+        # Get the type of the value being added
+        value_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
         self.emit("pop rsi   # value")
         self.emit("pop rdi   # set")
-        self.emit_runtime_call("runtime_set_add")
+        
+        # Pass element type as third argument (0=int, 1=string)
+        if value_type == 'str':
+            self.emit("mov rdx, 1  # elem_type: string")
+        else:
+            self.emit("mov rdx, 0  # elem_type: int")
+        
+        self.emit_runtime_call("runtime_set_add_typed")
         self.emit("push rdi   # return set")
         # Pop both value and set from stack_types, push set back
         if len(self.stack_types) >= 2:
@@ -2205,6 +2326,9 @@ class X86Compiler:
         
         # Pop the struct reference
         self.emit("pop rax  # struct reference")
+        # Pop from stack types
+        if self.stack_types:
+            self.stack_types.pop()
         
         # Decode: instance_id = rax >> 16, struct_id = rax & 0xFFFF
         self.emit("mov rbx, rax")
