@@ -392,7 +392,7 @@ class X86Compiler:
             # String concatenation
             self.emit("pop rsi")  # Second string
             self.emit("pop rdi")  # First string
-            self.emit_runtime_call("runtime_str_concat")
+            self.emit_runtime_call("runtime_str_concat_checked")
             self.emit("push rax")
             # Update type stack
             if self.stack_types and len(self.stack_types) >= 2:
@@ -1497,75 +1497,25 @@ class X86Compiler:
 
     def _compile_add_str(self, args: List[str]):
         """Concatenate two strings - convert operands if needed"""
+        # Check types based on compile-time type information
+        second_type = self.stack_types[-1] if self.stack_types else 'str'
+        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'str'
+        
         # Pop operands
         self.emit("pop rsi")  # Second operand (top of stack)
         self.emit("pop rdi")  # First operand
         
-        # Check types and convert if needed
-        second_type = self.stack_types[-1] if self.stack_types else 'i64'
-        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
-        
-        # Generate unique labels
-        label_num = self.label_counter
-        self.label_counter += 1
-        
-        # Special case: if both are small integers (< 0x100000), add them first then convert
-        self.emit("cmp rdi, 0x100000")
-        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
-        self.emit("cmp rsi, 0x100000")
-        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
-        # Both are small integers, add them then convert to string
-        self.emit("mov rax, rdi")
-        self.emit("add rax, rsi")
-        self.emit("mov rdi, rax")
-        self.emit_runtime_call("runtime_int_to_str")
-        self.emit("push rax")
-        # Result is a string
-        if self.stack_types and len(self.stack_types) >= 2:
-            self.stack_types.pop()
-            self.stack_types.pop()
-        self.stack_types.append('str')
-        self.emit(f"jmp .Ladd_str_done_{label_num}")
-        
-        # Convert non-strings to strings if needed
-        self.emit(f".Ladd_str_need_concat_{label_num}:", 0)
-        
-        if second_type != 'str':
-            # Check if rsi is a small integer (< 0x100000 and positive, not a pointer)
-            self.emit("cmp rsi, 0x100000")
-            self.emit(f"jl .Ladd_str_int_rsi_{label_num}")
-            self.emit(f"jmp .Ladd_str_not_int_rsi_{label_num}")
-            self.emit(f".Ladd_str_int_rsi_{label_num}:", 0)
-            # rsi is a small integer, convert it to string
-            self.emit("mov rax, rsi")
-            self.emit("mov rdi, rax")
-            self.emit_runtime_call("runtime_int_to_str")
-            self.emit("mov rsi, rax")
-            self.emit(f".Ladd_str_not_int_rsi_{label_num}:", 0)
-        
-        if first_type != 'str':
-            # Check if rdi is a small integer
-            self.emit("cmp rdi, 0x100000")
-            self.emit(f"jl .Ladd_str_int_rdi_{label_num}")
-            self.emit(f"jmp .Ladd_str_not_int_rdi_{label_num}")
-            self.emit(f".Ladd_str_int_rdi_{label_num}:", 0)
-            # rdi is a small integer, convert it to string
-            self.emit("mov rax, rdi")
-            self.emit("mov rdi, rax")
-            self.emit_runtime_call("runtime_int_to_str")
-            self.emit("mov rdi, rax")
-            self.emit(f".Ladd_str_not_int_rdi_{label_num}:", 0)
-        
-        # Now both rdi and rsi should be strings
+        # Both should already be strings at this point based on bytecode semantics
+        # If they're not, the bytecode compiler should have inserted conversions
+        # Just concatenate them
         self.emit_runtime_call("runtime_str_concat_checked")
         self.emit("push rax")
+        
         # Result is a string
         if self.stack_types and len(self.stack_types) >= 2:
             self.stack_types.pop()
             self.stack_types.pop()
         self.stack_types.append('str')
-        
-        self.emit(f".Ladd_str_done_{label_num}:", 0)
 
     def _compile_str_upper(self, args: List[str]):
         """Convert string to uppercase"""
@@ -1997,18 +1947,18 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        self.emit("mov rbx, rax")  # Save list in callee-saved rbx
         
         # Set elem_type to 0 (integer)
-        self.emit("mov dword ptr [rdi + 24], 0  # elem_type = 0 (int)")
+        self.emit("mov dword ptr [rbx + 24], 0  # elem_type = 0 (int)")
         
         # Append each value
         for value in values:
-            # list is in rdi, value in rsi
+            self.emit("mov rdi, rbx")  # Load list pointer to rdi (first param)
             self.emit(f"mov rsi, {value}")  # value (second param)
             self.emit_runtime_call("runtime_list_append_int")
         
-        self.emit("push rdi")  # Push list on stack
+        self.emit("push rbx")  # Push list on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2020,9 +1970,10 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 2 (float)
+        self.emit("mov rdi, [rsp]")  # Load list pointer
         self.emit("mov dword ptr [rdi + 24], 2  # elem_type = 2 (float)")
         
         # Append each value
@@ -2034,12 +1985,13 @@ class X86Compiler:
             self.data_section.append(f"    .double {value}")
             
             # Load float value and append
+            self.emit("pop rdi")  # Load list pointer
             self.emit(f"movsd xmm0, [{label}]")  # value in xmm0
-            # For float append, need to cast double to int64 bits
             self.emit("movq rsi, xmm0")  # Move xmm0 to rsi as int64 bits
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append to store bits
+            self.emit_runtime_call("runtime_list_append_int")
+            self.emit("push rdi")  # Save list pointer back
         
-        self.emit("push rdi")  # Push list on stack
+        # List is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2052,9 +2004,10 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 1 (string)
+        self.emit("mov rdi, [rsp]")  # Load list pointer
         self.emit("mov dword ptr [rdi + 24], 1  # elem_type = 1 (string)")
         
         # Append each value
@@ -2066,10 +2019,12 @@ class X86Compiler:
             label = self.get_string_label(value_str)
             
             # Load string pointer and append
+            self.emit("pop rdi")  # Load list pointer
             self.emit(f"lea rsi, [{label}]")  # value as string pointer
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append to store pointer
+            self.emit_runtime_call("runtime_list_append_int")
+            self.emit("push rdi")  # Save list pointer back
         
-        self.emit("push rdi")  # Push list on stack
+        # List is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2081,9 +2036,10 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 3 (bool)
+        self.emit("mov rdi, [rsp]")  # Load list pointer
         self.emit("mov dword ptr [rdi + 24], 3  # elem_type = 3 (bool)")
         
         # Append each value
@@ -2092,10 +2048,12 @@ class X86Compiler:
             bool_val = "1" if value in ("1", "true") else "0"
             
             # Load bool value and append
+            self.emit("pop rdi")  # Load list pointer
             self.emit(f"mov rsi, {bool_val}")  # value
-            self.emit_runtime_call("runtime_list_append_int")  # Use int append for bools too
+            self.emit_runtime_call("runtime_list_append_int")
+            self.emit("push rdi")  # Save list pointer back
         
-        self.emit("push rdi")  # Push list on stack
+        # List is already on stack
         
         # Update type stack
         self.stack_types.append('list')
