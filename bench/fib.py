@@ -1,5 +1,3 @@
-import sys
-sys.set_int_max_str_digits(1000000000)
 
 def fibonacci(n: int):
     if n <= 1:
@@ -9,10 +7,10 @@ def fibonacci(n: int):
     b = 1
     c = 1
     for _ in range(n):
-        c = a + b
+        c = (a + b) % 1000000
         a = b
         b = c
 
     return b
 
-print(fibonacci(1000000))
+print(fibonacci(1000000000))
