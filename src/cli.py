@@ -325,7 +325,7 @@ def native_cmd(args):
                 'gcc', obj_file, str(runtime_lib), '-o', exe_file,
                 f'-I{runtime_dir}', '-Ofast',
                 '-ffunction-sections', '-fdata-sections',
-                '-Wl,--gc-sections',  # Removed '-s' to keep symbols for debugging
+                '-Wl,--gc-sections', '-s',
                 '-lm', '-no-pie'
             ]
 
