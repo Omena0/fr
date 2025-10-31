@@ -89,6 +89,16 @@ char* runtime_str_concat(const char* a, const char* b) {
     return result;
 }
 
+// Checked wrapper that validates pointers before calling runtime_str_concat.
+char* runtime_str_concat_checked(const char* a, const char* b) {
+    if (!a || !b) {
+        fprintf(stderr, "runtime_str_concat_checked: invalid args a=%p b=%p\n", (void*)a, (void*)b);
+        // Provide more debugging context, then abort to surface the issue
+        exit(1);
+    }
+    return runtime_str_concat(a, b);
+}
+
 int64_t runtime_str_len(const char* str) {
     return (int64_t)strlen(str);
 }

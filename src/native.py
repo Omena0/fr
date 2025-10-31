@@ -1408,7 +1408,8 @@ class X86Compiler:
         """Concatenate two strings"""
         self.emit("pop rsi")  # Second string
         self.emit("pop rdi")  # First string
-        self.emit_runtime_call("runtime_str_concat")
+        # Use the checked wrapper to validate pointers at runtime
+        self.emit_runtime_call("runtime_str_concat_checked")
         self.emit("push rax")
         # Result is a string
         if self.stack_types and len(self.stack_types) >= 2:
@@ -2104,7 +2105,11 @@ class X86Compiler:
             self.emit("pop rdi")
             self.emit_runtime_call("runtime_set_to_str")
             self.emit("push rax")
-        elif value_type != 'str':
+        elif value_type == 'str':
+            # For string: already a string, no conversion needed
+            # Just keep it on the stack as-is
+            pass
+        else:
             # For i64 (or unknown, default to i64): pop into rdi, call runtime_int_to_str
             self.emit("pop rdi")
             self.emit_runtime_call("runtime_int_to_str")
