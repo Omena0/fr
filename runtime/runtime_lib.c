@@ -10,6 +10,11 @@
 #include <ctype.h>
 #include <stdint.h>
 
+// Disable optimizations for the entire runtime library
+// gcc's aggressive optimizations at -O2+ cause issues with the memory layout
+// and function calling conventions
+#pragma GCC optimize("O0")
+
 // ============================================================================
 // Basic I/O
 // ============================================================================

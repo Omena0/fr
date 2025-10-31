@@ -244,10 +244,10 @@ class AssemblyOptimizer:
             # Only optimize very specific patterns that we know are safe
             # DO NOT optimize LOAD + CMP sequences without seeing the full context
             # because JUMP_IF_FALSE expects the result on the stack
-            
+
             # Safe pattern: mov rax, X; mov [mem], rax -> can't combine, keep as-is
             # Most comparisons should NOT be optimized away because they need to push results
-            
+
             result.append(lines[i])
             i += 1
 
@@ -955,16 +955,16 @@ class AssemblyOptimizer:
             if (i + 1 < len(lines) and
                 line.startswith('mulsd ') and
                 lines[i + 1].strip().startswith('addsd ')):
-                
+
                 mul_parts = line.split()
                 add_parts = lines[i + 1].strip().split()
-                
+
                 if len(mul_parts) >= 3 and len(add_parts) >= 3:
                     mul_dst = mul_parts[1].rstrip(',')
                     mul_src = mul_parts[2]
                     add_dst = add_parts[1].rstrip(',')
                     add_src = add_parts[2]
-                    
+
                     # Check if multiply destination is same as add destination
                     if mul_dst == add_dst:
                         indent = self._get_indent(lines[i])
@@ -982,16 +982,16 @@ class AssemblyOptimizer:
             if (i + 1 < len(lines) and
                 line.startswith('mulss ') and
                 lines[i + 1].strip().startswith('addss ')):
-                
+
                 mul_parts = line.split()
                 add_parts = lines[i + 1].strip().split()
-                
+
                 if len(mul_parts) >= 3 and len(add_parts) >= 3:
                     mul_dst = mul_parts[1].rstrip(',')
                     mul_src = mul_parts[2]
                     add_dst = add_parts[1].rstrip(',')
                     add_src = add_parts[2]
-                    
+
                     if mul_dst == add_dst:
                         indent = self._get_indent(lines[i])
                         result.append(f"{indent}vfmadd132ss {mul_dst}, {add_src}, {mul_src}  # FMA: {mul_dst}*{mul_src}+{add_src}")
@@ -1206,7 +1206,7 @@ class AssemblyOptimizer:
                 if (len(non_comment_lines) >= 2 and
                     non_comment_lines[0] == 'push rax' and
                     non_comment_lines[1].startswith('pop ')):
-                    
+
                     pop_parts = non_comment_lines[1].split()
                     if len(pop_parts) == 2:
                         pop_reg = pop_parts[1]
@@ -1238,16 +1238,16 @@ class AssemblyOptimizer:
             # Pattern: mov rax, <const>; mov [mem], rax
             if i + 1 < len(lines) and line.startswith('mov rax, '):
                 next_line = lines[i + 1].strip()
-                
+
                 if next_line.startswith('mov [') and next_line.endswith(', rax'):
                     # Extract constant and memory location
                     const_match = re.match(r'mov rax, (.+)', line)
                     mem_match = re.match(r'mov (\[.+\]), rax', next_line)
-                    
+
                     if const_match and mem_match:
                         const_val = const_match[1]
                         mem_loc = mem_match[1]
-                        
+
                         # Only optimize if value is an immediate (number, not register/memory)
                         if const_val.lstrip('-').isdigit() or const_val == '0':
                             indent = self._get_indent(lines[i])
@@ -1320,7 +1320,7 @@ class AssemblyOptimizer:
                     non_comment_lines[8] == 'pop rax' and
                     non_comment_lines[9] == 'add rax, rbx' and
                     non_comment_lines[10] == 'push rax'):
-                    
+
                     # Extract memory locations and divisor
                     mem1_match = re.match(r'mov rax, (\[.+\])', non_comment_lines[0])
                     mem2_match = re.match(r'mov rax, (\[.+\])', non_comment_lines[2])
@@ -1424,7 +1424,7 @@ class AssemblyOptimizer:
                 if (len(non_comment_lines) >= 4 and
                     non_comment_lines[1] == 'mov rdi, rax' and
                     non_comment_lines[2].startswith('call ')):
-                    
+
                     # Check if this is followed by return (with optional xor rax, rax)
                     next_idx = 3
                     is_tail = False
@@ -1484,7 +1484,7 @@ class AssemblyOptimizer:
                     non_comment_lines[0] == 'xor rdx, rdx' and
                     non_comment_lines[1].startswith('mov rbx, ') and
                     non_comment_lines[2] == 'idiv rbx'):
-                    
+
                     if divisor_match := re.match(
                         r'mov rbx, (.+)', non_comment_lines[1]
                     ):
@@ -1522,6 +1522,37 @@ class AssemblyOptimizer:
 
             # Find function prologue: sub rsp, <size>
             if line.startswith('sub rsp, '):
+                # First, check if this function uses stack alignment checks (test rsp, 8)
+                # If it does, DON'T optimize the frame size because the alignment checks
+                # depend on the exact frame size for correctness
+                has_alignment_checks = False
+                j = i + 1
+                
+                # Look through the function to see if it uses stack alignment
+                while j < len(lines):
+                    stripped = lines[j].strip()
+
+                    # Stop at next function (label that ends with : and doesn't start with .L or #)
+                    if (stripped.endswith(':') and
+                        not stripped.startswith('.L') and
+                        not stripped.startswith('#') and
+                        stripped != ''):
+                        # This is a new function or section
+                        break
+                    
+                    # Check for stack alignment test patterns
+                    if 'test rsp, 8' in stripped or 'test rsp, 0x8' in stripped:
+                        has_alignment_checks = True
+                        break
+
+                    j += 1
+                
+                # If there are alignment checks, skip optimization
+                if has_alignment_checks:
+                    result.append(lines[i])
+                    i += 1
+                    continue
+
                 # Scan ahead to find maximum stack offset used
                 max_offset = 0
                 j = i + 1
@@ -1532,8 +1563,8 @@ class AssemblyOptimizer:
                     stripped = lines[j].strip()
 
                     # Stop at next function (label that ends with : and doesn't start with .L or #)
-                    if (stripped.endswith(':') and 
-                        not stripped.startswith('.L') and 
+                    if (stripped.endswith(':') and
+                        not stripped.startswith('.L') and
                         not stripped.startswith('#') and
                         stripped != ''):
                         # This is a new function or section
@@ -1746,7 +1777,7 @@ class AssemblyOptimizer:
                     non_comment_lines[3].startswith('call ') and
                     non_comment_lines[4] == 'add rsp, 8' and
                     non_comment_lines[5].startswith('jmp ')):
-                    
+
                     # This pattern can be left as-is since it's already optimized by the compiler
                     # Just annotate it
                     indent = self._get_indent(lines[i])
@@ -1822,7 +1853,7 @@ class AssemblyOptimizer:
             # Pattern: mov [mem1], rax; mov [mem2], rbx followed by same values
             # If mem1 and mem2 are adjacent, could use 16-byte store (for aligned cases)
             # For now, just keep the pattern as-is - most cases are already optimal
-            
+
             # Pattern: Multiple stores in sequence with different values
             # mov [mem1], value1; mov [mem2], value2; mov [mem3], value3
             # These are already optimal in most cases, so we'll skip this
@@ -1848,22 +1879,23 @@ class AssemblyOptimizer:
                 j = i + 1
                 non_comment_lines = [line]
                 non_comment_indices = [i]
-                
+
                 while j < len(lines) and len(non_comment_lines) < 3:
                     stripped = lines[j].strip()
                     if stripped and not stripped.startswith('#'):
                         non_comment_lines.append(stripped)
                         non_comment_indices.append(j)
                     j += 1
-                
+
                 if (len(non_comment_lines) >= 3 and
                     non_comment_lines[1].startswith('mov rbx, ') and
                     non_comment_lines[2] == 'idiv rbx'):
-                    
-                    divisor_match = re.match(r'mov rbx, (\d+)', non_comment_lines[1])
-                    if divisor_match:
-                        divisor = int(divisor_match.group(1))
-                        
+
+                    if divisor_match := re.match(
+                        r'mov rbx, (\d+)', non_comment_lines[1]
+                    ):
+                        divisor = int(divisor_match[1])
+
                         # For powers of 2, use AND (always correct)
                         if divisor > 0 and (divisor & (divisor - 1)) == 0:
                             indent = self._get_indent(lines[i])
@@ -1872,9 +1904,6 @@ class AssemblyOptimizer:
                             result.append(f"{indent}and rax, {mask}  # MOD by power-of-2 via AND")
                             i = non_comment_indices[2] + 1
                             continue
-                        
-                        # For 1000000 (common MOD), could optimize but would need more code
-                        # Skip for now as it's a specific case
 
             result.append(lines[i])
             i += 1
@@ -1892,32 +1921,29 @@ class AssemblyOptimizer:
             # Pattern: Store result of MOD to [mem]; load from [mem]; use immediately
             # Can keep value in register instead
             if line.startswith('xor rdx, rdx') and i > 10:
-                # Check if we're in a loop (look back for .Lfor_start or .Lwhile_start)
-                in_loop = False
-                for k in range(max(0, i - 50), i):
-                    if '.Lfor_start' in lines[k] or '.Lwhile_start' in lines[k]:
-                        in_loop = True
-                        break
-                
+                in_loop = any(
+                    '.Lfor_start' in lines[k] or '.Lwhile_start' in lines[k]
+                    for k in range(max(0, i - 50), i)
+                )
                 if in_loop:
                     # Look ahead for the full idiv + store pattern
                     j = i + 1
                     instructions = [line]
                     indices = [i]
-                    
+
                     while j < len(lines) and len(instructions) < 10:
                         stripped = lines[j].strip()
                         if stripped and not stripped.startswith('#'):
                             instructions.append(stripped)
                             indices.append(j)
                         j += 1
-                    
+
                     # Pattern: xor rdx; mov rbx const; idiv rbx; mov [mem], rdx; ...loads from [mem]
                     if (len(instructions) >= 4 and
                         instructions[1].startswith('mov rbx, ') and
                         instructions[2] == 'idiv rbx' and
                         instructions[3].startswith('mov [') and ', rdx' in instructions[3]):
-                        
+
                         # Keep rdx in a register through the loop
                         # This is a loop-specific optimization
                         pass
@@ -1942,10 +1968,9 @@ class AssemblyOptimizer:
 
             # Track loads: mov rax, [mem]
             if line.startswith('mov rax, ['):
-                mem_match = re.match(r'mov rax, (\[.+\])', line)
-                if mem_match:
-                    mem_loc = mem_match.group(1)
-                    
+                if mem_match := re.match(r'mov rax, (\[.+\])', line):
+                    mem_loc = mem_match[1]
+
                     # Check if this memory location was loaded recently
                     if mem_loc in loop_var_cache:
                         # Skip redundant load - value already in rax
@@ -1979,40 +2004,43 @@ class AssemblyOptimizer:
             if (i + 3 < len(lines) and
                 line.startswith('mov rax, [') and
                 lines[i + 1].strip().startswith('mov [') and ', rax' in lines[i + 1].strip()):
-                
+
                 load1_match = re.match(r'mov rax, (\[.+\])', line)
                 store1 = lines[i + 1].strip()
-                
+
                 if i + 3 < len(lines):
                     line2 = lines[i + 2].strip()
                     line3 = lines[i + 3].strip()
-                    
+
                     if (line2.startswith('mov rax, [') and
                         line3.startswith('mov [') and ', rax' in line3):
-                        
+
                         load2_match = re.match(r'mov rax, (\[.+\])', line2)
                         store2 = line3
-                        
+
                         if load1_match and load2_match:
-                            mem2 = load1_match.group(1)
-                            mem3 = load2_match.group(1)
-                            
+                            mem2 = load1_match[1]
+                            mem3 = load2_match[1]
+
                             # Extract store locations
                             store1_match = re.match(r'mov (\[.+\]), rax', store1)
                             store2_match = re.match(r'mov (\[.+\]), rax', store2)
-                            
+
                             if store1_match and store2_match:
-                                mem1 = store1_match.group(1)
-                                mem2_store = store2_match.group(1)
-                                
+                                mem2_store = store2_match[1]
+
                                 # If second store is to mem2, we have rotation
                                 if mem2 == mem2_store:
                                     indent = self._get_indent(lines[i])
-                                    # Optimized: use rbx as temp to avoid re-loading
-                                    result.append(f"{indent}mov rbx, {mem3}  # Start rotation")
-                                    result.append(f"{indent}mov rax, {mem2}")
-                                    result.append(f"{indent}mov {mem1}, rax")
-                                    result.append(f"{indent}mov {mem2}, rbx  # Complete rotation without re-load")
+                                    mem1 = store1_match[1]
+                                    result.extend(
+                                        (
+                                            f"{indent}mov rbx, {mem3}  # Start rotation",
+                                            f"{indent}mov rax, {mem2}",
+                                            f"{indent}mov {mem1}, rax",
+                                            f"{indent}mov {mem2}, rbx  # Complete rotation without re-load",
+                                        )
+                                    )
                                     i += 4
                                     continue
 
@@ -2034,29 +2062,28 @@ class AssemblyOptimizer:
                 # Scan loop to find frequently accessed memory locations
                 loop_start = i
                 loop_end = i + 100  # Assume loops are at most 100 lines
-                
+
                 for j in range(i + 1, min(len(lines), loop_start + 100)):
                     if '.Lfor_end' in lines[j] or '.Lwhile_end' in lines[j]:
                         loop_end = j
                         break
-                
+
                 # Count memory accesses in loop
                 mem_access_count = {}
                 for j in range(loop_start, loop_end):
                     stripped = lines[j].strip()
-                    
+
                     # Find all memory accesses
                     mem_matches = re.findall(r'\[rbp - (\d+)\]', stripped)
                     for mem_offset in mem_matches:
                         mem_loc = f'[rbp - {mem_offset}]'
                         mem_access_count[mem_loc] = mem_access_count.get(mem_loc, 0) + 1
-                
-                # Identify hot memory locations (accessed 3+ times in loop)
-                hot_mems = {mem: count for mem, count in mem_access_count.items() if count >= 3}
-                
-                # For now, just annotate this for potential optimization
-                # A full implementation would require register allocation
-                if hot_mems:
+
+                if hot_mems := {
+                    mem: count
+                    for mem, count in mem_access_count.items()
+                    if count >= 3
+                }:
                     indent = self._get_indent(lines[i])
                     result.append(f"{indent}{line}  # Hot loop: {len(hot_mems)} hot memory location(s)")
                     i += 1
@@ -2087,18 +2114,18 @@ class AssemblyOptimizer:
 
                 while j < len(lines):
                     stripped = lines[j].strip()
-                    
+
                     if '.Lfor_end' in stripped or '.Lwhile_end' in stripped:
                         loop_end = j
                         break
-                    
+
                     # Skip comments and empty lines
                     if not stripped or stripped.startswith('#'):
                         result.append(lines[i] if i == loop_start else '')
                         i += 1
                         j += 1
                         continue
-                    
+
                     loop_body.append(stripped)
                     loop_indices.append(j)
                     instruction_count += 1
@@ -2107,28 +2134,28 @@ class AssemblyOptimizer:
                 # For very tight loops (< 30 instructions), add optimization hints
                 if instruction_count < 30 and instruction_count > 5:
                     result.append(lines[loop_start])
-                    
+
                     # Add branch prediction hint for hot loop
                     indent = self._get_indent(lines[loop_start])
                     result.append(f"{indent}.align 32  # Hot loop: optimize for prefetch")
-                    
+
                     # Process loop body with tighter optimization
                     for kb, stripped in enumerate(loop_body):
                         orig_idx = loop_indices[kb]
-                        
+
                         # Pattern: cmp followed by jge - optimize the branch
                         if stripped.startswith('cmp ') and kb + 1 < len(loop_body):
                             next_inst = loop_body[kb + 1]
                             if next_inst.startswith('jge '):
                                 # This is loop exit condition - critical path
                                 result.append(lines[orig_idx])
-                                result[-1] = result[-1].rstrip() + "  # Loop condition"
+                                result[-1] = f"{result[-1].rstrip()}  # Loop condition"
                                 result.append(lines[loop_indices[kb + 1]])
-                                result[-1] = result[-1].rstrip() + "  # Likely forward jump (loop exit)"
+                                result[-1] = f"{result[-1].rstrip()}  # Likely forward jump (loop exit)"
                                 continue
-                        
+
                         result.append(lines[orig_idx])
-                    
+
                     i = loop_end
                     continue
 
@@ -2147,7 +2174,6 @@ class AssemblyOptimizer:
 
             # Detect loop and optimize memory access patterns
             if '.Lfor_start' in line or '.Lwhile_start' in line:
-                loop_start = i
                 loop_lines = [lines[i]]
                 loop_ops = []  # Track memory operations
                 j = i + 1
@@ -2156,16 +2182,16 @@ class AssemblyOptimizer:
                     if '.Lfor_end' in lines[j] or '.Lwhile_end' in lines[j]:
                         loop_end = j
                         break
-                    
+
                     stripped = lines[j].strip()
                     loop_lines.append(lines[j])
-                    
+
                     # Track loads and stores
                     if stripped.startswith('mov rax, ['):
                         loop_ops.append(('load', j, stripped))
                     elif stripped.startswith('mov [') and ', ' in stripped:
                         loop_ops.append(('store', j, stripped))
-                    
+
                     j += 1
 
                 # Group memory operations - loads first, then stores
@@ -2175,9 +2201,12 @@ class AssemblyOptimizer:
 
                 # If we have 3+ operations of each type, we could reorder
                 if len(loads) >= 2 and len(stores) >= 2:
+                    loop_start = i
                     # Add optimization hint
                     result.append(lines[loop_start])
-                    result[-1] = result[-1].rstrip() + f"  # {len(loads)} loads, {len(stores)} stores"
+                    result[-1] = (
+                        f"{result[-1].rstrip()}  # {len(loads)} loads, {len(stores)} stores"
+                    )
                     i = loop_start + 1
                     continue
 
@@ -2204,16 +2233,16 @@ class AssemblyOptimizer:
                 # Find loop exit condition
                 while i < len(lines):
                     stripped = lines[i].strip()
-                    
+
                     if '.Lfor_end' in stripped or '.Lwhile_end' in stripped:
                         result.append(lines[i])
                         i += 1
                         break
-                    
+
                     # Look for cmp instruction (loop termination check)
                     if stripped.startswith('cmp '):
                         result.append(lines[i])
-                        
+
                         # Next line should be jump
                         if i + 1 < len(lines):
                             next_inst = lines[i + 1].strip()
@@ -2225,7 +2254,7 @@ class AssemblyOptimizer:
                                 continue
                         i += 1
                         continue
-                    
+
                     result.append(lines[i])
                     i += 1
                 continue
@@ -2246,7 +2275,6 @@ class AssemblyOptimizer:
 
             # Detect fibonacci pattern loop: for (i < n) { a=b; b=c; c=mod(a+b); i++ }
             if '.Lfor_start' in line:
-                loop_start = i
                 loop_body_start = None
                 loop_end = None
 
@@ -2255,7 +2283,7 @@ class AssemblyOptimizer:
                     # First conditional jump skips the loop body on exit condition
                     if loop_body_start is None and ('jge ' in lines[j] or 'jle ' in lines[j] or 'jg ' in lines[j] or 'jl ' in lines[j]):
                         loop_body_start = j + 1
-                    
+
                     # Backward jump marks end of loop body
                     if 'jmp .Lfor_start' in lines[j]:
                         loop_end = j
@@ -2272,30 +2300,30 @@ class AssemblyOptimizer:
                                 inst = stripped.split('#')[0].strip()
                                 if inst and not inst.startswith('.'):
                                     loop_instructions.append(inst)
-                    
+
                     # Check for fibonacci characteristics
                     has_add = any('add rax' in inst for inst in loop_instructions)
                     has_idiv = any('idiv' in inst for inst in loop_instructions)
-                    has_mov_stores = sum(1 for inst in loop_instructions if inst.startswith('mov [rbp'))
+                    has_mov_stores = sum(bool(inst.startswith('mov [rbp'))
+                                     for inst in loop_instructions)
                     has_inc = any('inc ' in inst or ('add ' in inst and ', 1' in inst) for inst in loop_instructions)
                     has_cmp = any('cmp ' in inst for inst in loop_instructions)
                     has_jge = any(inst.startswith('jge') for inst in loop_instructions)
 
                     # Fibonacci pattern: has all key operations
-                    if (has_add and has_idiv and has_mov_stores >= 3 and 
+                    if (has_add and has_idiv and has_mov_stores >= 3 and
                         has_inc):
-                        
+
+                        loop_start = i
                         # Apply fibonacci-optimized version
                         result.append(lines[loop_start])
-                        result[-1] = result[-1].rstrip() + "  # <<< FIBONACCI LOOP DETECTED >>>"
-                        
+                        result[-1] = f"{result[-1].rstrip()}  # <<< FIBONACCI LOOP DETECTED >>>"
+
                         # For fibonacci, keep the loop alignment but don't add extra .align
                         # that could break code alignment. The existing .align 16 is sufficient.
-                        
+
                         # Process rest without changing code structure
-                        for k in range(loop_start + 1, loop_end):
-                            result.append(lines[k])
-                        
+                        result.extend(lines[k] for k in range(loop_start + 1, loop_end))
                         i = loop_end
                         continue
 
@@ -2314,7 +2342,6 @@ class AssemblyOptimizer:
 
             # Detect loop start
             if '.Lfor_start' in line or '.Lwhile_start' in line:
-                loop_start = i
                 loop_lines = []
                 j = i + 1
                 loop_end = len(lines)
@@ -2332,16 +2359,17 @@ class AssemblyOptimizer:
                 invariant_lines = []
                 for k, line_text in enumerate(loop_lines):
                     stripped = line_text.strip()
-                    
+
                     # mov to constant is loop-invariant
                     if stripped == 'mov rbx, 1000000':
                         invariant_lines.append(k)
 
                 if invariant_lines:
+                    loop_start = i
                     # These could be hoisted to before the loop
                     result.append(lines[loop_start])
-                    result[-1] = result[-1].rstrip() + "  # Loop with invariants"
-                    
+                    result[-1] = f"{result[-1].rstrip()}  # Loop with invariants"
+
                     # Add all loop lines
                     result.extend(loop_lines)
                     i = loop_end
@@ -2377,19 +2405,14 @@ class AssemblyOptimizer:
 
                 if found_pattern:
                     indent = self._get_indent(lines[i])
-                    
-                    # Generate optimized MOD 1000000 code
-                    # For MOD 1000000, we can use: mov rcx, 1000000; xor rdx,rdx; idiv rcx; mov rax, rdx
-                    # This is the same as standard but with better register usage
-                    
-                    # Actually, for powers of 10, we could use other techniques
-                    # But idiv is still needed for arbitrary constants
-                    # Annotate that this is the critical path
-                    
-                    result.append(f"{indent}xor rdx, rdx  # MOD critical path - start")
-                    result.append(f"{indent}mov rbx, 1000000")
-                    result.append(f"{indent}idiv rbx  # MOD 1000000 - hot operation, optimize for throughput")
-                    
+
+                    result.extend(
+                        (
+                            f"{indent}xor rdx, rdx  # MOD critical path - start",
+                            f"{indent}mov rbx, 1000000",
+                            f"{indent}idiv rbx  # MOD 1000000 - hot operation, optimize for throughput",
+                        )
+                    )
                     i = idiv_idx + 1
                     continue
 

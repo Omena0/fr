@@ -21,10 +21,10 @@ def load_config():
             'c': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
             'py': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
         }
-    
+
     with open(config_path) as f:
         config = json.load(f)
-    
+
     # Ensure all required fields exist with defaults
     for runtime in ['native', 'c', 'py']:
         if runtime not in config:
@@ -39,12 +39,12 @@ def load_config():
             config[runtime]['skip_mismatch'] = []
         if 'allow_timeout_failures' not in config[runtime]:
             config[runtime]['allow_timeout_failures'] = False
-    
+
     return config
 
 def get_test_category(test_path):
     """Extract test category from test path (first folder name under cases/)
-    
+
     Examples:
     - cases/control_flow/if_else.fr -> control_flow
     - cases/data_structures/struct_basic.fr -> data_structures
@@ -55,7 +55,7 @@ def get_test_category(test_path):
 
 def should_skip_test(test_path, runtime, config):
     """Check if a test should be skipped for a given runtime based on config
-    
+
     Returns: True if test should be skipped, False otherwise
     """
     runtime_config = config.get(runtime, {})
@@ -76,19 +76,19 @@ def run_test_isolated(test_file, test_content, config=None):
 
     if config is None:
         config = load_config()
-    
+
     # Calculate maximum timeout from all enabled runtimes
     max_timeout = 5
     for runtime in ['native', 'c', 'py']:
         if config.get(runtime, {}).get('enabled', True):
             runtime_timeout = config.get(runtime, {}).get('timeout', 10)
             max_timeout = max(max_timeout, runtime_timeout)
-    
+
     # Determine which runtimes to skip for this test
     skip_py = should_skip_test(test_file, 'py', config)
     skip_c = should_skip_test(test_file, 'c', config)
     skip_native = should_skip_test(test_file, 'native', config)
-    
+
     # Build arguments to pass to helper script
     helper_args = [sys.executable, str(helper_script), test_file]
     if skip_py:
@@ -152,7 +152,7 @@ def run_test_isolated(test_file, test_content, config=None):
                 'native_error': line[6:],
                 'mismatch': False
             }
-    
+
     # If neither PY_OUTPUT nor PY_ERROR is present, Python runtime was skipped
     if py_output is None and py_error is None:
         py_skipped = True
@@ -267,7 +267,7 @@ def run_test_isolated(test_file, test_content, config=None):
             py_msg = extract_msg(py_error) if py_error and py_error != 'SKIPPED' else extract_msg(py_output) if py_output else ''
             vm_msg = extract_msg(vm_error) if vm_error and vm_error != 'SKIPPED' else extract_msg(vm_output) if vm_output else ''
             native_msg = extract_msg(native_error) if native_error and native_error != 'SKIPPED' else extract_msg(native_output) if native_output else ''
-            
+
             # Check against alternatives if provided
             if expect_alternatives:
                 py_passed = not py_skipped and any(normalize_line_numbers(py_msg, extract_msg(alt)) for alt in expect_alternatives)

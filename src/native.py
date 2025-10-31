@@ -63,26 +63,22 @@ class X86Compiler:
         """Emit a call to a runtime function and track the dependency
         Ensures stack is 16-byte aligned before the call"""
         self.emit_dependency(func_name)
-        # Check stack alignment: (rsp & 15) == 0 means aligned
-        # We need to align the stack before calling runtime functions
-        # that might use SSE instructions
-        # The x86-64 ABI requires 16-byte alignment before call
-        # After function prologue (push rbp; sub rsp, 256), we have:
-        #   - return address (8 bytes)
-        #   - saved rbp (8 bytes) 
-        #   - local space (256 bytes)
-        # Total: 272 bytes from original rsp, which is 16-byte aligned
-        # But after each push (8 bytes), we alternate between aligned and misaligned
-        # To ensure alignment, we can test and adjust:
-        self.emit("test rsp, 8")  # Test if bit 3 is set (misaligned)
-        self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
-        self.emit("sub rsp, 8  # Align stack")
-        self.emit(f"call {func_name}")
-        self.emit("add rsp, 8  # Restore stack")
-        self.emit(f"jmp .L{func_name}_done_{self.label_counter}")
-        self.emit(f".L{func_name}_aligned_{self.label_counter}:", 0)
-        self.emit(f"call {func_name}")
-        self.emit(f".L{func_name}_done_{self.label_counter}:", 0)
+        # The x86-64 ABI requires (rsp & 0x0F) == 0 BEFORE the call instruction.
+        # We use inline alignment checking. We save rax temporarily to use as a scratch register.
+        self.emit("push rax  # Save rax and check alignment")
+        self.emit("mov rax, rsp")
+        self.emit("add rax, 8  # Account for the push")
+        self.emit("test rax, 0xF")
+        self.emit("pop rax")
+        self.emit("jz .L{}_aligned_{}".format(func_name, self.label_counter))
+        # Not aligned - sub 8
+        self.emit("sub rsp, 8")
+        self.emit("call {}".format(func_name))
+        self.emit("add rsp, 8")
+        self.emit("jmp .L{}_done_{}".format(func_name, self.label_counter))
+        self.emit(".L{}_aligned_{}: ".format(func_name, self.label_counter), 0)
+        self.emit("call {}".format(func_name))
+        self.emit(".L{}_done_{}: ".format(func_name, self.label_counter), 0)
         self.label_counter += 1
 
     def get_string_label(self, string: str) -> str:

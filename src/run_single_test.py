@@ -288,7 +288,7 @@ def main():
             bytecode, line_map = compile_ast_to_bytecode(ast)
 
             # Compile bytecode to x86_64 assembly
-            assembly, runtime_deps = compile_to_native(bytecode, optimize=False)
+            assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
 
             # Create runtime file with library code
             with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
@@ -316,6 +316,7 @@ def main():
             compile_cmd = [
                 'gcc',
                 f'-I{runtime_include_dir}',
+                '-Ofast',
                 '-o',
                 native_bin,
                 asm_file,
