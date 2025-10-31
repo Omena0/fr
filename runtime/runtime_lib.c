@@ -23,12 +23,20 @@ void runtime_println_int(int64_t value) {
 }
 
 void runtime_print_float(double value) {
-    printf("%g", value);
+    printf("%f", value);
     fflush(stdout);
 }
 
 void runtime_println_float(double value) {
-    printf("%g\n", value);
+    // Format float to match Python's str() behavior: show at least 1 decimal place
+    // If value is whole number, show .0; otherwise show up to 6 significant digits
+    if (value == (long long)value && value >= -1e15 && value < 1e15) {
+        // Whole number
+        printf("%.1f\n", value);
+    } else {
+        // Use %g for compact representation of decimals
+        printf("%g\n", value);
+    }
 }
 
 void runtime_print_str(const char* str) {

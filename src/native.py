@@ -27,6 +27,7 @@ class X86Compiler:
         self.data_section: List[str] = []  # For string constants
         self.string_constants: Dict[str, str] = {}  # Maps strings to labels
         self.string_counter = 0
+        self.label_counter = 0  # Counter for generating unique labels
         self.label_map: Dict[str, str] = {}  # Maps bytecode labels to asm labels
         self.functions: List[Dict] = []
         self.current_function: Optional[Dict] = None
@@ -164,6 +165,7 @@ class X86Compiler:
                 handler(args)
             else:
                 # Unknown instruction - add comment for future implementation
+                print(f"Warning: Unimplemented opcode {opcode} {' '.join(args)}")
                 self.emit_comment(f"TODO: {opcode} {' '.join(args)}")
                 self.emit(f"# Unimplemented: {opcode}", 1)
 
@@ -868,35 +870,86 @@ class X86Compiler:
     def _compile_add_const_i64(self, args: List[str]):
         """Add constant to top of stack"""
         value = args[0]
-        self.emit("pop rax")
-        self.emit(f"add rax, {value}")
-        self.emit("push rax")
-        # Type stack: i64 + i64 = i64
-        if self.stack_types:
-            self.stack_types.pop()
-        self.stack_types.append('i64')
+        top_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
+        if top_type == 'f64':
+            # Float addition
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit(f"mov rax, {value}")
+            self.emit("cvtsi2sd xmm1, rax")
+            self.emit("addsd xmm0, xmm1")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm0")
+            # Type stack: f64 + i64 = f64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('f64')
+        else:
+            # Integer addition
+            self.emit("pop rax")
+            self.emit(f"add rax, {value}")
+            self.emit("push rax")
+            # Type stack: i64 + i64 = i64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('i64')
 
     def _compile_sub_const_i64(self, args: List[str]):
         """Subtract constant from top of stack"""
         value = args[0]
-        self.emit("pop rax")
-        self.emit(f"sub rax, {value}")
-        self.emit("push rax")
-        # Type stack: i64 - i64 = i64
-        if self.stack_types:
-            self.stack_types.pop()
-        self.stack_types.append('i64')
+        top_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
+        if top_type == 'f64':
+            # Float subtraction
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit(f"mov rax, {value}")
+            self.emit("cvtsi2sd xmm1, rax")
+            self.emit("subsd xmm0, xmm1")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm0")
+            # Type stack: f64 - i64 = f64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('f64')
+        else:
+            # Integer subtraction
+            self.emit("pop rax")
+            self.emit(f"sub rax, {value}")
+            self.emit("push rax")
+            # Type stack: i64 - i64 = i64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('i64')
 
     def _compile_mul_const_i64(self, args: List[str]):
         """Multiply top of stack by constant"""
         value = args[0]
-        self.emit("pop rax")
-        self.emit(f"imul rax, {value}")
-        self.emit("push rax")
-        # Type stack: i64 * i64 = i64
-        if self.stack_types:
-            self.stack_types.pop()
-        self.stack_types.append('i64')
+        top_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
+        if top_type == 'f64':
+            # Float multiplication
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit(f"mov rax, {value}")
+            self.emit("cvtsi2sd xmm1, rax")
+            self.emit("mulsd xmm0, xmm1")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm0")
+            # Type stack: f64 * i64 = f64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('f64')
+        else:
+            # Integer multiplication
+            self.emit("pop rax")
+            self.emit(f"imul rax, {value}")
+            self.emit("push rax")
+            # Type stack: i64 * i64 = i64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('i64')
 
     def _compile_mod_const_i64(self, args: List[str]):
         """Modulo top of stack by constant"""
@@ -914,15 +967,32 @@ class X86Compiler:
     def _compile_div_const_i64(self, args: List[str]):
         """Divide top of stack by constant"""
         value = args[0]
-        self.emit("pop rax")
-        self.emit("cqo")  # Sign extend rax into rdx:rax
-        self.emit(f"mov rbx, {value}")
-        self.emit("idiv rbx")
-        self.emit("push rax")
-        # Type stack: i64 / i64 = i64
-        if self.stack_types:
-            self.stack_types.pop()
-        self.stack_types.append('i64')
+        top_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
+        if top_type == 'f64':
+            # Float division
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit(f"mov rax, {value}")
+            self.emit("cvtsi2sd xmm1, rax")
+            self.emit("divsd xmm0, xmm1")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm0")
+            # Type stack: f64 / i64 = f64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('f64')
+        else:
+            # Integer division
+            self.emit("pop rax")
+            self.emit("cqo")  # Sign extend rax into rdx:rax
+            self.emit(f"mov rbx, {value}")
+            self.emit("idiv rbx")
+            self.emit("push rax")
+            # Type stack: i64 / i64 = i64
+            if self.stack_types:
+                self.stack_types.pop()
+            self.stack_types.append('i64')
 
     def _compile_add_const_f64(self, args: List[str]):
         """Add constant to top of stack (float)"""
@@ -1441,19 +1511,75 @@ class X86Compiler:
         self.emit("push rax")
 
     def _compile_pow(self, args: List[str]):
-        """Power function"""
-        self.emit("movsd xmm1, [rsp]")  # exponent
-        self.emit("add rsp, 8")
-        self.emit("movsd xmm0, [rsp]")  # base
-        self.emit("add rsp, 8")
+        """Power function - converts i64 arguments to f64 if needed, returns int64 if whole"""
+        # Stack has: [base, exponent] with exponent on top
+        # Pop exponent (may be i64 or f64)
+        exponent_type = self.stack_types[-1] if self.stack_types else 'i64'
+        if exponent_type == 'f64':
+            self.emit("movsd xmm1, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer exponent - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm1, rax")
+        
+        # Pop base (may be i64 or f64)
+        base_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
+        if base_type == 'f64':
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer base - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm0, rax")
+        
         self.emit_runtime_call("runtime_pow")
+        
+        # Check if result is a whole number that fits in int64
+        # xmm0 now contains result
+        # Create label for this check
+        whole_label = f".Lpow_whole_{self.label_counter}"
+        float_label = f".Lpow_float_{self.label_counter}"
+        done_label = f".Lpow_done_{self.label_counter}"
+        self.label_counter += 1
+        
+        # Check if floor(result) == result
+        self.emit("movsd xmm1, xmm0")
+        self.emit("roundsd xmm1, xmm0, 1")  # Round toward zero (trunc)
+        self.emit("comisd xmm0, xmm1")      # Compare result with floored value
+        self.emit("je " + whole_label)      # Jump if equal (whole number)
+        
+        # Not a whole number - push as float
+        self.emit(float_label + ":")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
+        self.stack_types.pop() if len(self.stack_types) >= 2 else None
+        if len(self.stack_types) >= 1:
+            self.stack_types.pop()
+        self.stack_types.append('f64')
+        self.emit("jmp " + done_label)
+        
+        # Whole number - convert to int64
+        self.emit(whole_label + ":")
+        self.emit("cvttsd2si rax, xmm0")    # Convert with truncation
+        self.emit("push rax")
+        self.stack_types.pop() if len(self.stack_types) >= 2 else None
+        if len(self.stack_types) >= 1:
+            self.stack_types.pop()
+        self.stack_types.append('i64')
+        
+        self.emit(done_label + ":")
 
     def _compile_builtin_sqrt(self, args: List[str]):
-        """Square root"""
-        self.emit("movsd xmm0, [rsp]")
-        self.emit("add rsp, 8")
+        """Square root - converts i64 argument to f64 if needed"""
+        arg_type = self.stack_types[-1] if self.stack_types else 'i64'
+        if arg_type == 'f64':
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer argument - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm0, rax")
         self.emit_runtime_call("runtime_sqrt")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
@@ -1463,9 +1589,15 @@ class X86Compiler:
         self.stack_types.append('f64')
 
     def _compile_builtin_floor(self, args: List[str]):
-        """Floor function"""
-        self.emit("movsd xmm0, [rsp]")
-        self.emit("add rsp, 8")
+        """Floor function - converts i64 argument to f64 if needed"""
+        arg_type = self.stack_types[-1] if self.stack_types else 'i64'
+        if arg_type == 'f64':
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer argument - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm0, rax")
         self.emit_runtime_call("runtime_floor")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
@@ -1475,9 +1607,15 @@ class X86Compiler:
         self.stack_types.append('f64')
 
     def _compile_builtin_ceil(self, args: List[str]):
-        """Ceil function"""
-        self.emit("movsd xmm0, [rsp]")
-        self.emit("add rsp, 8")
+        """Ceil function - converts i64 argument to f64 if needed"""
+        arg_type = self.stack_types[-1] if self.stack_types else 'i64'
+        if arg_type == 'f64':
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer argument - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm0, rax")
         self.emit_runtime_call("runtime_ceil")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
@@ -1496,6 +1634,8 @@ class X86Compiler:
         self.emit(f"movsd xmm0, [{label}]")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
+        # Update stack types: pi is f64
+        self.stack_types.append('f64')
 
     def _compile_min(self, args: List[str]):
         """Pop two values, push minimum (supports both int and float)"""
@@ -1549,9 +1689,15 @@ class X86Compiler:
         self.emit("movsd [rsp], xmm0")
 
     def _compile_builtin_round(self, args: List[str]):
-        """Pop float, push round(float)"""
-        self.emit("movsd xmm0, [rsp]")
-        self.emit("add rsp, 8")
+        """Pop float/int, push round(value) - converts i64 argument to f64 if needed"""
+        arg_type = self.stack_types[-1] if self.stack_types else 'i64'
+        if arg_type == 'f64':
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+        else:
+            # Integer argument - convert to float
+            self.emit("pop rax")
+            self.emit("cvtsi2sd xmm0, rax")
         self.emit_runtime_call("runtime_round")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
@@ -2110,136 +2256,6 @@ def compile(bytecode: str, optimize: bool = False) -> Tuple[str, set]:
     compiler = X86Compiler(optimize=optimize)
     assembly = compiler.compile(bytecode)
     return assembly, compiler.runtime_dependencies
-
-def create_minimal_runtime(runtime_deps: set, output_path: str|None = None) -> str:
-    """
-    Extract only needed functions from runtime library.
-
-    Args:
-        runtime_deps: Set of runtime function names that are used
-        output_path: Optional path to write the minimal runtime to
-
-    Returns:
-        Path to the minimal runtime library file
-    """
-    from pathlib import Path
-    import re
-
-    # Find the full runtime library
-    runtime_lib_full = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.c'
-
-    if not runtime_lib_full.exists():
-        raise FileNotFoundError(f"Runtime library not found at {runtime_lib_full}")
-
-    with open(runtime_lib_full, 'r') as f:
-        full_content = f.read()
-
-    # Split into sections (includes, function definitions)
-    lines = full_content.split('\n')
-
-    # Extract includes and global declarations (everything before first function)
-    includes = []
-    file_header = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # Keep file header comments and copyright
-        if stripped.startswith('/*') or stripped.startswith('*') or stripped.startswith('//'):
-            file_header.append(line)
-        # Stop at first function definition
-        elif stripped and not stripped.startswith('#') and not stripped.startswith('typedef'):
-            if '{' in line or (i + 1 < len(lines) and '{' in lines[i + 1]):
-                break
-            # Keep other declarations (typedefs, etc)
-            if stripped.startswith('#include') or stripped.startswith('typedef'):
-                includes.append(line)
-        # Skip empty lines before functions
-        elif not stripped:
-            if i + 1 < len(lines) and (lines[i + 1].strip().startswith('#') or lines[i + 1].strip().startswith('typedef')):
-                includes.append(line)
-        else:
-            includes.append(line)
-        i += 1
-
-    # Extract function definitions
-    functions = {}
-    current_func = None
-    current_func_lines = []
-    brace_count = 0
-    in_function = False
-
-    while i < len(lines):
-        line = lines[i]
-
-        # Detect function start (void/int/etc followed by runtime_ and parenthesis)
-        # Updated regex to include struct pointers like RuntimeList*, RuntimeSet*, etc.
-        if not in_function and re.match(r'^(void|int|int64_t|double|char\s*\*|long|bool|Runtime\w+\*)\s+runtime_\w+\s*\(', line.strip()):
-            if match := re.search(r'runtime_(\w+)', line):
-                current_func = f"runtime_{match.group(1)}"
-                current_func_lines = [line]
-                in_function = True
-                brace_count = line.count('{') - line.count('}')
-        elif in_function:
-            current_func_lines.append(line)
-            brace_count += line.count('{') - line.count('}')
-
-            # Function ended
-            if brace_count == 0:
-                functions[current_func] = '\n'.join(current_func_lines)
-                current_func = None
-                current_func_lines = []
-                in_function = False
-
-        i += 1
-
-    # Recursively find all dependencies (functions that call other runtime functions)
-    all_needed = set(runtime_deps)
-    to_check = list(runtime_deps)
-
-    while to_check:
-        func_name = to_check.pop()
-        if func_name in functions:
-            func_body = functions[func_name]
-            # Find all runtime_ function calls in this function
-            for match in re.finditer(r'runtime_(\w+)\s*\(', func_body):
-                dep_func = f"runtime_{match.group(1)}"
-                if dep_func not in all_needed and dep_func in functions:
-                    all_needed.add(dep_func)
-                    to_check.append(dep_func)
-
-    # Build minimal runtime with all necessary includes
-    # GCC will optimize away unused functions during linking
-    filtered_includes = list(file_header)
-    filtered_includes.extend(
-        (
-            '',
-            '#include "runtime_lib.h"',
-            '#include <stdio.h>',
-            '#include <stdlib.h>',
-            '#include <string.h>',
-            '#include <math.h>',
-            '#include <ctype.h>',
-        )
-    )
-    # Build minimal runtime with only needed functions
-    minimal_parts = filtered_includes
-    minimal_parts.append('')    # Add all needed functions (use all_needed instead of runtime_deps)
-    for func_name in sorted(all_needed):
-        if func_name in functions:
-            minimal_parts.extend((functions[func_name], '\n'))
-    minimal_content = '\n'.join(minimal_parts)
-
-    # Write to output file
-    if output_path is None:
-        output_path = Path(__file__).parent.parent / 'runtime' / 'runtime_lib_minimal.c' # type: ignore
-        assert output_path
-
-    with open(output_path, 'w') as f:
-        f.write(minimal_content)
-
-    return str(output_path)
 
 
 if __name__ == "__main__":

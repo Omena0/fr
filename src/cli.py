@@ -317,31 +317,17 @@ def native_cmd(args):
             subprocess.run(['as', asm_file, '-o', obj_file], check=True, 
                          capture_output=True)
 
-            # Create minimal runtime library with only needed functions
-            runtime_lib = native.create_minimal_runtime(runtime_deps)
+            runtime_lib = r'runtime/runtime_lib.c'
             runtime_dir = os.path.dirname(os.path.abspath(runtime_lib))
-            
-            if use_minimal:
-                # Use selective C runtime with aggressive size optimization for static linking
-                gcc_flags = [
-                    'gcc', obj_file, str(runtime_lib), '-o', exe_file,
-                    f'-I{runtime_dir}',
-                    '-Oz', '-march=native', '-flto',
-                    '-ffunction-sections', '-fdata-sections',
-                    '-Wl,--gc-sections', '-Wl,-z,noseparate-code', '-s',
-                    '-static', '-no-pie',
-                    '-fno-asynchronous-unwind-tables', '-fno-unwind-tables'
-                ]
-            else:
-                # Use full minimal runtime with dynamic linking
-                gcc_flags = [
-                    'gcc', obj_file, str(runtime_lib), '-o', exe_file,
-                    f'-I{runtime_dir}',
-                    '-Os', '-march=native', '-flto',
-                    '-ffunction-sections', '-fdata-sections',
-                    '-Wl,--gc-sections', '-s',
-                    '-lm', '-no-pie'
-                ]
+
+            # Use full minimal runtime with dynamic linking
+            gcc_flags = [
+                'gcc', obj_file, str(runtime_lib), '-o', exe_file,
+                f'-I{runtime_dir}', '-Ofast',
+                '-ffunction-sections', '-fdata-sections',
+                '-Wl,--gc-sections',  # Removed '-s' to keep symbols for debugging
+                '-lm', '-no-pie'
+            ]
 
             # Build native binary executable
             subprocess.run(gcc_flags, check=True, capture_output=True)
@@ -349,7 +335,8 @@ def native_cmd(args):
             print(f"Built executable: {exe_file}")
 
             # Clean up intermediate files
-            os.remove(obj_file)
+            # DEBUG: Keep object file
+            # os.remove(obj_file)
             if not keep_asm:
                 os.remove(asm_file)
 
