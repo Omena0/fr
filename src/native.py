@@ -1588,6 +1588,12 @@ class X86Compiler:
         self.emit("pop rdi   # string")
         self.emit_runtime_call("runtime_str_replace")
         self.emit("push rax   # result")
+        # Pop three strings, push one string
+        if len(self.stack_types) >= 3:
+            self.stack_types.pop()  # new
+            self.stack_types.pop()  # old
+            self.stack_types.pop()  # string
+        self.stack_types.append('str')
 
     def _compile_encode(self, args: List[str]):
         """Encode string to bytes"""
