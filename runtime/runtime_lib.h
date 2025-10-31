@@ -125,6 +125,12 @@ char* runtime_float_to_str(double value);
 char* runtime_bool_to_str(int64_t value);
 
 /**
+ * Check if string contains substring
+ * Returns 1 (true) if found, 0 (false) if not found
+ */
+int64_t runtime_str_contains(const char* haystack, const char* needle);
+
+/**
  * Strip whitespace from both ends of string
  * Returns newly allocated string
  */

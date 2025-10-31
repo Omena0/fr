@@ -188,6 +188,13 @@ char* runtime_bool_to_str(int64_t value) {
     return result;
 }
 
+int64_t runtime_str_contains(const char* haystack, const char* needle) {
+    // Check if haystack contains needle substring
+    // Returns 1 (true) if found, 0 (false) otherwise
+    if (!haystack || !needle) return 0;
+    return strstr(haystack, needle) != NULL ? 1 : 0;
+}
+
 char* runtime_str_strip(const char* str) {
     // Find start (skip leading whitespace)
     while (*str && isspace(*str)) str++;
