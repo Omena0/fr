@@ -831,6 +831,28 @@ class X86Compiler:
                 # Push i64 type (we don't know the actual type of locals, assume i64)
                 self.stack_types.append('i64')
 
+    def _compile_fused_load_store(self, args: List[str]):
+        """Interleaved load/store operations (FUSED_LOAD_STORE var0 var1 var2 ...)
+        Even indices are LOAD operations (load from var and push)
+        Odd indices are STORE operations (pop and store to var)"""
+        for i, var_str in enumerate(args):
+            var_id = int(var_str)
+            offset = (var_id + 1) * 8
+
+            if i % 2 == 0:
+                # LOAD: load from variable and push to stack
+                self.emit(f"mov rax, [rbp - {offset}]")
+                self.emit("push rax")
+                # Push i64 type (we don't know the actual type of locals, assume i64)
+                self.stack_types.append('i64')
+            else:
+                # STORE: pop from stack and store to variable
+                self.emit("pop rax")
+                self.emit(f"mov [rbp - {offset}], rax")
+                # Pop type from stack
+                if self.stack_types:
+                    self.stack_types.pop()
+
     def _compile_inc_local(self, args: List[str]):
         """Increment local variable by 1"""
         var_index = int(args[0])
