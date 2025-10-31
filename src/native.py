@@ -690,6 +690,56 @@ class X86Compiler:
         # the native backend can treat SELECT as a no-op placeholder.
         self.emit("# SELECT (handled by surrounding CMP/JUMP sequences)")
 
+    def _compile_switch_jump_table(self, args: List[str]):
+        """Switch jump table: SWITCH_JUMP_TABLE min_value max_value case_label1 case_label2 ... default_label"""
+        if len(args) < 3:
+            self.emit("# Invalid SWITCH_JUMP_TABLE instruction")
+            return
+
+        min_value = int(args[0])
+        max_value = int(args[1])
+        case_labels = args[2:]
+        
+        # The last argument is typically the default label
+        default_label = case_labels[-1] if case_labels else None
+        case_labels = case_labels[:-1] if len(case_labels) > 1 else []
+
+        # Pop the switch value
+        self.emit("pop rax")
+        
+        # Generate a jump table
+        # Check if value is out of range
+        self.emit(f"cmp rax, {min_value}")
+        if default_label:
+            asm_default = f".L{default_label}"
+            self.emit(f"jl {asm_default}")
+        
+        self.emit(f"cmp rax, {max_value}")
+        if default_label:
+            asm_default = f".L{default_label}"
+            self.emit(f"jg {asm_default}")
+        
+        # Compute offset into jump table: rax = rax - min_value
+        if min_value != 0:
+            self.emit(f"sub rax, {min_value}")
+        
+        # Generate jump table
+        for i, label in enumerate(case_labels):
+            asm_label = f".L{label}"
+            if i == 0:
+                # First case: value should be 0
+                self.emit(f"cmp rax, {i}")
+                self.emit(f"je {asm_label}")
+            else:
+                # Subsequent cases
+                self.emit(f"cmp rax, {i}")
+                self.emit(f"je {asm_label}")
+        
+        # Default case
+        if default_label:
+            asm_default = f".L{default_label}"
+            self.emit(f"jmp {asm_default}")
+
     def _compile_cmp_lt_const(self, args: List[str]):
         """Compare top of stack < constant"""
         value = args[0]
@@ -1287,7 +1337,7 @@ class X86Compiler:
         """Assert condition is true"""
         # Stack: message_ptr (lower), condition (top)
         self.emit("pop rdi   # condition (top)")
-        self.emit("pop rsi   # message")
+        self.emit("pop rsi   # message (or NULL)")
         self.emit_runtime_call("runtime_assert")
 
     # ============================================================================
