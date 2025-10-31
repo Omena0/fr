@@ -1947,18 +1947,21 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("mov rbx, rax")  # Save list in callee-saved rbx
         
-        # Set elem_type to 0 (integer)
-        self.emit("mov dword ptr [rbx + 24], 0  # elem_type = 0 (int)")
+        # Set elem_type to 0 (integer) - rax has the list pointer
+        self.emit("mov dword ptr [rax + 24], 0  # elem_type = 0 (int)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value in values:
-            self.emit("mov rdi, rbx")  # Load list pointer to rdi (first param)
+            # Peek at list pointer without popping
+            self.emit("mov rdi, [rsp]")  # Load list pointer to rdi (first param)
             self.emit(f"mov rsi, {value}")  # value (second param)
             self.emit_runtime_call("runtime_list_append_int")
         
-        self.emit("push rbx")  # Push list on stack
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -1970,11 +1973,12 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 2 (float)
-        self.emit("mov rdi, [rsp]")  # Load list pointer
-        self.emit("mov dword ptr [rdi + 24], 2  # elem_type = 2 (float)")
+        self.emit("mov dword ptr [rax + 24], 2  # elem_type = 2 (float)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value in values:
@@ -1985,13 +1989,12 @@ class X86Compiler:
             self.data_section.append(f"    .double {value}")
             
             # Load float value and append
-            self.emit("pop rdi")  # Load list pointer
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"movsd xmm0, [{label}]")  # value in xmm0
             self.emit("movq rsi, xmm0")  # Move xmm0 to rsi as int64 bits
             self.emit_runtime_call("runtime_list_append_int")
-            self.emit("push rdi")  # Save list pointer back
         
-        # List is already on stack
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2004,11 +2007,12 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 1 (string)
-        self.emit("mov rdi, [rsp]")  # Load list pointer
-        self.emit("mov dword ptr [rdi + 24], 1  # elem_type = 1 (string)")
+        self.emit("mov dword ptr [rax + 24], 1  # elem_type = 1 (string)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value_str in values:
@@ -2019,12 +2023,11 @@ class X86Compiler:
             label = self.get_string_label(value_str)
             
             # Load string pointer and append
-            self.emit("pop rdi")  # Load list pointer
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"lea rsi, [{label}]")  # value as string pointer
             self.emit_runtime_call("runtime_list_append_int")
-            self.emit("push rdi")  # Save list pointer back
         
-        # List is already on stack
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2036,11 +2039,12 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Save list on stack
         
         # Set elem_type to 3 (bool)
-        self.emit("mov rdi, [rsp]")  # Load list pointer
-        self.emit("mov dword ptr [rdi + 24], 3  # elem_type = 3 (bool)")
+        self.emit("mov dword ptr [rax + 24], 3  # elem_type = 3 (bool)")
+        
+        # Save list pointer on stack
+        self.emit("push rax")
         
         # Append each value
         for value in values:
@@ -2048,12 +2052,11 @@ class X86Compiler:
             bool_val = "1" if value in ("1", "true") else "0"
             
             # Load bool value and append
-            self.emit("pop rdi")  # Load list pointer
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
             self.emit(f"mov rsi, {bool_val}")  # value
             self.emit_runtime_call("runtime_list_append_int")
-            self.emit("push rdi")  # Save list pointer back
         
-        # List is already on stack
+        # List pointer is already on stack
         
         # Update type stack
         self.stack_types.append('list')
