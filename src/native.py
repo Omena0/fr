@@ -383,16 +383,33 @@ class X86Compiler:
     # ============================================================================
 
     def _compile_add_i64(self, args: List[str]):
-        """Add two 64-bit integers"""
-        self.emit("pop rbx")
-        self.emit("pop rax")
-        self.emit("add rax, rbx")
-        self.emit("push rax")
-        # Update type stack
-        if self.stack_types and len(self.stack_types) >= 2:
-            self.stack_types.pop()  # pop operand 2
-            self.stack_types.pop()  # pop operand 1
-        self.stack_types.append('i64')
+        """Add two 64-bit integers or concatenate strings"""
+        # Check if both operands are strings
+        second_type = self.stack_types[-1] if self.stack_types else 'i64'
+        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
+        
+        if first_type == 'str' and second_type == 'str':
+            # String concatenation
+            self.emit("pop rsi")  # Second string
+            self.emit("pop rdi")  # First string
+            self.emit_runtime_call("runtime_str_concat")
+            self.emit("push rax")
+            # Update type stack
+            if self.stack_types and len(self.stack_types) >= 2:
+                self.stack_types.pop()  # pop operand 2
+                self.stack_types.pop()  # pop operand 1
+            self.stack_types.append('str')
+        else:
+            # Integer addition
+            self.emit("pop rbx")
+            self.emit("pop rax")
+            self.emit("add rax, rbx")
+            self.emit("push rax")
+            # Update type stack
+            if self.stack_types and len(self.stack_types) >= 2:
+                self.stack_types.pop()  # pop operand 2
+                self.stack_types.pop()  # pop operand 1
+            self.stack_types.append('i64')
 
     def _compile_sub_i64(self, args: List[str]):
         """Subtract two 64-bit integers"""
@@ -1612,15 +1629,27 @@ class X86Compiler:
 
     def _compile_encode(self, args: List[str]):
         """Encode string to bytes"""
-        self.emit("pop rdi")
+        self.emit("pop rsi   # encoding")
+        self.emit("pop rdi   # string")
         self.emit_runtime_call("runtime_str_encode")
         self.emit("push rax")
+        # Pop both encoding and string, push bytes
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # encoding
+            self.stack_types.pop()  # string
+        self.stack_types.append('bytes')
 
     def _compile_decode(self, args: List[str]):
         """Decode bytes to string"""
-        self.emit("pop rdi")
+        self.emit("pop rsi   # encoding")
+        self.emit("pop rdi   # bytes")
         self.emit_runtime_call("runtime_str_decode")
         self.emit("push rax")
+        # Pop both encoding and bytes, push string
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # encoding
+            self.stack_types.pop()  # bytes
+        self.stack_types.append('str')
 
     # ============================================================================
     # Math Operations
@@ -2097,9 +2126,19 @@ class X86Compiler:
 
     def _compile_set_add(self, args: List[str]):
         """Add value to set"""
+        # Get the type of the value being added
+        value_type = self.stack_types[-1] if self.stack_types else 'i64'
+        
         self.emit("pop rsi   # value")
         self.emit("pop rdi   # set")
-        self.emit_runtime_call("runtime_set_add")
+        
+        # Pass element type as third argument (0=int, 1=string)
+        if value_type == 'str':
+            self.emit("mov rdx, 1  # elem_type: string")
+        else:
+            self.emit("mov rdx, 0  # elem_type: int")
+        
+        self.emit_runtime_call("runtime_set_add_typed")
         self.emit("push rdi   # return set")
         # Pop both value and set from stack_types, push set back
         if len(self.stack_types) >= 2:
