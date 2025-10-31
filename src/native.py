@@ -717,9 +717,11 @@ class X86Compiler:
 
     def _compile_goto_call(self, args: List[str]):
         """Jump to label and save return address (like CALL but for goto with return)"""
-        label = args[0]
+        label = args[0].rstrip(':')
+        # Map bytecode label to asm label
+        asm_label = f".L{label}"
         # Similar to CALL but doesn't set up a new frame
-        self.emit(f"call {label}")
+        self.emit(f"call {asm_label}")
         self.emit("push rax")
 
     def _compile_select(self, args: List[str]):
@@ -1995,15 +1997,18 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        
+        # Set elem_type to 0 (integer)
+        self.emit("mov dword ptr [rdi + 24], 0  # elem_type = 0 (int)")
         
         # Append each value
         for value in values:
-            # Pop list, set up parameters, call append, push list back
-            self.emit("pop rdi")  # list (first param)
+            # list is in rdi, value in rsi
             self.emit(f"mov rsi, {value}")  # value (second param)
             self.emit_runtime_call("runtime_list_append_int")
-            self.emit("push rdi")  # Push list back on stack
+        
+        self.emit("push rdi")  # Push list on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2015,10 +2020,12 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        self.emit("mov rdi, rax")  # Save list pointer in rdi
         
-        # Append each value - but first we need to check if append_float exists
-        # If not, we'll need to use append_int and cast
+        # Set elem_type to 2 (float)
+        self.emit("mov dword ptr [rdi + 24], 2  # elem_type = 2 (float)")
+        
+        # Append each value
         for value in values:
             # Create a label for the float constant
             label = f".FLOAT{self.string_counter}"
@@ -2026,13 +2033,13 @@ class X86Compiler:
             self.data_section.append(f"{label}:")
             self.data_section.append(f"    .double {value}")
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load float value and append
             self.emit(f"movsd xmm0, [{label}]")  # value in xmm0
             # For float append, need to cast double to int64 bits
             self.emit("movq rsi, xmm0")  # Move xmm0 to rsi as int64 bits
             self.emit_runtime_call("runtime_list_append_int")  # Use int append to store bits
-            self.emit("push rdi")  # Push list back on stack
+        
+        self.emit("push rdi")  # Push list on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2045,7 +2052,10 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        
+        # Set elem_type to 1 (string)
+        self.emit("mov dword ptr [rdi + 24], 1  # elem_type = 1 (string)")
         
         # Append each value
         for value_str in values:
@@ -2055,11 +2065,11 @@ class X86Compiler:
             
             label = self.get_string_label(value_str)
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load string pointer and append
             self.emit(f"lea rsi, [{label}]")  # value as string pointer
             self.emit_runtime_call("runtime_list_append_int")  # Use int append to store pointer
-            self.emit("push rdi")  # Push list back on stack
+        
+        self.emit("push rdi")  # Push list on stack
         
         # Update type stack
         self.stack_types.append('list')
@@ -2071,23 +2081,24 @@ class X86Compiler:
         
         # Create new list
         self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")  # Push list on stack
+        self.emit("mov rdi, rax")  # Save list pointer in rdi
+        
+        # Set elem_type to 3 (bool)
+        self.emit("mov dword ptr [rdi + 24], 3  # elem_type = 3 (bool)")
         
         # Append each value
         for value in values:
             # Convert bool string to value
             bool_val = "1" if value in ("1", "true") else "0"
             
-            # Pop list, set up parameters, call append
-            self.emit("pop rdi")  # list
+            # Load bool value and append
             self.emit(f"mov rsi, {bool_val}")  # value
             self.emit_runtime_call("runtime_list_append_int")  # Use int append for bools too
-            self.emit("push rdi")  # Push list back on stack
+        
+        self.emit("push rdi")  # Push list on stack
         
         # Update type stack
         self.stack_types.append('list')
-        self.emit_runtime_call("runtime_list_new")
-        self.emit("push rax")
 
     def _compile_contains(self, args: List[str]):
         """Check if list/string/set contains value"""
