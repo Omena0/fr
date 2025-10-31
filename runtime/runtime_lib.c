@@ -426,6 +426,11 @@ void runtime_list_append_int(RuntimeList* list, int64_t value) {
 }
 
 int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
+    // Handle negative indices (Python-style)
+    if (index < 0) {
+        index = list->length + index;
+    }
+    
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
@@ -434,6 +439,11 @@ int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
 }
 
 void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
+    // Handle negative indices (Python-style)
+    if (index < 0) {
+        index = list->length + index;
+    }
+    
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
