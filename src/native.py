@@ -1232,6 +1232,11 @@ class X86Compiler:
             self.emit("xor rax, rax")  # Set rax=0 (number of XMM registers used per ABI)
             self.emit_runtime_call("runtime_println_float")
             self.stack_types.pop()
+        elif self.stack_types and self.stack_types[-1] == 'str':
+            # String value - use runtime_println_str
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_println_str")
+            self.stack_types.pop()
         elif self.stack_types and self.stack_types[-1] == 'bool':
             # Bool value - convert to string first
             self.emit("pop rdi")
