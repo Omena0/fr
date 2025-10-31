@@ -1462,10 +1462,67 @@ class X86Compiler:
     # ============================================================================
 
     def _compile_add_str(self, args: List[str]):
-        """Concatenate two strings"""
-        self.emit("pop rsi")  # Second string
-        self.emit("pop rdi")  # First string
-        # Use the checked wrapper to validate pointers at runtime
+        """Concatenate two strings - convert operands if needed"""
+        # Pop operands
+        self.emit("pop rsi")  # Second operand (top of stack)
+        self.emit("pop rdi")  # First operand
+        
+        # Check types and convert if needed
+        second_type = self.stack_types[-1] if self.stack_types else 'i64'
+        first_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
+        
+        # Generate unique labels
+        label_num = self.label_counter
+        self.label_counter += 1
+        
+        # Special case: if both are small integers (< 0x100000), add them first then convert
+        self.emit("cmp rdi, 0x100000")
+        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
+        self.emit("cmp rsi, 0x100000")
+        self.emit(f"jge .Ladd_str_need_concat_{label_num}")
+        # Both are small integers, add them then convert to string
+        self.emit("mov rax, rdi")
+        self.emit("add rax, rsi")
+        self.emit("mov rdi, rax")
+        self.emit_runtime_call("runtime_int_to_str")
+        self.emit("push rax")
+        # Result is a string
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('str')
+        self.emit(f"jmp .Ladd_str_done_{label_num}")
+        
+        # Convert non-strings to strings if needed
+        self.emit(f".Ladd_str_need_concat_{label_num}:", 0)
+        
+        if second_type != 'str':
+            # Check if rsi is a small integer (< 0x100000 and positive, not a pointer)
+            self.emit("cmp rsi, 0x100000")
+            self.emit(f"jl .Ladd_str_int_rsi_{label_num}")
+            self.emit(f"jmp .Ladd_str_not_int_rsi_{label_num}")
+            self.emit(f".Ladd_str_int_rsi_{label_num}:", 0)
+            # rsi is a small integer, convert it to string
+            self.emit("mov rax, rsi")
+            self.emit("mov rdi, rax")
+            self.emit_runtime_call("runtime_int_to_str")
+            self.emit("mov rsi, rax")
+            self.emit(f".Ladd_str_not_int_rsi_{label_num}:", 0)
+        
+        if first_type != 'str':
+            # Check if rdi is a small integer
+            self.emit("cmp rdi, 0x100000")
+            self.emit(f"jl .Ladd_str_int_rdi_{label_num}")
+            self.emit(f"jmp .Ladd_str_not_int_rdi_{label_num}")
+            self.emit(f".Ladd_str_int_rdi_{label_num}:", 0)
+            # rdi is a small integer, convert it to string
+            self.emit("mov rax, rdi")
+            self.emit("mov rdi, rax")
+            self.emit_runtime_call("runtime_int_to_str")
+            self.emit("mov rdi, rax")
+            self.emit(f".Ladd_str_not_int_rdi_{label_num}:", 0)
+        
+        # Now both rdi and rsi should be strings
         self.emit_runtime_call("runtime_str_concat_checked")
         self.emit("push rax")
         # Result is a string
@@ -1473,6 +1530,8 @@ class X86Compiler:
             self.stack_types.pop()
             self.stack_types.pop()
         self.stack_types.append('str')
+        
+        self.emit(f".Ladd_str_done_{label_num}:", 0)
 
     def _compile_str_upper(self, args: List[str]):
         """Convert string to uppercase"""
