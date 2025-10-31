@@ -1,0 +1,72 @@
+[
+  {
+    "type": "function",
+    "name": "main",
+    "return": "void",
+    "args": [],
+    "scope": [
+      {
+        "type": "var",
+        "name": "nums",
+        "value_type": "list",
+        "value": [
+          1,
+          2,
+          3
+        ],
+        "mods": [],
+        "line": 4
+      },
+      {
+        "type": "var",
+        "name": "msg",
+        "value_type": "str",
+        "value": {
+          "values": [
+            {
+              "value": "Value: "
+            },
+            {
+              "value": {
+                "id": "nums"
+              },
+              "conversion": -1
+            },
+            {
+              "value": ", Length: "
+            },
+            {
+              "value": {
+                "func": {
+                  "id": "len"
+                },
+                "args": [
+                  {
+                    "id": "nums"
+                  }
+                ],
+                "keywords": []
+              },
+              "conversion": -1
+            }
+          ]
+        },
+        "mods": [],
+        "line": 5
+      },
+      {
+        "type": "call",
+        "name": "println",
+        "args": [
+          {
+            "id": "msg"
+          }
+        ],
+        "return_type": "none",
+        "line": 6
+      }
+    ],
+    "mods": [],
+    "line": 3
+  }
+]
