@@ -8,6 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <stdint.h>
 
 // ============================================================================
 // Basic I/O
@@ -160,7 +161,39 @@ char* runtime_int_to_str(int64_t value) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    snprintf(result, 32, "%ld", value);
+    
+    // Manual int to string conversion
+    if (value == 0) {
+        result[0] = '0';
+        result[1] = '\0';
+    } else {
+        // Handle negative numbers
+        int is_negative = value < 0;
+        if (is_negative) value = -value;
+        
+        // Extract digits in reverse order
+        int len = 0;
+        int64_t temp = value;
+        while (temp > 0) {
+            result[len++] = '0' + (temp % 10);
+            temp /= 10;
+        }
+        
+        // Add negative sign if needed
+        if (is_negative) {
+            result[len++] = '-';
+        }
+        
+        // Reverse the string
+        for (int i = 0; i < len / 2; i++) {
+            char tmp = result[i];
+            result[i] = result[len - 1 - i];
+            result[len - 1 - i] = tmp;
+        }
+        
+        result[len] = '\0';
+    }
+    
     return result;
 }
 

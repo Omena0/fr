@@ -1452,6 +1452,9 @@ class BytecodeCompiler:
             condition = node.get('condition')
             if message := node.get('message'):
                 self.compile_expr(message, 'str')
+            else:
+                # Emit NULL pointer for missing message
+                self.emit("CONST_I64 0")
 
             # Compile condition
             self.compile_expr(condition, 'bool')
