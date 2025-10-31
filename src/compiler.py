@@ -1795,13 +1795,13 @@ class BytecodeCompiler:
                 global_vars.append(node)
                 # Store in global_vars dict for access by all functions
                 self.global_vars[var_name] = node
-
         # Emit struct definitions as bytecode directives
         for struct_name, struct_def in self.struct_defs.items():
             struct_id = struct_def['id']
             fields = struct_def['fields']
             field_names = ' '.join(f['name'] for f in fields)
-            results.append(f".struct {struct_id} {len(fields)} {field_names}")
+            field_types = ' '.join(f['type'] for f in fields)
+            results.append(f".struct {struct_id} {len(fields)} {field_names} {field_types}")
 
         if self.struct_defs:
             results.append("")

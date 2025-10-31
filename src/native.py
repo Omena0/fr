@@ -41,6 +41,7 @@ class X86Compiler:
         self.structs: Dict[int, Dict] = {}  # Maps struct_id to {field_count, field_names}
         self.struct_counter = 0  # Counter for allocating struct instances
         self.struct_data_offset = 0  # Offset into the struct data area
+        self.last_struct_id: Optional[int] = None  # Track the struct_id from the last STRUCT_NEW
 
     def emit(self, line: str, indent: int = 1):
         """Emit a line of assembly code"""
@@ -79,6 +80,7 @@ class X86Compiler:
         """
         Parse bytecode into instructions.
         Returns list of (opcode, args) tuples.
+        Handles quoted strings properly.
         """
         instructions = []
         for line in bytecode.strip().split('\n'):
@@ -94,8 +96,25 @@ class X86Compiler:
             opcode = parts[0]
             args = []
             if len(parts) > 1:
-                # Parse arguments (simple space-separated for now)
-                args = parts[1].split()
+                # Parse arguments, respecting quoted strings
+                args_str = parts[1]
+                in_quotes = False
+                current_arg = []
+                i = 0
+                while i < len(args_str):
+                    ch = args_str[i]
+                    if ch == '"':
+                        in_quotes = not in_quotes
+                        current_arg.append(ch)
+                    elif ch == ' ' and not in_quotes:
+                        if current_arg:
+                            args.append(''.join(current_arg))
+                            current_arg = []
+                    else:
+                        current_arg.append(ch)
+                    i += 1
+                if current_arg:
+                    args.append(''.join(current_arg))
 
             instructions.append((opcode, args))
 
@@ -299,16 +318,18 @@ class X86Compiler:
             self.stack_types.append('f64')
 
     def _compile_const_str(self, args: List[str]):
-        """Push string constant"""
-        # Remove quotes if present
-        string = ' '.join(args)
-        if string.startswith('"') and string.endswith('"'):
-            string = string[1:-1]
+        """Push string constant(s) - can push multiple strings"""
+        # Handle multiple string arguments (like "hello" "hey")
+        for arg in args:
+            # Remove quotes if present
+            string = arg
+            if string.startswith('"') and string.endswith('"'):
+                string = string[1:-1]
 
-        label = self.get_string_label(string)
-        self.emit(f"lea rax, [{label}]")
-        self.emit("push rax")
-        self.stack_types.append('str')
+            label = self.get_string_label(string)
+            self.emit(f"lea rax, [{label}]")
+            self.emit("push rax")
+            self.stack_types.append('str')
 
     def _compile_const_bool(self, args: List[str]):
         """Push boolean constant(s) - can push multiple values"""
@@ -701,42 +722,36 @@ class X86Compiler:
         min_value = int(args[0])
         max_value = int(args[1])
         case_labels = args[2:]
-        
+
         # The last argument is typically the default label
         default_label = case_labels[-1] if case_labels else None
         case_labels = case_labels[:-1] if len(case_labels) > 1 else []
 
         # Pop the switch value
         self.emit("pop rax")
-        
+
         # Generate a jump table
         # Check if value is out of range
         self.emit(f"cmp rax, {min_value}")
         if default_label:
             asm_default = f".L{default_label}"
             self.emit(f"jl {asm_default}")
-        
+
         self.emit(f"cmp rax, {max_value}")
         if default_label:
             asm_default = f".L{default_label}"
             self.emit(f"jg {asm_default}")
-        
+
         # Compute offset into jump table: rax = rax - min_value
         if min_value != 0:
             self.emit(f"sub rax, {min_value}")
-        
+
         # Generate jump table
         for i, label in enumerate(case_labels):
             asm_label = f".L{label}"
-            if i == 0:
-                # First case: value should be 0
-                self.emit(f"cmp rax, {i}")
-                self.emit(f"je {asm_label}")
-            else:
-                # Subsequent cases
-                self.emit(f"cmp rax, {i}")
-                self.emit(f"je {asm_label}")
-        
+            # First case: value should be 0
+            self.emit(f"cmp rax, {i}")
+            self.emit(f"je {asm_label}")
         # Default case
         if default_label:
             asm_default = f".L{default_label}"
@@ -2131,14 +2146,16 @@ class X86Compiler:
     # ============================================================================
 
     def _compile_struct(self, args: List[str]):
-        """Register struct definition (.struct struct_id field_count field_names...)"""
+        """Register struct definition (.struct struct_id field_count field_names... field_types...)"""
         struct_id = int(args[0])
         field_count = int(args[1])
         field_names = args[2:2+field_count]
+        field_types = args[2+field_count:2+field_count*2] if len(args) >= 2+field_count*2 else ['i64'] * field_count
         
         self.structs[struct_id] = {
             'field_count': field_count,
-            'field_names': field_names
+            'field_names': field_names,
+            'field_types': field_types
         }
 
     def _compile_struct_new(self, args: List[str]):
@@ -2180,6 +2197,7 @@ class X86Compiler:
         self.emit(f"or rax, {struct_id}")
         self.emit("push rax")
         self.stack_types.append(f'struct:{struct_id}')
+        self.last_struct_id = struct_id  # Track for STRUCT_GET
 
     def _compile_struct_get(self, args: List[str]):
         """Get field from struct - retrieve from struct data area"""
@@ -2203,9 +2221,32 @@ class X86Compiler:
         
         # Load field value from struct_data
         self.emit("lea rdx, [rip + struct_data]")
-        self.emit("mov rax, [rdx + rax]")
-        self.emit("push rax")
-        self.stack_types.append('i64')
+        
+        # Determine field type from struct definition
+        field_type = 'i64'  # default
+        if self.last_struct_id is not None and self.last_struct_id in self.structs:
+            struct_def = self.structs[self.last_struct_id]
+            field_types = struct_def.get('field_types', [])
+            if field_idx < len(field_types):
+                field_type = field_types[field_idx]
+        
+        # Load based on field type
+        if field_type == 'float':
+            # For float fields, load as double into xmm0 and push as 8 bytes
+            self.emit("movsd xmm0, [rdx + rax]")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm0")
+            self.stack_types.append('f64')
+        else:
+            # For integer, string, bool - load as 64-bit value
+            self.emit("mov rax, [rdx + rax]")
+            self.emit("push rax")
+            if field_type == 'str':
+                self.stack_types.append('str')
+            elif field_type == 'bool':
+                self.stack_types.append('bool')
+            else:
+                self.stack_types.append('i64')
 
     # ============================================================================
     # Builtin Functions
