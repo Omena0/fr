@@ -346,7 +346,14 @@ def main():
                 native_output = result.stdout.strip() if result.stdout else ""
 
                 if result.returncode != 0:
-                    stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
+                    # Check if it's a signal (negative exit code)
+                    if result.returncode < 0:
+                        signal_num = -result.returncode
+                        signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
+                        signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
+                        stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
+                    else:
+                        stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
                     native_error = extract_error_message(stderr_text)
 
                     # If there's an error in stderr, discard partial stdout to match Python runtime behavior
