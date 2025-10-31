@@ -405,6 +405,7 @@ RuntimeList* runtime_list_new() {
     }
     list->capacity = 8;
     list->length = 0;
+    list->elem_type = -1; // Unknown type initially
     list->items = malloc(list->capacity * sizeof(int64_t));
     if (!list->items) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -465,6 +466,7 @@ int64_t runtime_list_pop(RuntimeList* list) {
 
 RuntimeList* runtime_list_new_i64(int64_t* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
+    list->elem_type = 0; // Integer type
     for (int64_t i = 0; i < count; i++) {
         runtime_list_append_int(list, values[i]);
     }
@@ -473,6 +475,7 @@ RuntimeList* runtime_list_new_i64(int64_t* values, int64_t count) {
 
 RuntimeList* runtime_list_new_f64(double* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
+    list->elem_type = 2; // Float type
     for (int64_t i = 0; i < count; i++) {
         // Store as int64_t (cast pointer)
         runtime_list_append_int(list, *(int64_t*)&values[i]);
@@ -482,6 +485,7 @@ RuntimeList* runtime_list_new_f64(double* values, int64_t count) {
 
 RuntimeList* runtime_list_new_str(char** values, int64_t count) {
     RuntimeList* list = runtime_list_new();
+    list->elem_type = 1; // String type
     for (int64_t i = 0; i < count; i++) {
         runtime_list_append_int(list, (int64_t)values[i]);
     }
@@ -490,6 +494,7 @@ RuntimeList* runtime_list_new_str(char** values, int64_t count) {
 
 RuntimeList* runtime_list_new_bool(bool* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
+    list->elem_type = 3; // Bool type
     for (int64_t i = 0; i < count; i++) {
         runtime_list_append_int(list, values[i] ? 1 : 0);
     }
@@ -524,6 +529,7 @@ RuntimeSet* runtime_set_new() {
     }
     set->capacity = 16;
     set->length = 0;
+    set->elem_type = -1; // Unknown type initially
     set->items = malloc(sizeof(int64_t) * set->capacity);
     if (!set->items) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -533,6 +539,41 @@ RuntimeSet* runtime_set_new() {
 }
 
 void runtime_set_add(RuntimeSet* set, int64_t value) {
+    // Detect type on first add
+    if (set->elem_type == -1) {
+        if (value > 0x100000) {
+            set->elem_type = 1; // String type
+        } else {
+            set->elem_type = 0; // Integer type
+        }
+    }
+    
+    // Check if already exists
+    for (int64_t i = 0; i < set->length; i++) {
+        if (set->items[i] == value) {
+            return;  // Already in set
+        }
+    }
+    
+    // Resize if needed
+    if (set->length >= set->capacity) {
+        set->capacity *= 2;
+        set->items = realloc(set->items, sizeof(int64_t) * set->capacity);
+        if (!set->items) {
+            fprintf(stderr, "Runtime error: out of memory\n");
+            exit(1);
+        }
+    }
+    
+    set->items[set->length++] = value;
+}
+
+void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
+    // Set the element type if not already set
+    if (set->elem_type == -1) {
+        set->elem_type = elem_type;
+    }
+    
     // Check if already exists
     for (int64_t i = 0; i < set->length; i++) {
         if (set->items[i] == value) {
@@ -747,9 +788,24 @@ char* runtime_list_repr(RuntimeList* list) {
     strcpy(result, "[");
     for (int64_t i = 0; i < list->length; i++) {
         if (i > 0) strcat(result, ", ");
-        char tmp[32];
-        snprintf(tmp, 32, "%ld", list->items[i]);
-        strcat(result, tmp);
+        
+        // Use type information to format correctly
+        if (list->elem_type == 1) {
+            // String type
+            const char* str = (const char*)list->items[i];
+            strcat(result, str);
+        } else if (list->elem_type == 2) {
+            // Float type
+            double val = *(double*)&list->items[i];
+            char tmp[32];
+            snprintf(tmp, 32, "%g", val);
+            strcat(result, tmp);
+        } else {
+            // Integer type (or unknown)
+            char tmp[32];
+            snprintf(tmp, 32, "%ld", list->items[i]);
+            strcat(result, tmp);
+        }
     }
     strcat(result, "]");
     return result;
@@ -762,9 +818,18 @@ char* runtime_set_repr(RuntimeSet* set) {
     strcpy(result, "{");
     for (int64_t i = 0; i < set->length; i++) {
         if (i > 0) strcat(result, ", ");
-        char tmp[32];
-        snprintf(tmp, 32, "%ld", set->items[i]);
-        strcat(result, tmp);
+        
+        // Use type information to format correctly
+        if (set->elem_type == 1) {
+            // String type
+            const char* str = (const char*)set->items[i];
+            strcat(result, str);
+        } else {
+            // Integer type (or unknown)
+            char tmp[32];
+            snprintf(tmp, 32, "%ld", set->items[i]);
+            strcat(result, tmp);
+        }
     }
     strcat(result, "}");
     return result;

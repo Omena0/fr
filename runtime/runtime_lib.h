@@ -19,6 +19,7 @@ struct RuntimeList {
     int64_t* items;
     int64_t length;
     int64_t capacity;
+    int elem_type; // 0=int, 1=string, 2=other
 };
 typedef struct RuntimeList RuntimeList;
 
@@ -26,6 +27,7 @@ struct RuntimeSet {
     int64_t* items;
     int64_t length;
     int64_t capacity;
+    int elem_type; // 0=int, 1=string, 2=other
 };
 typedef struct RuntimeSet RuntimeSet;
 
@@ -255,6 +257,12 @@ RuntimeSet* runtime_set_new();
  * Add value to set
  */
 void runtime_set_add(RuntimeSet* set, int64_t value);
+
+/**
+ * Add value to set with explicit type information
+ * elem_type: 0=int, 1=string
+ */
+void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type);
 
 /**
  * Remove value from set
