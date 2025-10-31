@@ -140,6 +140,8 @@ class X86Compiler:
         self.emit(".section .bss", 0)
         self.emit("global_vars:", 0)
         self.emit("    .space 2048  # Space for 256 global variables (8 bytes each)", 0)
+        self.emit("struct_counter:", 0)
+        self.emit("    .quad 0  # Counter for dynamic struct allocation", 0)
         self.emit("struct_data:", 0)
         self.emit("    .space 65536  # Space for struct instances (256 instances * 256 bytes each)", 0)
 
@@ -2085,22 +2087,32 @@ class X86Compiler:
         struct_def = self.structs[struct_id]
         field_count = struct_def['field_count']
         
-        # Allocate space: each struct instance gets 256 bytes (32 fields max)
-        instance_id = self.struct_counter
-        self.struct_counter += 1
-        base_offset = instance_id * 256
+        # Use a runtime counter to allocate structs dynamically
+        # Load the current counter and increment it
+        self.emit("lea rax, [rip + struct_counter]")
+        self.emit("mov rbx, [rax]  # rbx = current counter")
+        self.emit("mov rcx, rbx")
+        self.emit("inc rcx")
+        self.emit("mov [rax], rcx  # increment counter")
+        
+        # Calculate base offset: instance_id * 256
+        self.emit("mov rcx, rbx")
+        self.emit("mov rdx, 256")
+        self.emit("imul rcx, rdx  # rcx = instance_id * 256")
         
         # Pop field values and store them in the struct data area
         for i in range(field_count - 1, -1, -1):
             self.emit(f"pop rax  # field {i}")
-            self.emit("lea rbx, [rip + struct_data]")
-            self.emit(f"mov [rbx + {base_offset + i * 8}], rax")
+            self.emit("lea rdx, [rip + struct_data]")
+            self.emit(f"mov [rdx + rcx + {i * 8}], rax")
             if self.stack_types:
                 self.stack_types.pop()
         
         # Push the struct reference (encode as: (instance_id << 16) | struct_id)
-        reference = (instance_id << 16) | struct_id
-        self.emit(f"mov rax, {reference}")
+        # rax = rbx << 16
+        self.emit("mov rax, rbx")
+        self.emit("shl rax, 16")
+        self.emit(f"or rax, {struct_id}")
         self.emit("push rax")
         self.stack_types.append(f'struct:{struct_id}')
 
