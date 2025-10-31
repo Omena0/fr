@@ -1,4 +1,4 @@
-// @c-only !Result: 28980
+// !Result: 28980
 
 void main() {
     int x = goto bing
