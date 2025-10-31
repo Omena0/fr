@@ -1,5 +1,28 @@
 [
   {
+    "type": "struct_def",
+    "name": "Mixed",
+    "fields": [
+      {
+        "name": "num",
+        "type": "int"
+      },
+      {
+        "name": "pi",
+        "type": "float"
+      },
+      {
+        "name": "text",
+        "type": "str"
+      },
+      {
+        "name": "flag",
+        "type": "bool"
+      }
+    ],
+    "line": 3
+  },
+  {
     "type": "function",
     "name": "main",
     "return": "void",
@@ -7,66 +30,89 @@
     "scope": [
       {
         "type": "var",
-        "name": "nums",
-        "value_type": "list",
-        "value": [
-          1,
-          2,
-          3
-        ],
-        "mods": [],
-        "line": 4
-      },
-      {
-        "type": "var",
-        "name": "msg",
-        "value_type": "str",
+        "name": "m",
+        "value_type": "Mixed",
         "value": {
-          "values": [
+          "func": {
+            "id": "Mixed"
+          },
+          "args": [
             {
-              "value": "Value: "
+              "value": 42
             },
             {
-              "value": {
-                "id": "nums"
-              },
-              "conversion": -1
+              "value": 3.14
             },
             {
-              "value": ", Length: "
+              "value": "hello"
             },
             {
-              "value": {
-                "func": {
-                  "id": "len"
-                },
-                "args": [
-                  {
-                    "id": "nums"
-                  }
-                ],
-                "keywords": []
-              },
-              "conversion": -1
+              "id": "true"
             }
-          ]
+          ],
+          "keywords": []
         },
         "mods": [],
-        "line": 5
+        "line": 11
       },
       {
         "type": "call",
         "name": "println",
         "args": [
           {
-            "id": "msg"
+            "value": {
+              "id": "m"
+            },
+            "attr": "num"
           }
         ],
         "return_type": "none",
-        "line": 6
+        "line": 13
+      },
+      {
+        "type": "call",
+        "name": "println",
+        "args": [
+          {
+            "value": {
+              "id": "m"
+            },
+            "attr": "pi"
+          }
+        ],
+        "return_type": "none",
+        "line": 14
+      },
+      {
+        "type": "call",
+        "name": "println",
+        "args": [
+          {
+            "value": {
+              "id": "m"
+            },
+            "attr": "text"
+          }
+        ],
+        "return_type": "none",
+        "line": 15
+      },
+      {
+        "type": "call",
+        "name": "println",
+        "args": [
+          {
+            "value": {
+              "id": "m"
+            },
+            "attr": "flag"
+          }
+        ],
+        "return_type": "none",
+        "line": 16
       }
     ],
     "mods": [],
-    "line": 3
+    "line": 10
   }
 ]
