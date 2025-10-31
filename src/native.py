@@ -226,7 +226,8 @@ class X86Compiler:
             'stack_offset': 0,
             'max_stack': 0,
             'local_count': 0,
-            'arg_count': 0
+            'arg_count': 0,
+            'skip_label_emitted': False  # Track if skip label was emitted
         }
         self.local_types = {}  # Reset local types for new function
 
@@ -243,6 +244,12 @@ class X86Compiler:
 
     def _compile_end(self, args: List[str]):
         """End a function definition (.end)"""
+        # Emit skip label if it hasn't been emitted yet (in case function has no RETURN_VOID)
+        if self.current_function and not self.current_function.get('skip_label_emitted', False):
+            func_name = self.current_function['name']
+            self.emit(f".L{func_name}_skip_labels:", 0)
+            self.current_function['skip_label_emitted'] = True
+        
         # Function epilogue is emitted by RETURN
         self.current_function = None
 
@@ -257,18 +264,25 @@ class X86Compiler:
         asm_label = f".L{label}"
         self.label_map[label] = asm_label
         
-        # If this label can be fallen into (previous instruction wasn't jump/return),
-        # we need to add a jump to prevent fall-through
-        # This is needed for labels that are jumped to via GOTO_CALL
-        # The label will have its own RETURN, so we need to skip past it
-        # We'll jump to a label that will be placed at RETURN_VOID
-        if self.current_function:
+        # Only emit jump to skip labels for GOTO_CALL targets
+        # Loop/control flow labels should not be skipped
+        # These include: for_, forin_, loop_, while_, if_, else_, end, switch_, case_, etc.
+        is_control_flow_label = any(x in label for x in [
+            'for_', 'forin_', 'loop_', 'while_', 'if_', 'else_', 'end',
+            'switch_', 'case_', 'break_', 'continue_'
+        ])
+        
+        if not is_control_flow_label and self.current_function:
+            # This is likely a GOTO_CALL target - emit jump to skip fall-through
             func_name = self.current_function['name']
             self.emit(f"jmp .L{func_name}_skip_labels", 1)
         
         self.emit(f"{asm_label}:", 0)
-        # Mark that we're inside a label (for GOTO_CALL returns)
-        self.in_label = True
+        
+        # Mark that we're inside a label (for GOTO_CALL returns) only if not a control flow label
+        if not is_control_flow_label:
+            self.in_label = True
+        
         # Clear type stack at labels since we don't know which path leads here
         self.stack_types = []
 
@@ -739,10 +753,11 @@ class X86Compiler:
 
     def _compile_return_void(self, args: List[str]):
         """Return void from function"""
-        # Emit skip label for labels that might be jumped over
-        if self.current_function:
+        # Emit skip label for labels that might be jumped over (only once per function)
+        if self.current_function and not self.current_function.get('skip_label_emitted', False):
             func_name = self.current_function['name']
             self.emit(f".L{func_name}_skip_labels:", 0)
+            self.current_function['skip_label_emitted'] = True
         
         self.emit("xor rax, rax")
         self.emit("mov rsp, rbp")
@@ -2311,6 +2326,9 @@ class X86Compiler:
         
         # Pop the struct reference
         self.emit("pop rax  # struct reference")
+        # Pop from stack types
+        if self.stack_types:
+            self.stack_types.pop()
         
         # Decode: instance_id = rax >> 16, struct_id = rax & 0xFFFF
         self.emit("mov rbx, rax")

@@ -26,8 +26,7 @@
         "enabled": true,
         "timeout": 10,
         "ignore": [
-            "runtime",
-            "misc"
+            "runtime"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
