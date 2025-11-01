@@ -426,6 +426,52 @@ char* runtime_list_repr(RuntimeList* list);
 char* runtime_set_repr(RuntimeSet* set);
 
 // ============================================================================
+// Process Management
+// ============================================================================
+
+/**
+ * Fork the current process
+ * Returns the process ID (pid) of the child process in parent,
+ * and 0 in the child process
+ */
+int64_t runtime_fork();
+
+/**
+ * Wait for a child process to terminate
+ * Takes the process ID returned by fork()
+ * Returns the exit status of the child process
+ */
+int64_t runtime_wait(int64_t pid);
+
+// ============================================================================
+// File I/O Operations
+// ============================================================================
+
+/**
+ * Open a file for reading or writing
+ * mode: "r" for read, "w" for write, "a" for append
+ * Returns a file handle (int64_t)
+ */
+int64_t runtime_fopen(const char* path, const char* mode);
+
+/**
+ * Write data to an open file
+ * Returns number of bytes written
+ */
+int64_t runtime_fwrite(int64_t fd, const char* data);
+
+/**
+ * Read data from an open file
+ * Returns a string containing the read data
+ */
+char* runtime_fread(int64_t fd, int64_t size);
+
+/**
+ * Close an open file
+ */
+void runtime_fclose(int64_t fd);
+
+// ============================================================================
 // Memory Management
 // ============================================================================
 

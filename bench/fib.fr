@@ -7,7 +7,7 @@ int fibonacci(int n) {
     int b = 1
     int c = 1
     for (i, n) {
-        c = a + b
+        c = (a + b) % 1000000
         a = b
         b = c
     }
@@ -15,6 +15,6 @@ int fibonacci(int n) {
 }
 
 void main() {
-    println(fibonacci(1000000))
+    println(fibonacci(1000000000))
 }
 
