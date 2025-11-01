@@ -275,7 +275,10 @@ def native_cmd(args):
     # Compile to x86_64
     try:
         import native
-        asm, runtime_deps = native.compile(bytecode)
+        optimize = '-O' in args
+        if optimize:
+            print('Optimizing assembly')
+        asm, runtime_deps = native.compile(bytecode, optimize)
 
         # Always write assembly to temp file for building
         with open(asm_file, 'w') as f:
@@ -323,7 +326,8 @@ def native_cmd(args):
             # Use full minimal runtime with dynamic linking
             gcc_flags = [
                 'gcc', obj_file, str(runtime_lib), '-o', exe_file,
-                f'-I{runtime_dir}', '-Ofast',
+                f'-I{runtime_dir}', '-Ofast', '-march=native', '-mtune=native',
+                '-flto', '-ffast-math', '-funroll-loops',
                 '-ffunction-sections', '-fdata-sections',
                 '-Wl,--gc-sections', '-s',
                 '-lm', '-no-pie'

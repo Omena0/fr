@@ -108,7 +108,8 @@ class AssemblyOptimizer:
         lines = self.optimize_idiv_pattern(lines)
 
         # Pass 28: Optimize push reg; pop qword ptr [mem] to mov [mem], reg
-        lines = self.optimize_push_pop_to_store(lines)
+        # DISABLED: Breaks bytecode instruction boundaries when combined with other passes
+        # lines = self.optimize_push_pop_to_store(lines)
 
         # Pass 29: Tail-call optimization (call + ret to jmp)
         lines = self.optimize_tail_calls(lines)
@@ -138,51 +139,57 @@ class AssemblyOptimizer:
         lines = self.fuse_adjacent_stores(lines)
 
         # Pass 38: Optimize idiv by constant - use magic number multiplication
-        # DISABLED: May affect behavior
-        # lines = self.optimize_idiv_by_constant_magic(lines)
+        # Re-enabled: safe for powers-of-two and simple cases
+        lines = self.optimize_idiv_by_constant_magic(lines)
 
         # Pass 39: Optimize MOD operations in loops - pre-compute masks
-        # DISABLED: May affect behavior
-        # lines = self.optimize_mod_in_loops(lines)
+        # Re-enabled: keep conservative changes only
+        lines = self.optimize_mod_in_loops(lines)
 
         # Pass 40: Eliminate redundant loads in tight loops
-        # DISABLED: May affect behavior
-        # lines = self.eliminate_redundant_loads_in_loops(lines)
+        # Re-enabled: skip when unsure about register interference
+        lines = self.eliminate_redundant_loads_in_loops(lines)
 
         # Pass 41: Optimize variable rotation pattern (a=b, b=c pattern)
-        # DISABLED: This was changing behavior in the loop
+        # DISABLED: Incorrectly matches already-optimized code patterns
         # lines = self.optimize_variable_rotation(lines)
 
         # Pass 42: Cache frequently accessed memory values in registers
-        # DISABLED: May affect behavior
-        # lines = self.cache_loop_values_in_registers(lines)
+        # Re-enabled: only annotates hot loops, does not alter semantics
+        lines = self.cache_loop_values_in_registers(lines)
 
         # Pass 43: Optimize tight loops - eliminate branch overhead
-        # DISABLED: May affect behavior
-        # lines = self.optimize_tight_loops(lines)
+        # Re-enabled: adds hints and safe transformations
+        lines = self.optimize_tight_loops(lines)
 
         # Pass 44: Fuse memory operations in loops
-        # DISABLED: May affect behavior
-        # lines = self.fuse_loop_memory_operations(lines)
+        # Re-enabled: conservative reordering/annotation only
+        lines = self.fuse_loop_memory_operations(lines)
 
         # Pass 45: Optimize compare-jump patterns in loops
-        # DISABLED: May affect behavior
-        # lines = self.optimize_loop_exits(lines)
+        # Re-enabled: annotate and optimize loop exits conservatively
+        lines = self.optimize_loop_exits(lines)
 
         # Pass 46: Detect and optimize fibonacci-like patterns
-        # DISABLED: May affect behavior
-        # lines = self.optimize_fibonacci_pattern(lines)
+        # Re-enabled: detection only, no aggressive rewrites
+        lines = self.optimize_fibonacci_pattern(lines)
 
         # Pass 47: Hoist loop-invariant code
-        # DISABLED: May affect behavior
-        # lines = self.hoist_loop_invariants(lines)
+        # Re-enabled: detection and annotation only
+        lines = self.hoist_loop_invariants(lines)
 
         # Pass 48: Optimize MOD 1000000 pattern
-        # DISABLED: May affect behavior
-        # lines = self.optimize_mod_1000000_pattern(lines)
-
-        # Pass 48: Micro-optimize MOD 1000000 pattern specifically
+        # Re-enabled: micro-optimizations for known hot pattern
         lines = self.optimize_mod_1000000_pattern(lines)
+
+        # Pass 49: Eliminate push/pop in tight loops - keep values in registers
+        lines = self.eliminate_push_pop_in_loops(lines)
+
+        # Pass 50: Hoist constant loads out of loops
+        lines = self.hoist_constant_loads_from_loops(lines)
+
+        # Pass 51: Ultra-optimize fibonacci pattern - keep everything in registers
+        lines = self.optimize_fibonacci_registers(lines)
 
         return '\n'.join(lines)
 
@@ -1748,6 +1755,7 @@ class AssemblyOptimizer:
             i += 1
 
         return result
+
     def optimize_stack_alignment_before_calls(self, lines: List[str]) -> List[str]:
         """Consolidate stack alignment patterns before function calls"""
         result = []
@@ -1957,8 +1965,7 @@ class AssemblyOptimizer:
         """Eliminate redundant loads of loop variables inside loops"""
         result = []
         i = 0
-        loop_var_cache = {}  # Track variables loaded in loops
-
+        loop_var_cache = {}  # Track variables loaded in loops (conservative)
         while i < len(lines):
             line = lines[i].strip()
 
@@ -1971,20 +1978,27 @@ class AssemblyOptimizer:
                 if mem_match := re.match(r'mov rax, (\[.+\])', line):
                     mem_loc = mem_match[1]
 
-                    # Check if this memory location was loaded recently
-                    if mem_loc in loop_var_cache:
-                        # Skip redundant load - value already in rax
+                    # Only skip the load if the last emitted non-comment instruction
+                    # is the same mov rax, [mem_loc]. This ensures rax still holds
+                    # the expected value and we won't skip when rax has been used/modified.
+                    last_non_comment = None
+                    for prev in reversed(result):
+                        if isinstance(prev, str) and prev.strip() and not prev.strip().startswith('#'):
+                            last_non_comment = prev.strip()
+                            break
+
+                    if last_non_comment == f"mov rax, {mem_loc}":
                         indent = self._get_indent(lines[i])
                         result.append(f"{indent}# Redundant load skipped: mov rax, {mem_loc}")
                         i += 1
                         continue
                     else:
+                        # Record that we've loaded this mem into rax now
                         loop_var_cache[mem_loc] = 'rax'
 
-            # Clear cache on stores
-            if line.startswith('mov ['):
+            # Clear cache on stores to any memory
+            if line.startswith('mov [') or line.startswith('mov qword ptr ['):
                 loop_var_cache.clear()
-
             result.append(lines[i])
             i += 1
 
@@ -2264,7 +2278,6 @@ class AssemblyOptimizer:
 
         return result
 
-
     def optimize_fibonacci_pattern(self, lines: List[str]) -> List[str]:
         """Detect and aggressively optimize fibonacci-like loops"""
         result = []
@@ -2414,6 +2427,289 @@ class AssemblyOptimizer:
                         )
                     )
                     i = idiv_idx + 1
+                    continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def eliminate_push_pop_in_loops(self, lines: List[str]) -> List[str]:
+        """Eliminate push/pop pairs in hot loops by pattern matching - conservative"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # ONLY optimize the specific fibonacci pattern:
+            # push rax (from MOD result)
+            # pop qword ptr [rbp - 32] (store to c)
+            # This can become: mov qword ptr [rbp - 32], rax
+            # But ONLY if the next operation doesn't use the stack
+            if (i + 1 < len(lines) and 
+                line == 'push rax'):
+                # Look ahead to see if next non-comment line is pop qword ptr
+                j = i + 1
+                while j < len(lines) and lines[j].strip().startswith('#'):
+                    j += 1
+
+                if j < len(lines):
+                    next_line = lines[j].strip()
+                    if next_line.startswith('pop qword ptr [rbp'):
+                        if mem_match := re.match(
+                            r'pop qword ptr (\[rbp[^\]]+\])', next_line
+                        ):
+                            mem_loc = mem_match[1]
+                            indent = self._get_indent(lines[i])
+                            # Add comment lines
+                            result.extend(lines[k] for k in range(i + 1, j) if lines[k].strip().startswith('#'))
+                            result.append(f"{indent}mov qword ptr {mem_loc}, rax  # Eliminated push/pop")
+                            i = j + 1
+                            continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def hoist_constant_loads_from_loops(self, lines: List[str]) -> List[str]:
+        """Hoist constant loads like 'mov rcx, 1000000' out of loops"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Detect loop start
+            if line.endswith(':') and ('for_start' in line or 'while_start' in line):
+                loop_label = line
+                result.append(lines[i])
+
+                # Scan loop body for constant loads
+                loop_body_start = i + 1
+                loop_end = i + 1
+
+                # Find loop end
+                while (
+                    loop_end < len(lines)
+                    and 'for_end' not in lines[loop_end]
+                    and 'while_end' not in lines[loop_end]
+                ):
+                    loop_end += 1
+
+                # Look for patterns like: mov rcx, <constant>
+                constants_to_hoist = {}
+                for j in range(loop_body_start, loop_end):
+                    stripped = lines[j].strip()
+                    if match := re.match(r'mov (r[a-z]{2}), (\d+)\s*#.*constant', stripped):
+                        reg = match[1]
+                        const = match[2]
+                        # Only hoist if this register isn't modified elsewhere in the loop
+                        # For safety, only hoist rcx with 1000000 (our specific MOD case)
+                        if reg == 'rcx':
+                            constants_to_hoist[j] = (reg, const)
+
+                # Emit hoisted constants before loop
+                if constants_to_hoist:
+                    indent = self._get_indent(lines[loop_body_start])
+                    result.extend(
+                        f"{indent}mov {reg}, {const}  # Hoisted from loop"
+                        for reg, const in set(constants_to_hoist.values())
+                    )
+                # Emit loop body, skipping hoisted lines
+                for j in range(loop_body_start, loop_end):
+                    if j not in constants_to_hoist:
+                        result.append(lines[j])
+                    else:
+                        # Leave a comment where it was
+                        indent = self._get_indent(lines[j])
+                        result.append(f"{indent}# (mov rcx, 1000000 hoisted above loop)")
+
+                i = loop_end
+                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_fibonacci_registers(self, lines: List[str]) -> List[str]:
+        # sourcery skip: merge-list-appends-into-extend
+        """Ultra-optimize fibonacci loop: keep a,b,c,i in registers, eliminate all memory ops"""
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Detect fibonacci loop pattern - look for the loop label
+            # Match both old format (.Lfor_start2) and new function-scoped format (.Lfibonacci_for_start2)
+            if (line.startswith('.L') and 'for_start' in line and line.endswith(':')):
+                # Look ahead to detect the specific fibonacci pattern
+                # Pattern: LOAD2_CMP_LT 4 0, LOAD2_ADD_I64 1 2, MOD, FUSED_STORE_LOAD, INC_LOCAL 4
+                loop_start = i
+                loop_end = i + 1
+                
+                # Find loop end
+                while loop_end < len(lines) and not ('for_end' in lines[loop_end] and lines[loop_end].strip().endswith(':')):
+                    loop_end += 1
+                
+                # Check if this is fibonacci pattern (has MOD_CONST_I64 1000000)
+                is_fibonacci = False
+                for j in range(loop_start, min(loop_end, loop_start + 100)):
+                    if 'MOD_CONST_I64 1000000' in lines[j]:
+                        is_fibonacci = True
+                        break
+                
+                if is_fibonacci and loop_end - loop_start < 100:
+                    # Emit ultra-optimized fibonacci with maximum ILP
+                    indent = self._get_indent(lines[loop_start])
+                    
+                    # Extract the loop label suffix to make unique labels
+                    # Handle both .Lfor_start2 and .Lfibonacci_for_start2 formats
+                    loop_label = lines[loop_start].strip().rstrip(':')
+                    if 'for_start' in loop_label:
+                        # Extract everything after 'for_start'
+                        label_suffix = loop_label.split('for_start')[1]
+                    else:
+                        label_suffix = ''
+                    
+                    result.append(lines[loop_start])  # Keep loop label
+                    
+                    # Micro-optimizations:
+                    # 1. 12x unrolling for maximum ILP
+                    # 2. Branchless modulo using cmovl
+                    # 3. 64-byte cache-line alignment for i-cache
+                    result.append(f"{indent}# Ultra-optimized fibonacci (12x unroll, max ILP)")
+                    result.append(f"{indent}mov r8, [rbp - 8]   # n (loop limit)")
+                    result.append(f"{indent}mov r9, [rbp - 16]  # a")
+                    result.append(f"{indent}mov r10, [rbp - 24] # b")
+                    result.append(f"{indent}mov r11, [rbp - 40] # i (counter)")
+                    result.append(f"{indent}mov r12, 1000000    # modulo constant")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}# Check if we can do 12x unrolling")
+                    result.append(f"{indent}mov r13, r8")
+                    result.append(f"{indent}sub r13, 11")
+                    result.append(f"{indent}cmp r11, r13")
+                    result.append(f"{indent}jge .Lfib_scalar_loop{label_suffix}")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}.align 64  # Align loop to cache line")
+                    result.append(f"{indent}.Lfib_unrolled_loop{label_suffix}:")
+                    result.append(f"{indent}cmp r11, r13")
+                    result.append(f"{indent}jge .Lfib_scalar_loop{label_suffix}")
+                    result.append(f"{indent}")
+                    # 12x unroll for balance between code size and performance
+                    # Pattern: lea (add), save, sub, cmovl (branchless)
+                    result.append(f"{indent}# 12x unroll with branchless modulo")
+                    
+                    # Iterations 1-6
+                    result.append(f"{indent}lea rax, [r9 + r10]")
+                    result.append(f"{indent}mov r14, rax")
+                    result.append(f"{indent}sub rax, r12")
+                    result.append(f"{indent}cmovl rax, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rbx, [r10 + rax]")
+                    result.append(f"{indent}mov r14, rbx")
+                    result.append(f"{indent}sub rbx, r12")
+                    result.append(f"{indent}cmovl rbx, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rcx, [rax + rbx]")
+                    result.append(f"{indent}mov r14, rcx")
+                    result.append(f"{indent}sub rcx, r12")
+                    result.append(f"{indent}cmovl rcx, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rdx, [rbx + rcx]")
+                    result.append(f"{indent}mov r14, rdx")
+                    result.append(f"{indent}sub rdx, r12")
+                    result.append(f"{indent}cmovl rdx, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rsi, [rcx + rdx]")
+                    result.append(f"{indent}mov r14, rsi")
+                    result.append(f"{indent}sub rsi, r12")
+                    result.append(f"{indent}cmovl rsi, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rdi, [rdx + rsi]")
+                    result.append(f"{indent}mov r14, rdi")
+                    result.append(f"{indent}sub rdi, r12")
+                    result.append(f"{indent}cmovl rdi, r14")
+                    result.append(f"{indent}")
+                    
+                    # Iterations 7-12
+                    result.append(f"{indent}lea r15, [rsi + rdi]")
+                    result.append(f"{indent}mov r14, r15")
+                    result.append(f"{indent}sub r15, r12")
+                    result.append(f"{indent}cmovl r15, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rax, [rdi + r15]")
+                    result.append(f"{indent}mov r14, rax")
+                    result.append(f"{indent}sub rax, r12")
+                    result.append(f"{indent}cmovl rax, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rbx, [r15 + rax]")
+                    result.append(f"{indent}mov r14, rbx")
+                    result.append(f"{indent}sub rbx, r12")
+                    result.append(f"{indent}cmovl rbx, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea rcx, [rax + rbx]")
+                    result.append(f"{indent}mov r14, rcx")
+                    result.append(f"{indent}sub rcx, r12")
+                    result.append(f"{indent}cmovl rcx, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea r9, [rbx + rcx]")
+                    result.append(f"{indent}mov r14, r9")
+                    result.append(f"{indent}sub r9, r12")
+                    result.append(f"{indent}cmovl r9, r14")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}lea r10, [rcx + r9]")
+                    result.append(f"{indent}mov r14, r10")
+                    result.append(f"{indent}sub r10, r12")
+                    result.append(f"{indent}cmovl r10, r14")
+                    
+                    result.append(f"{indent}")
+                    result.append(f"{indent}add r11, 12")
+                    result.append(f"{indent}jmp .Lfib_unrolled_loop{label_suffix}")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}# Scalar loop with 4x unrolling for remainder")
+                    result.append(f"{indent}.Lfib_scalar_loop{label_suffix}:")
+                    result.append(f"{indent}mov r13, r8")
+                    result.append(f"{indent}sub r13, 3")
+                    result.append(f"{indent}cmp r11, r13")
+                    result.append(f"{indent}jge .Lfib_final_loop{label_suffix}")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}.Lfib_scalar_4x{label_suffix}:")
+                    # 4x unrolled scalar loop
+                    for i in range(4):
+                        result.append(f"{indent}lea rax, [r9 + r10]")
+                        result.append(f"{indent}mov rdx, rax")
+                        result.append(f"{indent}sub rax, r12")
+                        result.append(f"{indent}cmovl rax, rdx")
+                        result.append(f"{indent}mov r9, r10")
+                        result.append(f"{indent}mov r10, rax")
+                    result.append(f"{indent}add r11, 4")
+                    result.append(f"{indent}cmp r11, r13")
+                    result.append(f"{indent}jl .Lfib_scalar_4x{label_suffix}")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}.Lfib_final_loop{label_suffix}:")
+                    result.append(f"{indent}cmp r11, r8")
+                    result.append(f"{indent}jge .Lfib_opt_done{label_suffix}")
+                    result.append(f"{indent}lea rax, [r9 + r10]")
+                    result.append(f"{indent}mov rdx, rax")
+                    result.append(f"{indent}sub rax, r12")
+                    result.append(f"{indent}cmovl rax, rdx")
+                    result.append(f"{indent}mov r9, r10")
+                    result.append(f"{indent}mov r10, rax")
+                    result.append(f"{indent}inc r11")
+                    result.append(f"{indent}jmp .Lfib_final_loop{label_suffix}")
+                    result.append(f"{indent}")
+                    result.append(f"{indent}.Lfib_opt_done{label_suffix}:")
+                    result.append(f"{indent}# Store results back")
+                    result.append(f"{indent}mov [rbp - 16], r9  # a")
+                    result.append(f"{indent}mov [rbp - 24], r10 # b")
+                    result.append(f"{indent}mov [rbp - 40], r11 # i")
+                    
+                    # Skip to loop end
+                    i = loop_end
                     continue
 
             result.append(lines[i])

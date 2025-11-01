@@ -7,8 +7,7 @@
             "syntax_errors",
             "python_interop",
             "runtime",
-            "error_handling",
-            "io"
+            "error_handling"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

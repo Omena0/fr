@@ -9,6 +9,8 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 // Disable optimizations for the entire runtime library
 // gcc's aggressive optimizations at -O2+ cause issues with the memory layout
@@ -839,3 +841,99 @@ char* runtime_set_repr(RuntimeSet* set) {
     strcat(result, "}");
     return result;
 }
+
+// ============================================================================
+// Process Management
+// ============================================================================
+
+int64_t runtime_fork() {
+    pid_t pid = fork();
+    if (pid == -1) {
+        fprintf(stderr, "Runtime error: fork failed\n");
+        exit(1);
+    }
+    return (int64_t)pid;
+}
+
+int64_t runtime_wait(int64_t pid) {
+    int status;
+    pid_t result = waitpid((pid_t)pid, &status, 0);
+    if (result == -1) {
+        fprintf(stderr, "Runtime error: waitpid failed\n");
+        exit(1);
+    }
+    // Return the exit status
+    // Extract the actual exit code (bits 8-15)
+    if (WIFEXITED(status)) {
+        return (int64_t)WEXITSTATUS(status);
+    }
+    return status;
+}
+
+// ============================================================================
+// File I/O Operations
+// ============================================================================
+
+// File descriptor mapping - store FILE* pointers as int64_t "handles"
+// Using a simple hash table approach with 256 slots
+#define MAX_FDS 256
+static FILE* fd_table[MAX_FDS] = {0};
+static int fd_counter = 0;
+
+int64_t runtime_fopen(const char* path, const char* mode) {
+    if (fd_counter >= MAX_FDS) {
+        fprintf(stderr, "Runtime error: too many open files\n");
+        return -1;
+    }
+    FILE* fp = fopen(path, mode);
+    if (!fp) {
+        fprintf(stderr, "Runtime error: failed to open file %s\n", path);
+        return -1;
+    }
+    int64_t handle = (int64_t)fp;
+    fd_table[fd_counter++] = fp;
+    return handle;
+}
+
+int64_t runtime_fwrite(int64_t fd, const char* data) {
+    FILE* fp = (FILE*)fd;
+    if (!fp) {
+        fprintf(stderr, "Runtime error: invalid file descriptor\n");
+        return 0;
+    }
+    size_t len = strlen(data);
+    size_t written = fwrite(data, 1, len, fp);
+    fflush(fp);
+    return (int64_t)written;
+}
+
+char* runtime_fread(int64_t fd, int64_t size) {
+    FILE* fp = (FILE*)fd;
+    if (!fp) {
+        fprintf(stderr, "Runtime error: invalid file descriptor\n");
+        return "";
+    }
+    char* buffer = malloc(size + 1);
+    if (!buffer) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        return "";
+    }
+    size_t read = fread(buffer, 1, size, fp);
+    buffer[read] = '\0';
+    return buffer;
+}
+
+void runtime_fclose(int64_t fd) {
+    FILE* fp = (FILE*)fd;
+    if (fp) {
+        fclose(fp);
+        // Remove from fd_table (simple linear search)
+        for (int i = 0; i < fd_counter; i++) {
+            if (fd_table[i] == fp) {
+                fd_table[i] = NULL;
+                break;
+            }
+        }
+    }
+}
+

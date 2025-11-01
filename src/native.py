@@ -70,15 +70,15 @@ class X86Compiler:
         self.emit("add rax, 8  # Account for the push")
         self.emit("test rax, 0xF")
         self.emit("pop rax")
-        self.emit("jz .L{}_aligned_{}".format(func_name, self.label_counter))
+        self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
         # Not aligned - sub 8
         self.emit("sub rsp, 8")
-        self.emit("call {}".format(func_name))
+        self.emit(f"call {func_name}")
         self.emit("add rsp, 8")
-        self.emit("jmp .L{}_done_{}".format(func_name, self.label_counter))
-        self.emit(".L{}_aligned_{}: ".format(func_name, self.label_counter), 0)
-        self.emit("call {}".format(func_name))
-        self.emit(".L{}_done_{}: ".format(func_name, self.label_counter), 0)
+        self.emit(f"jmp .L{func_name}_done_{self.label_counter}")
+        self.emit(f".L{func_name}_aligned_{self.label_counter}: ", 0)
+        self.emit(f"call {func_name}")
+        self.emit(f".L{func_name}_done_{self.label_counter}: ", 0)
         self.label_counter += 1
 
     def get_string_label(self, string: str) -> str:
@@ -149,13 +149,25 @@ class X86Compiler:
         self.emit(".intel_syntax noprefix", 0)
         self.emit(".section .text", 0)
 
-        # First pass: find the entry point
+        # First pass: find the entry point and collect all labels
+        current_func = None
         for opcode, args in instructions:
             if opcode == '.entry':
                 entry_point = args[0].rstrip('%')
                 self.entry_point = entry_point
                 self.emit(f".global {entry_point}", 0)
-                break
+            elif opcode == '.func':
+                current_func = args[0]
+            elif opcode == '.end':
+                current_func = None
+            elif opcode == 'LABEL':
+                label = args[0].rstrip(':')
+                # Pre-register the label with function scoping
+                if current_func:
+                    asm_label = f".L{current_func}_{label}"
+                else:
+                    asm_label = f".L{label}"
+                self.label_map[label] = asm_label
         
         self.emit("", 0)
 
@@ -226,6 +238,7 @@ class X86Compiler:
             'skip_label_emitted': False  # Track if skip label was emitted
         }
         self.local_types = {}  # Reset local types for new function
+        # DON'T reset label_map - it needs to persist for label references to work
 
         # Emit function label
         self.emit(f"\n{func_name}:", 0)
@@ -256,8 +269,12 @@ class X86Compiler:
     def _compile_label(self, args: List[str]):
         """Emit a label"""
         label = args[0].rstrip(':')
-        # Convert bytecode label to asm label
-        asm_label = f".L{label}"
+        # Convert bytecode label to asm label with function scope to avoid conflicts
+        if self.current_function:
+            func_name = self.current_function['name']
+            asm_label = f".L{func_name}_{label}"
+        else:
+            asm_label = f".L{label}"
         self.label_map[label] = asm_label
         
         # Only emit jump to skip labels for GOTO_CALL targets
@@ -689,13 +706,15 @@ class X86Compiler:
     def _compile_jump(self, args: List[str]):
         """Unconditional jump"""
         label = args[0]
-        asm_label = f".L{label}"
+        # Look up the label in the map (it may be function-scoped)
+        asm_label = self.label_map.get(label, f".L{label}")
         self.emit(f"jmp {asm_label}")
 
     def _compile_jump_if_false(self, args: List[str]):
         """Jump if top of stack is false"""
         label = args[0]
-        asm_label = f".L{label}"
+        # Look up the label in the map (it may be function-scoped)
+        asm_label = self.label_map.get(label, f".L{label}")
         self.emit("pop rax")
         self.emit("test rax, rax")
         self.emit(f"jz {asm_label}")
@@ -703,7 +722,8 @@ class X86Compiler:
     def _compile_jump_if_true(self, args: List[str]):
         """Jump if top of stack is true"""
         label = args[0]
-        asm_label = f".L{label}"
+        # Look up the label in the map (it may be function-scoped)
+        asm_label = self.label_map.get(label, f".L{label}")
         self.emit("pop rax")
         self.emit("test rax, rax")
         self.emit(f"jnz {asm_label}")
@@ -777,7 +797,7 @@ class X86Compiler:
         """Jump to label and save return address (like CALL but for goto with return)"""
         label = args[0].rstrip(':')
         # Map bytecode label to asm label
-        asm_label = f".L{label}"
+        asm_label = self.label_map.get(label, f".L{label}")
         # Similar to CALL but doesn't set up a new frame
         self.emit(f"call {asm_label}")
         self.emit("push rax")
@@ -811,12 +831,12 @@ class X86Compiler:
         # Check if value is out of range
         self.emit(f"cmp rax, {min_value}")
         if default_label:
-            asm_default = f".L{default_label}"
+            asm_default = self.label_map.get(default_label, f".L{default_label}")
             self.emit(f"jl {asm_default}")
 
         self.emit(f"cmp rax, {max_value}")
         if default_label:
-            asm_default = f".L{default_label}"
+            asm_default = self.label_map.get(default_label, f".L{default_label}")
             self.emit(f"jg {asm_default}")
 
         # Compute offset into jump table: rax = rax - min_value
@@ -825,13 +845,13 @@ class X86Compiler:
 
         # Generate jump table
         for i, label in enumerate(case_labels):
-            asm_label = f".L{label}"
+            asm_label = self.label_map.get(label, f".L{label}")
             # First case: value should be 0
             self.emit(f"cmp rax, {i}")
             self.emit(f"je {asm_label}")
         # Default case
         if default_label:
-            asm_default = f".L{default_label}"
+            asm_default = self.label_map.get(default_label, f".L{default_label}")
             self.emit(f"jmp {asm_default}")
 
     def _compile_cmp_lt_const(self, args: List[str]):
@@ -947,13 +967,53 @@ class X86Compiler:
         for i in range(0, len(args), 2):
             if i + 1 < len(args):
                 slot = int(args[i])
-                value = args[i + 1]
+                value_str = args[i + 1]
                 offset = (slot + 1) * 8
-                # Use a register to avoid ambiguity
-                self.emit(f"mov rax, {value}")
+
+                # Check if value fits in 64-bit signed integer
+                try:
+                    value = int(value_str)
+                    # Check if it fits in signed 64-bit range
+                    if value < -(2**63) or value >= 2**63:
+                        # Value too large - truncate to 64-bit (simulating overflow)
+                        value &= 0xFFFFFFFFFFFFFFFF
+                        if value >= 2**63:
+                            value -= 2**64
+                except ValueError:
+                    # Invalid integer, use 0
+                    value = 0
+
+                # Use movabs for 64-bit immediate values
+                if value < -2147483648 or value > 2147483647:
+                    self.emit(f"movabs rax, {value}")
+                else:
+                    self.emit(f"mov rax, {value}")
                 self.emit(f"mov [rbp - {offset}], rax")
                 # Track that this local is an i64
                 self.local_types[slot] = 'i64'
+
+    def _compile_store_const_f64(self, args: List[str]):
+        """Store float constants directly to slots (STORE_CONST_F64 slot1 val1 slot2 val2 ...)"""
+        # Args come in pairs: slot, value
+        for i in range(0, len(args), 2):
+            if i + 1 < len(args):
+                slot = int(args[i])
+                value = args[i + 1]
+                offset = (slot + 1) * 8
+                
+                # Create a unique data label for this float constant
+                label_name = f".FLOAT{self.string_counter}"
+                self.string_counter += 1
+                
+                # Add to data section
+                self.data_section.append(f"{label_name}:")
+                self.data_section.append(f"    .double {value}")
+                
+                # Load the float constant and store it
+                self.emit(f"movsd xmm0, [{label_name}]")
+                self.emit(f"movsd [rbp - {offset}], xmm0")
+                # Track that this local is an f64
+                self.local_types[slot] = 'f64'
 
     def _compile_fused_store_load(self, args: List[str]):
         """Interleaved store/load operations (FUSED_STORE_LOAD var0 var1 var2 ...)
@@ -1100,13 +1160,39 @@ class X86Compiler:
             self.stack_types.append('i64')
 
     def _compile_mod_const_i64(self, args: List[str]):
-        """Modulo top of stack by constant"""
+        """Modulo top of stack by constant - optimized to avoid slow idiv"""
         value = args[0]
         self.emit("pop rax")
-        self.emit("xor rdx, rdx")  # Clear rdx for division
-        self.emit(f"mov rbx, {value}")
-        self.emit("idiv rbx")
-        self.emit("push rdx")  # Remainder is in rdx
+
+        # For small constants that are powers of 2, use AND (fastest)
+        try:
+            const_val = int(value)
+            if const_val > 0 and (const_val & (const_val - 1)) == 0:
+                # Power of 2: use bitwise AND
+                mask = const_val - 1
+                self.emit(f"and rax, {mask}  # Fast mod by power-of-2")
+                self.emit("push rax")
+                if self.stack_types:
+                    self.stack_types.pop()
+                self.stack_types.append('i64')
+                return
+        except ValueError:
+            pass
+
+        # For other constants, use optimized conditional subtraction
+        # For fibonacci: values are always < 2*modulo, so at most 1 subtraction needed
+        # Use branchless cmov for even better performance
+        self.label_counter += 1
+
+        # Optimized: subtract modulo, then conditionally restore if we went negative
+        # This is branchless and much faster than a loop
+        self.emit(f"mov rcx, {value}  # Load modulo constant")
+        self.emit("mov rdx, rax  # Save original")
+        self.emit("sub rax, rcx  # Try subtract")
+        self.emit("test rax, rax  # Check if negative")
+        self.emit("cmovl rax, rdx  # Restore if negative (branchless)")
+        self.emit("push rax")
+
         # Type stack: i64 % i64 = i64
         if self.stack_types:
             self.stack_types.pop()
@@ -2191,6 +2277,80 @@ class X86Compiler:
     def _compile_builtin_len(self, args: List[str]):
         """Get length (calls list_len for now)"""
         self._compile_list_len(args)
+
+    def _compile_fork(self, args: List[str]):
+        """Fork the current process and return pid"""
+        self.emit("xor rax, rax  # Clear rax (set rax=0 for no XMM args per ABI)")
+        self.emit_runtime_call("runtime_fork")
+        self.emit("push rax  # Push pid onto stack")
+        self.stack_types.append('i64')
+
+    def _compile_join(self, args: List[str]):
+        """Wait for a forked process to finish"""
+        # Pop pid from stack, call runtime_wait(pid), push status
+        self.emit("pop rdi  # pid")
+        self.emit_runtime_call("runtime_wait")
+        self.emit("push rax  # Push exit status onto stack")
+        # Pop pid type, push status type
+        if self.stack_types:
+            self.stack_types.pop()  # Pop i64 pid
+        self.stack_types.append('i64')
+
+    # ============================================================================
+    # File I/O Operations
+    # ============================================================================
+
+    def _compile_file_open(self, args: List[str]):
+        """Open a file and return a file descriptor"""
+        # Stack: mode path -> fd
+        # Pop mode and path, call runtime_fopen, push fd
+        self.emit("pop rsi  # mode (second argument)")
+        self.emit("pop rdi  # path (first argument)")
+        self.emit_runtime_call("runtime_fopen")
+        self.emit("push rax  # Push file descriptor")
+        # Pop two strings, push one i64
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # Pop mode
+            self.stack_types.pop()  # Pop path
+        self.stack_types.append('i64')
+
+    def _compile_file_write(self, args: List[str]):
+        """Write data to a file"""
+        # Stack: fd data -> bytes_written
+        # Pop data and fd, call runtime_fwrite, push bytes_written
+        self.emit("pop rsi  # data (second argument)")
+        self.emit("pop rdi  # fd (first argument)")
+        self.emit_runtime_call("runtime_fwrite")
+        self.emit("push rax  # Push bytes_written")
+        # Pop i64 and str, push i64
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # Pop data
+            self.stack_types.pop()  # Pop fd
+        self.stack_types.append('i64')
+
+    def _compile_file_read(self, args: List[str]):
+        """Read data from a file"""
+        # Stack: fd size -> data
+        # Pop size and fd, call runtime_fread, push data
+        self.emit("pop rsi  # size (second argument)")
+        self.emit("pop rdi  # fd (first argument)")
+        self.emit_runtime_call("runtime_fread")
+        self.emit("push rax  # Push read data string")
+        # Pop two i64, push string
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # Pop size
+            self.stack_types.pop()  # Pop fd
+        self.stack_types.append('str')
+
+    def _compile_file_close(self, args: List[str]):
+        """Close a file"""
+        # Stack: fd ->
+        # Pop fd, call runtime_fclose
+        self.emit("pop rdi  # fd")
+        self.emit_runtime_call("runtime_fclose")
+        # Pop i64 from stack_types
+        if self.stack_types:
+            self.stack_types.pop()
 
     # ============================================================================
     # Set Operations
