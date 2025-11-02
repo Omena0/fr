@@ -28,11 +28,17 @@ def extract_error_message(error_text):
     if not error_text:
         return ''
 
+    # Check if already in ?line,col:message format (from runtime errors)
+    lines = error_text.strip().split('\n')
+    for line in reversed(lines):
+        if line.startswith('?'):
+            # Already in correct format, just return it
+            return line
+
     # Runtime errors can have two formats:
     # 1. "...file.fr:line:char: Message"
     # 2. "...Line line:char: Message" (when filename is not .fr)
     # Look for the last line with either pattern
-    lines = error_text.strip().split('\n')
     for line in reversed(lines):
         # Try to match "file.fr:line:char: Message" first
         if '.fr:' in line and ':' in line:
@@ -104,16 +110,52 @@ def main():
     # Test content is read from stdin
     content = sys.stdin.read()
 
-    # Parse test - first line is the expectation, rest is code
-    lines = content.split('\n', 1)
-    if len(lines) < 2:
-        print("ERROR:Invalid test format")
+    # Parse test - collect expectation comment lines at the beginning
+    # First line: MUST be a comment (can be any comment)
+    # Subsequent lines: ONLY if they start with '!', '?', or '@' (expectation markers)
+    lines = content.split('\n')
+    expect_lines = []
+    code_start_idx = 0
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('//'):
+            comment_content = stripped[2:].strip()  # Remove '//' and whitespace
+            
+            if i == 0:
+                # First line: Always treat as expectation
+                expect_lines.append(comment_content)
+                code_start_idx = i + 1
+            elif comment_content.startswith('!') or comment_content.startswith('?') or comment_content.startswith('@'):
+                # Subsequent lines: Only if they're expectation markers
+                # For lines after the first, remove the '!' prefix if present
+                # (only first line's '!' indicates output test)
+                if comment_content.startswith('!'):
+                    comment_content = comment_content[1:]
+                expect_lines.append(comment_content)
+                code_start_idx = i + 1
+            else:
+                # Regular comment (not an expectation) - stop looking for expectations
+                break
+        elif stripped == '':
+            # Blank line after expectations - stop
+            if expect_lines:
+                break
+            # Blank line before expectations - continue
+            code_start_idx = i + 1
+        else:
+            # Found non-comment, non-blank line - stop
+            break
+    
+    if not expect_lines:
+        print("ERROR:Invalid test format - no expectation comment found")
         return 1
-
-    expect_line = lines[0]
-    # Keep the original code with blank line to preserve line numbers
-    # Replace the expectation line with a blank line so line numbers match the file
-    code = '\n' + lines[1] if lines[1] else '\n'
+    
+    # Join all expectation lines with newlines
+    expect_line = '\n'.join(expect_lines)
+    
+    # Build code with blank lines to preserve line numbers
+    code = '\n' * code_start_idx + '\n'.join(lines[code_start_idx:])
 
     # Check for runtime-specific test markers
     runtime_filter = None  # None means run on both, 'python' or 'c' for specific
@@ -147,7 +189,7 @@ def main():
     # Don't run the code to avoid timeouts from infinite loops
     if expect.lower() == 'none' and not is_output_test:
         try:
-            ast = parse(code)
+            ast = parse(code, file=test_filename)
             # Parse succeeded - all runtimes pass
             print("PY_OUTPUT:none")
             print("VM_OUTPUT:none")
@@ -166,7 +208,7 @@ def main():
 
     # Parse the code
     try:
-        ast = parse(code)
+        ast = parse(code, file=test_filename)
     except Exception as e:
         # Parse error - treat the error message as the output/error
         err_msg = extract_error_message(str(e))
@@ -217,6 +259,30 @@ def main():
                 bc_file = f.name
                 f.write(bytecode)
 
+            # Extract and compile C imports
+            c_import_so_files = []
+            for line in bytecode.split('\n'):
+                if line.startswith('# C import:'):
+                    c_file = line.split(':', 1)[1].strip()
+                    # Make C file path absolute relative to test file
+                    test_dir = os.path.dirname(os.path.abspath(test_filename))
+                    c_file_abs = os.path.join(test_dir, c_file)
+                    
+                    # Compile to .so
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.so', delete=False) as so_f:
+                        so_file = so_f.name
+                        c_import_so_files.append(so_file)
+                    
+                    # Compile C file to shared library
+                    compile_result = subprocess.run(
+                        ['gcc', '-fPIC', '-shared', '-o', so_file, c_file_abs],
+                        capture_output=True,
+                        text=True
+                    )
+                    if compile_result.returncode != 0:
+                        vm_error = f"Failed to compile {c_file}: {compile_result.stderr}"
+                        break
+
             # Try to find VM path
             vm_path = None
             # Try new package location
@@ -245,8 +311,11 @@ def main():
                 'line_map': line_map
             })
 
+            # Build VM command with .so files
+            vm_command = [vm_path, '--debug-info', bc_file] + c_import_so_files
+
             result = subprocess.run(
-                [vm_path, '--debug-info', bc_file],
+                vm_command,
                 input=debug_info,
                 capture_output=True,
                 text=True,
@@ -254,6 +323,12 @@ def main():
             )
 
             os.unlink(bc_file)
+            # Clean up .so files
+            for so_file in c_import_so_files:
+                try:
+                    os.unlink(so_file)
+                except:
+                    pass
 
             # Capture output even if program crashes (e.g., stack overflow after main returns)
             vm_output = result.stdout.strip() if result.stdout else ""
@@ -275,7 +350,7 @@ def main():
             vm_error = str(e)
             vm_output = None
     else:
-        # Skip C VM runtime for python-only tests
+        # Skip C VM runtime for python-only tests or if --skip-py was specified
         vm_output = None
         vm_error = "SKIPPED"
 
@@ -286,6 +361,16 @@ def main():
         try:
             # Compile to bytecode (reuse from VM compilation)
             bytecode, line_map = compile_ast_to_bytecode(ast)
+
+            # Extract C imports from bytecode
+            c_import_files = []
+            for line in bytecode.split('\n'):
+                if line.startswith('# C import:'):
+                    c_file = line.split(':', 1)[1].strip()
+                    # Make C file path absolute relative to test file
+                    test_dir = os.path.dirname(os.path.abspath(test_filename))
+                    c_file_abs = os.path.join(test_dir, c_file)
+                    c_import_files.append(c_file_abs)
 
             # Compile bytecode to x86_64 assembly
             assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
@@ -321,6 +406,7 @@ def main():
                 native_bin,
                 asm_file,
                 runtime_file,
+            ] + c_import_files + [  # Add C import files to the command
                 '-lm',
                 '-no-pie',
             ]
@@ -336,12 +422,16 @@ def main():
                 native_error = extract_error_message(result.stderr)
                 native_output = None
             else:
-                # Run the compiled binary
+                # Run the compiled binary with FR_TEST_MODE=1
+                env = os.environ.copy()
+                env['FR_TEST_MODE'] = '1'
+                
                 result = subprocess.run(
                     [native_bin],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
+                    env=env
                 )
 
                 native_output = result.stdout.strip() if result.stdout else ""
@@ -389,17 +479,25 @@ def main():
     if py_error and py_error != "SKIPPED":
         print(f"PY_ERROR:{py_error}")
     elif py_error != "SKIPPED":
-        print(f"PY_OUTPUT:{py_output if py_output is not None else ''}")
+        escaped_py = py_output.replace('\\', '\\\\').replace('\n', '\\n') if py_output is not None else ''
+        print(f"PY_OUTPUT:{escaped_py}")
     # Don't output PY results if skipped
 
     # For VM: prioritize output over error if we have valid output
+    # EXCEPT for error tests (expect starts with ?), where we prefer stderr
     # This handles cases where program outputs correctly but crashes during cleanup
+    is_error_test = expect.startswith('?')
     if vm_error == "SKIPPED":
         # Don't output VM results if skipped
         pass
+    elif is_error_test and vm_error and vm_error != "SKIPPED":
+        # For error tests, prefer the error over stdout
+        print(f"VM_ERROR:{vm_error}")
     elif vm_output is not None:
         # Has output (could be empty string)
-        print(f"VM_OUTPUT:{vm_output}")
+        # Escape newlines so multiline output is on one line
+        escaped_output = vm_output.replace('\\', '\\\\').replace('\n', '\\n')
+        print(f"VM_OUTPUT:{escaped_output}")
     elif vm_error:
         # Has error and no output
         print(f"VM_ERROR:{vm_error}")
@@ -408,12 +506,19 @@ def main():
         print("VM_OUTPUT:")
 
     # For native: prioritize output over error if we have valid output
+    # EXCEPT for error tests (expect starts with ?), where we prefer stderr
+    is_error_test = expect.startswith('?')
     if native_error == "SKIPPED":
         # Don't output native results if skipped
         pass
+    elif is_error_test and native_error and native_error != "SKIPPED":
+        # For error tests, prefer the error over stdout
+        print(f"NATIVE_ERROR:{native_error}")
     elif native_output is not None:
         # Has output (could be empty string)
-        print(f"NATIVE_OUTPUT:{native_output}")
+        # Escape newlines so multiline output is on one line
+        escaped_output = native_output.replace('\\', '\\\\').replace('\n', '\\n')
+        print(f"NATIVE_OUTPUT:{escaped_output}")
     elif native_error:
         # Has error and no output
         print(f"NATIVE_ERROR:{native_error}")
@@ -421,8 +526,13 @@ def main():
         # No output and no error
         print("NATIVE_OUTPUT:")
 
-    print(f"EXPECT:{expect}")
-    print(f"EXPECT_ALTERNATIVES:{'||'.join(expect_alternatives)}")
+    escaped_expect = expect.replace('\\', '\\\\').replace('\n', '\\n')
+    print(f"EXPECT:{escaped_expect}")
+    escaped_alts = []
+    for alt in expect_alternatives:
+        escaped = alt.replace('\\', '\\\\').replace('\n', '\\n')
+        escaped_alts.append(escaped)
+    print(f"EXPECT_ALTERNATIVES:{'||'.join(escaped_alts)}")
     print(f"IS_OUTPUT:{is_output_test}")
     return 0
 

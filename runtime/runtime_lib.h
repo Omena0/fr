@@ -198,11 +198,13 @@ void runtime_list_append_int(RuntimeList* list, int64_t value);
  * Get integer at index from list
  */
 int64_t runtime_list_get_int(RuntimeList* list, int64_t index);
+int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line);
 
 /**
  * Set integer at index in list
  */
 void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value);
+void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, int line);
 
 /**
  * Get list length
@@ -470,6 +472,88 @@ char* runtime_fread(int64_t fd, int64_t size);
  * Close an open file
  */
 void runtime_fclose(int64_t fd);
+
+// ============================================================================
+// Exception Handling
+// ============================================================================
+
+#include <setjmp.h>
+
+typedef struct {
+    const char* exc_type;
+    jmp_buf jump_buffer;      // Jump buffer for non-local jump
+} RuntimeExceptionHandler;
+
+/**
+ * Initialize exception handler stack
+ */
+void runtime_exception_init();
+
+/**
+ * Push an exception handler onto the stack
+ * Returns the handler index
+ */
+int runtime_exception_push(const char* exc_type);
+
+/**
+ * Get the jump buffer for the most recent exception handler
+ * Returns NULL if no handlers on stack
+ */
+jmp_buf* runtime_exception_get_jump_buffer();
+
+/**
+ * Pop an exception handler from the stack
+ */
+void runtime_exception_pop();
+
+/**
+ * Raise an exception
+ * If a matching handler is found, performs a non-local jump to it using longjmp
+ * Otherwise, prints error and exits
+ * This function never returns if a handler is found
+ */
+void runtime_exception_raise(const char* exc_type, const char* message) __attribute__((noreturn));
+
+/**
+ * Raise an exception with line number information
+ * If a matching handler is found, performs a non-local jump to it using longjmp
+ * Otherwise, prints error with line number and exits
+ * This function never returns if a handler is found
+ */
+void runtime_exception_raise_at(const char* exc_type, const char* message, int line) __attribute__((noreturn));
+
+/**
+ * Report a runtime error with line,column format
+ * Used for division by zero, index errors, etc.
+ * Output format: ?line,column:message
+ */
+void runtime_error_at(const char* message, int line) __attribute__((noreturn));
+
+/**
+ * Set source file information for error reporting
+ * This should be called once at program startup
+ */
+void runtime_set_source_info(const char* filename, const char* source);
+
+/**
+ * Check if division by zero would occur for integers
+ */
+void runtime_check_div_zero_i64(int64_t divisor);
+
+/**
+ * Check if division by zero would occur for integers with line info
+ */
+void runtime_check_div_zero_i64_at(int64_t divisor, int line);
+
+/**
+ * Check if division by zero would occur for floats
+ */
+void runtime_check_div_zero_f64(double divisor);
+
+/**
+ * Check if division by zero would occur for floats with line info
+ */
+void runtime_check_div_zero_f64_at(double divisor, int line);
 
 // ============================================================================
 // Memory Management

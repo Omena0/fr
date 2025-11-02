@@ -64,13 +64,22 @@ def should_skip_test(test_path, runtime, config):
     if not runtime_config.get('enabled', True):
         return True
 
-    # Check if test category is in ignore list
+    # Check if test category or specific test file is in ignore list
     category = get_test_category(test_path)
     ignore_list = runtime_config.get('ignore', [])
-    return bool(category in ignore_list)
+    
+    # Check both category and full test path
+    return bool(category in ignore_list or test_path in ignore_list)
 
-def run_test_isolated(test_file, test_content, config=None):
-    """Run a single test in complete isolation via subprocess"""
+def run_test_isolated(test_file, test_path, test_content, config=None):
+    """Run a single test in complete isolation via subprocess
+    
+    Args:
+        test_file: Relative path without 'cases/' prefix (for display and config matching)
+        test_path: Full path with 'cases/' prefix (for import resolution)
+        test_content: Test file content
+        config: Test configuration
+    """
     repo_root = Path(__file__).parent.parent
     helper_script = repo_root / 'src' / 'run_single_test.py'
 
@@ -89,8 +98,8 @@ def run_test_isolated(test_file, test_content, config=None):
     skip_c = should_skip_test(test_file, 'c', config)
     skip_native = should_skip_test(test_file, 'native', config)
 
-    # Build arguments to pass to helper script
-    helper_args = [sys.executable, str(helper_script), test_file]
+    # Build arguments to pass to helper script - use full test_path for import resolution
+    helper_args = [sys.executable, str(helper_script), test_path]
     if skip_py:
         helper_args.append('--skip-py')
     if skip_c:
@@ -117,27 +126,27 @@ def run_test_isolated(test_file, test_content, config=None):
 
     for line in result.stdout.strip().split('\n'):
         if line.startswith('PY_OUTPUT:'):
-            py_output = line[10:]
+            py_output = line[10:].replace('\\n', '\n').replace('\\\\', '\\')
         elif line.startswith('PY_ERROR:'):
             py_error = line[9:]
             if py_error == 'SKIPPED':
                 py_skipped = True
         elif line.startswith('VM_OUTPUT:'):
-            vm_output = line[10:]
+            vm_output = line[10:].replace('\\n', '\n').replace('\\\\', '\\')
         elif line.startswith('VM_ERROR:'):
             vm_error = line[9:]
             if vm_error == 'SKIPPED':
                 vm_skipped = True
         elif line.startswith('NATIVE_OUTPUT:'):
-            native_output = line[14:]
+            native_output = line[14:].replace('\\n', '\n').replace('\\\\', '\\')
         elif line.startswith('NATIVE_ERROR:'):
             native_error = line[13:]
             if native_error == 'SKIPPED':
                 native_skipped = True
         elif line.startswith('EXPECT:'):
-            expect = line[7:]
+            expect = line[7:].replace('\\n', '\n').replace('\\\\', '\\')
         elif line.startswith('EXPECT_ALTERNATIVES:'):
-            expect_alternatives = [e.strip() for e in line[20:].split('||')]
+            expect_alternatives = [e.strip().replace('\\n', '\n').replace('\\\\', '\\') for e in line[20:].split('||')]
         elif line.startswith('IS_OUTPUT:'):
             is_output_test = line[10:] == 'True'
         elif line.startswith('ERROR:'):
@@ -240,6 +249,10 @@ def run_test_isolated(test_file, test_content, config=None):
             vm_passed = not vm_skipped and normalize_line_numbers(vm_output or '', expect)
             native_passed = not native_skipped and normalize_line_numbers(native_output or '', expect)
 
+        # Helper to escape newlines for error display
+        def escape_for_display(text):
+            return text.replace('\n', '\\n') if text else ""
+        
         return {
             'file': test_file,
             'py_passed': py_passed,
@@ -248,9 +261,9 @@ def run_test_isolated(test_file, test_content, config=None):
             'py_output': py_output,
             'vm_output': vm_output,
             'native_output': native_output,
-            'py_error': None if py_passed else f'Output "{py_output}" != expected "{expect}"',
-            'vm_error': None if vm_passed else f'Output "{vm_output}" != expected "{expect}"',
-            'native_error': None if native_passed else f'Output "{native_output}" != expected "{expect}"',
+            'py_error': None if py_passed else f'Output "{escape_for_display(py_output)}" != expected "{escape_for_display(expect)}"',
+            'vm_error': None if vm_passed else f'Output "{escape_for_display(vm_output)}" != expected "{escape_for_display(expect)}"',
+            'native_error': None if native_passed else f'Output "{escape_for_display(native_output)}" != expected "{escape_for_display(expect)}"',
             'py_skipped': py_skipped,
             'vm_skipped': vm_skipped,
             'native_skipped': native_skipped,
@@ -303,8 +316,9 @@ def run_single_test_wrapper(args):
     try:
         with open(test_path, 'r') as f:
             content = f.read()
-        result = run_test_isolated(test_file, content, config)
-        result['file'] = test_file  # Use relative path
+        # Pass both test_file (for config) and test_path (for imports)
+        result = run_test_isolated(test_file, test_path, content, config)
+        result['file'] = test_file  # Use relative path for display
         return result
     except subprocess.TimeoutExpired:
         return {

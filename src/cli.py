@@ -180,13 +180,118 @@ def run_cmd(args=None):
     file_type = detect_file_type(input_file)
 
     if file_type == 'bytecode':
+        # Extract C imports and source info from bytecode
+        c_imports = []
+        source_file = None
+        source_lines = {}
+        line_map = []  # Maps instruction index to line number
+        current_line = 1
+        instruction_count = 0
+        
+        with open(input_file, 'r') as f:
+            for line in f:
+                stripped = line.strip()
+                
+                if line.startswith('# C import:'):
+                    c_file = line.split(':', 1)[1].strip()
+                    c_imports.append(c_file)
+                elif line.startswith('# source:'):
+                    source_file = line.split(':', 1)[1].strip()
+                elif stripped.startswith('.line'):
+                    # Parse .line directive: .line N "source text"
+                    parts = stripped.split(None, 1)
+                    if len(parts) > 1:
+                        args_str = parts[1]
+                        # Parse line number and optional source text
+                        line_num_str = ''
+                        source_text = ''
+                        i = 0
+                        while i < len(args_str) and args_str[i].isdigit():
+                            line_num_str += args_str[i]
+                            i += 1
+                        
+                        if line_num_str:
+                            current_line = int(line_num_str)
+                            # Skip whitespace
+                            while i < len(args_str) and args_str[i] == ' ':
+                                i += 1
+                            # Check if there's a quoted string
+                            if i < len(args_str) and args_str[i] == '"':
+                                i += 1  # Skip opening quote
+                                chars = []
+                                while i < len(args_str):
+                                    if args_str[i] == '\\' and i + 1 < len(args_str):
+                                        # Handle escape sequences
+                                        next_char = args_str[i + 1]
+                                        if next_char == '\\':
+                                            chars.append('\\')
+                                        elif next_char == '"':
+                                            chars.append('"')
+                                        else:
+                                            chars.append(args_str[i])
+                                            chars.append(next_char)
+                                        i += 2
+                                    elif args_str[i] == '"':
+                                        break
+                                    else:
+                                        chars.append(args_str[i])
+                                        i += 1
+                                source_text = ''.join(chars)
+                                source_lines[current_line] = source_text
+                elif stripped and not stripped.startswith('.') and not stripped.startswith('#'):
+                    # This is an actual instruction (not a directive or comment)
+                    line_map.append(current_line)
+                    instruction_count += 1
+        
+        # Compile C files to shared libraries if there are any imports
+        so_files = []
+        if c_imports:
+            for c_file in c_imports:
+                so_file = c_file.replace('.c', '.so')
+                try:
+                    # Compile to shared library with -fPIC -shared
+                    subprocess.run(['gcc', '-fPIC', '-shared', c_file, '-o', so_file], 
+                                 check=True, capture_output=True)
+                    so_files.append(so_file)
+                except subprocess.CalledProcessError as e:
+                    print(f"Error compiling {c_file}: {e.stderr.decode()}")
+                    sys.exit(1)
+        
         # Run bytecode with C VM
         vm_path = get_vm_path()
         if not vm_path:
             print("Error: C VM not found. Please build it with: cd runtime && make")
             sys.exit(1)
 
-        result = subprocess.run([vm_path, input_file])
+        # If we have source info, pass it via debug-info
+        if source_file and source_lines:
+            # Try to read the actual source file first
+            try:
+                with open(source_file, 'r') as f:
+                    source_content = f.read()
+            except FileNotFoundError:
+                # File not found, reconstruct from line dict
+                max_line = max(source_lines.keys()) if source_lines else 0
+                source_list = []
+                for i in range(1, max_line + 1):
+                    source_list.append(source_lines.get(i, ''))
+                source_content = '\n'.join(source_list)
+            
+            # Create debug info JSON
+            debug_info = json.dumps({
+                'file': source_file,
+                'source': source_content,
+                'line_map': line_map
+            })
+            
+            # Run with --debug-info flag
+            vm_args = [vm_path, '--debug-info', input_file] + so_files
+            result = subprocess.run(vm_args, input=debug_info, text=True)
+        else:
+            # Run without debug info
+            vm_args = [vm_path, input_file] + so_files
+            result = subprocess.run(vm_args)
+        
         sys.exit(result.returncode)
 
     elif file_type == 'json':
@@ -243,14 +348,12 @@ def decode_cmd(args):
 def native_cmd(args):
     """Compile bytecode to x86_64 native binary"""
     if len(args) < 1:
-        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--minimal]")
+        print("Usage: fr native <file.bc> [-o output] [-a|--asm]")
         print("  -a, --asm:  Keep assembly file")
-        print("  --minimal:  Use static linking with syscalls (smaller, no libc)")
         sys.exit(1)
 
     input_file = args[0]
     keep_asm = '-a' in args or '--asm' in args
-    use_minimal = '--minimal' in args or '-min' in args or '-m' in args
 
     # Determine output filename
     if '-o' in args:
@@ -272,6 +375,13 @@ def native_cmd(args):
     with open(input_file, 'r') as f:
         bytecode = f.read()
 
+    # Extract C import files from bytecode comments
+    c_import_files = []
+    for line in bytecode.split('\n'):
+        if line.startswith('# C import:'):
+            c_file = line.split('# C import:')[1].strip()
+            c_import_files.append(c_file)
+
     # Compile to x86_64
     try:
         import native
@@ -287,34 +397,29 @@ def native_cmd(args):
         if keep_asm:
             print(f"Compiled to x86_64 assembly: {asm_file}")
 
-        # When using minimal syscall runtime, remove the entry stub (_start)
-        if use_minimal:
-            with open(asm_file, 'r') as f:
-                lines = f.readlines()
-
-            result_lines = []
-            skip_until_section = False
-            for i, line in enumerate(lines):
-                # Replace .global _start with .global main
-                if line.strip() == '.global _start':
-                    result_lines.append(line.replace('_start', 'main'))
-                    continue
-                # Find and remove the _start stub that was generated
-                if line.strip() == '_start:' and i > 50:  # After main() function
-                    skip_until_section = True
-                    continue
-                # Stop skipping when we hit the next section
-                if skip_until_section and line.startswith('.section'):
-                    skip_until_section = False
-                if skip_until_section:
-                    continue
-                result_lines.append(line)
-
-            with open(asm_file, 'w') as f:
-                f.writelines(result_lines)
-
         # Build binary by default
         try:
+            # Compile C import files to object files
+            c_obj_files = []
+            for c_file in c_import_files:
+                c_obj = c_file.replace('.c', '.o')
+                print(f"Compiling C file: {c_file}")
+                result = subprocess.run([
+                    'gcc', '-c', c_file, '-o', c_obj,
+                    '-Ofast', '-march=native', '-mtune=native',
+                    '-ffunction-sections', '-fdata-sections'
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print(f"Error compiling C file {c_file}:")
+                    if result.stderr:
+                        print(result.stderr)
+                    if result.stdout:
+                        print(result.stdout)
+                    sys.exit(1)
+                    
+                c_obj_files.append(c_obj)
+            
             # Assemble to object file
             obj_file = asm_file.replace('.s', '.o').replace('.asm', '.o')
             subprocess.run(['as', asm_file, '-o', obj_file], check=True, 
@@ -323,9 +428,9 @@ def native_cmd(args):
             runtime_lib = r'runtime/runtime_lib.c'
             runtime_dir = os.path.dirname(os.path.abspath(runtime_lib))
 
-            # Use full minimal runtime with dynamic linking
+            # Use full runtime with static linking of C imports
             gcc_flags = [
-                'gcc', obj_file, str(runtime_lib), '-o', exe_file,
+                'gcc', obj_file, *c_obj_files, str(runtime_lib), '-o', exe_file,
                 f'-I{runtime_dir}', '-Ofast', '-march=native', '-mtune=native',
                 '-flto', '-ffast-math', '-funroll-loops',
                 '-ffunction-sections', '-fdata-sections',
@@ -339,6 +444,8 @@ def native_cmd(args):
             print(f"Built executable: {exe_file}")
 
             # Clean up intermediate files
+            for c_obj in c_obj_files:
+                os.remove(c_obj)
             # DEBUG: Keep object file
             # os.remove(obj_file)
             if not keep_asm:
@@ -368,7 +475,7 @@ def main():
         print("                                --debug: Run in debug mode (for debugger)")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file.fr|ast.json|ast.bin> [-o out.bc] - Compile to bytecode")
-        print("  fr native <file.bc> [-o out] [-a|--asm] [--minimal] - Compile bytecode to native binary")
+        print("  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary")
         print("  fr run <file>                   - Run file (auto-detect type)")
         print("  fr encode <ast.json> [-o out]   - Encode JSON to binary AST")
         print("  fr decode <ast.bin> [-o out]    - Decode binary to JSON AST")
@@ -426,10 +533,107 @@ def main():
                 sys.exit(1)
 
             # Determine which backend to use
+            # Check if AST has C imports
+            has_c_imports = any(node.get('type') == 'c_import' for node in ast)
+            
             if force_py_backend or debug_mode:
+                if has_c_imports:
+                    print("Error: C imports require compilation, cannot use Python backend", file=sys.stderr)
+                    sys.exit(1)
                 use_c_backend = False
             else:
+                # Use C backend if forced or all functions are typed
+                # (C imports will be handled separately below)
                 use_c_backend = force_c_backend or not has_untyped_functions(ast)
+
+            # If C imports are present, compile everything to native and run
+            if has_c_imports:
+                try:
+                    # Compile to bytecode first
+                    bytecode, line_map = compile_ast_to_bytecode(ast)
+
+                    import tempfile
+                    import native
+                    
+                    # Create temp files
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
+                        bytecode_file = f.name
+                        f.write(bytecode)
+                    
+                    # Extract C import files from bytecode
+                    c_import_files = []
+                    for line in bytecode.split('\n'):
+                        if line.startswith('# C import:'):
+                            c_file = line.split('# C import:')[1].strip()
+                            c_import_files.append(c_file)
+                    
+                    # Compile to native assembly
+                    asm, _ = native.compile(bytecode, '-O' in sys.argv)
+                    
+                    asm_file = bytecode_file.replace('.bc', '.s')
+                    with open(asm_file, 'w') as f:
+                        f.write(asm)
+                    
+                    # Compile C files to object files
+                    c_obj_files = []
+                    for c_file in c_import_files:
+                        c_obj = c_file.replace('.c', '.o')
+                        result = subprocess.run([
+                            'gcc', '-c', c_file, '-o', c_obj,
+                            '-Ofast', '-march=native', '-mtune=native',
+                            '-ffunction-sections', '-fdata-sections'
+                        ], capture_output=True, text=True)
+                        
+                        if result.returncode != 0:
+                            print(f"Error compiling C file {c_file}:")
+                            if result.stderr:
+                                print(result.stderr)
+                            if result.stdout:
+                                print(result.stdout)
+                            os.remove(bytecode_file)
+                            os.remove(asm_file)
+                            sys.exit(1)
+                        c_obj_files.append(c_obj)
+                    
+                    # Assemble Fr code
+                    obj_file = asm_file.replace('.s', '.o')
+                    subprocess.run(['as', asm_file, '-o', obj_file], check=True, capture_output=True)
+                    
+                    # Link everything into executable
+                    exe_file = bytecode_file.replace('.bc', '')
+                    runtime_lib = 'runtime/runtime_lib.c'
+                    runtime_dir = os.path.dirname(os.path.abspath(runtime_lib))
+                    
+                    gcc_flags = [
+                        'gcc', obj_file, *c_obj_files, runtime_lib, '-o', exe_file,
+                        f'-I{runtime_dir}', '-Ofast', '-march=native', '-mtune=native',
+                        '-flto', '-ffast-math', '-funroll-loops',
+                        '-ffunction-sections', '-fdata-sections',
+                        '-Wl,--gc-sections', '-s',
+                        '-lm', '-no-pie'
+                    ]
+                    
+                    subprocess.run(gcc_flags, check=True, capture_output=True)
+                    
+                    # Run the executable
+                    result = subprocess.run([exe_file] + program_args)
+                    
+                    # Cleanup
+                    os.remove(bytecode_file)
+                    os.remove(asm_file)
+                    os.remove(obj_file)
+                    os.remove(exe_file)
+                    for c_obj in c_obj_files:
+                        if os.path.exists(c_obj):
+                            os.remove(c_obj)
+                    
+                    sys.exit(result.returncode)
+                    
+                except Exception as e:
+                    print(f"Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    sys.exit(1)
 
             if use_c_backend:
                 try:

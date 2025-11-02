@@ -109,6 +109,8 @@ NODE_TYPE_INDEX_ASSIGN = 'index_assign'
 NODE_TYPE_FIELD_ASSIGN = 'field_assign'
 NODE_TYPE_STRING = 'string'
 NODE_TYPE_PY_IMPORT = 'py_import'
+NODE_TYPE_IMPORT = 'import'
+NODE_TYPE_C_IMPORT = 'c_import'
 
 # Control flow exceptions for break/continue
 class BreakException(Exception):
@@ -240,6 +242,9 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     # Execute builtin or user-defined function
     if func['type'] == NODE_TYPE_BUILTIN and callable(func['func']):
         out = func['func'](*processed_args)
+    elif func['type'] == 'c_function':
+        # C functions cannot be called from Python runtime
+        raise RuntimeError(f'Cannot call C function "{name}" from Python runtime. Use C VM or Native compiler.')
     else:
         func_body = func['func']
         if not isinstance(func_body, list):
@@ -430,7 +435,11 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         value = node['id']
         if value in vars:
             var_value = vars[value].get('value')
-            return var_value if var_value is not None else value
+            # Return the actual value, even if it's None
+            # Only return the variable name if the key doesn't exist
+            if 'value' in vars[value]:
+                return var_value
+            return value
         # At parse time, if variable not found, return the node unchanged
         # This prevents treating undefined variables as string literals
         if not runtime:
@@ -808,13 +817,19 @@ def _execute_node_if(node: dict) -> Any:
     """Handle if/elif/else statement"""
     condition_result = eval_expr(node['condition'])
     
-    if condition_result:
+    # Convert to boolean properly - handle None as False
+    # but use Python truthiness for numbers/strings
+    is_truthy = bool(condition_result) if condition_result is not None else False
+    
+    if is_truthy:
         return run_scope(node['scope'])
 
     # Try elif branches
     if node['elifs']:
         for elif_node in node['elifs']:
-            if eval_expr(elif_node['condition']):
+            elif_result = eval_expr(elif_node['condition'])
+            elif_truthy = bool(elif_result) if elif_result is not None else False
+            if elif_truthy:
                 return run_scope(elif_node['scope'])
 
     # Execute else if present
@@ -977,6 +992,10 @@ def run_scope(ast: AstType, level=0):
 
         node_type = node['type']
 
+        # Skip metadata nodes (used for compiler info)
+        if node_type == 'metadata':
+            continue
+
         # Handle each node type
         if node_type == NODE_TYPE_FUNCTION:
             _execute_node_function(node, level)
@@ -984,6 +1003,13 @@ def run_scope(ast: AstType, level=0):
             _execute_node_struct_def(node)
         elif node_type == NODE_TYPE_PY_IMPORT:
             _execute_node_py_import(node)
+        elif node_type == NODE_TYPE_IMPORT:
+            # Fr import - execute the imported AST
+            if 'ast' in node:
+                run_scope(node['ast'], level)
+        elif node_type == NODE_TYPE_C_IMPORT:
+            # C import - no runtime action needed, handled at compile/link time
+            pass
         elif node_type == NODE_TYPE_VAR:
             _execute_node_var(node)
         elif node_type == NODE_TYPE_INDEX_ASSIGN:
@@ -1046,7 +1072,9 @@ def run(ast:AstType, file:str='', source:str=''):
         py_imports.clear()
         # Reset funcs to only include builtin functions (remove user-defined functions from previous runs)
         # Remove any functions that are not in the original builtin set
-        user_func_names = [name for name in funcs.keys() if name not in builtin_func_names]
+        # BUT keep C-imported functions (they are defined in c_import statements)
+        user_func_names = [name for name in funcs.keys() 
+                          if name not in builtin_func_names and funcs[name].get('type') != 'c_function']
         for name in user_func_names:
             del funcs[name]
 
