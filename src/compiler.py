@@ -75,7 +75,11 @@ class BytecodeCompiler:
         self.py_imports: Dict[str, Dict[str, Any]] = {}
         self.line_map: List[int] = []  # Maps bytecode instruction index to source line number
         self.current_line: int = 1  # Current source line being compiled
+        self.last_emitted_line: int = 1  # Last line number emitted as a directive (start at 1 to avoid emitting .line 1 initially)
         self.global_vars: Dict[str, Any] = {}  # Maps global variable names to their AST nodes
+        self.c_import_files: List[str] = []  # Track C files to compile and link
+        self.source_lines: List[str] = []  # Source code lines for .line directives
+        self.source_file: str = ""  # Source filename for error messages
 
     def get_label(self, prefix: str = "L") -> str:
         """Generate a unique label"""
@@ -85,6 +89,18 @@ class BytecodeCompiler:
 
     def emit(self, instruction: str):
         """Add an instruction to the current function's bytecode"""
+        # Emit line directive if line number changed
+        if self.current_line != self.last_emitted_line:
+            # Include source line text if available
+            if self.source_lines and 0 < self.current_line <= len(self.source_lines):
+                source_text = self.source_lines[self.current_line - 1].rstrip()  # Only strip trailing whitespace
+                # Escape quotes in source text for bytecode
+                source_text = source_text.replace('\\', '\\\\').replace('"', '\\"')
+                self.output.append(f'  .line {self.current_line} "{source_text}"')
+            else:
+                self.output.append(f"  .line {self.current_line}")
+            self.last_emitted_line = self.current_line
+        
         self.output.append(f"  {instruction}")
         # Only track line numbers for actual executable instructions, not directives
         if not instruction.lstrip().startswith('.'):
@@ -587,6 +603,16 @@ class BytecodeCompiler:
                             
                             # Emit the builtin instruction
                             self.emit(builtin_methods[method_name])
+                            return
+                        # Check for integer/process methods like pid.wait()
+                        elif method_name == 'wait':
+                            # Compile the PID expression
+                            self.compile_expr(value_node, expr_type)
+                            # Compile any arguments (wait() takes no args)
+                            for arg in args:
+                                self.compile_expr(arg, expr_type)
+                            # Emit JOIN (which pops PID and waits for it)
+                            self.emit('JOIN')
                             return
                         elif isinstance(value_node, dict) and 'id' in value_node:
                             var_name = value_node['id']
@@ -1208,8 +1234,13 @@ class BytecodeCompiler:
 
             # Compile except body
             self.emit(f"LABEL {except_label}")
+            # When we jump here via exception, the handler is still on stack
+            # Need to pop it after running the exception handler
             for stmt in except_scope:
                 self.compile_statement(stmt, func_return_type)
+            
+            # Pop the exception handler after running the except block
+            self.emit("TRY_END")
 
             self.emit(f"LABEL {end_label}")
 
@@ -1715,6 +1746,10 @@ class BytecodeCompiler:
                 self.emit(f'  STORE {var_id}')
 
         # Compile function body
+        # Set current line to first statement's line if available
+        if scope and isinstance(scope[0], dict) and 'line' in scope[0]:
+            self.current_line = scope[0]['line']
+        
         for stmt in scope:
             self.compile_statement(stmt, return_type)
 
@@ -1737,18 +1772,81 @@ class BytecodeCompiler:
         """Compile entire AST to bytecode"""
         results = [".version 1", ""]
         
+        # Add source file if available (from AST metadata)
+        source_file = None
+        for node in ast:
+            if isinstance(node, dict):
+                if node.get('type') == 'metadata' and 'source_file' in node:
+                    source_file = node['source_file']
+                    break
+                # Legacy: Check for source_file in any node
+                if 'source_file' in node:
+                    source_file = node['source_file']
+                    break
+        
+        if source_file:
+            results.append(f"# source: {source_file}")
+            results.append("")
+            
+            # Store source file and read its content
+            self.source_file = source_file
+            try:
+                with open(source_file, 'r') as f:
+                    self.source_lines = f.read().splitlines()
+            except (FileNotFoundError, IOError):
+                # If source file can't be read, continue without it
+                pass
+        
         # Collect global variable declarations
         global_vars = []
         
         # Collect raw bytecode blocks
         bytecode_blocks = []
+        imported_functions = []
 
         # First pass: Register all struct definitions, Python imports, global variables, and bytecode blocks
         for node in ast:
-            if node.get('type') == 'bytecode_block':
+            node_type = node.get('type')
+            
+            # Skip metadata nodes
+            if node_type == 'metadata':
+                continue
+            
+            if node_type == 'import':
+                # Handle import directive - inline the imported AST nodes into current AST
+                imported_ast = node.get('ast', [])
+                # Process imported nodes in the same context
+                for imported_node in imported_ast:
+                    imported_type = imported_node.get('type')
+                    # Handle imported struct definitions
+                    if imported_type == 'struct_def':
+                        struct_name = imported_node.get('name', '')
+                        fields = imported_node.get('fields', [])
+                        struct_id = self.struct_id_counter
+                        self.struct_id_counter += 1
+                        self.struct_defs[struct_name] = {
+                            'id': struct_id,
+                            'fields': fields,
+                            'field_map': {f['name']: i for i, f in enumerate(fields)}
+                        }
+                    # Handle imported global variables
+                    elif imported_type == 'var':
+                        var_name = imported_node.get('name', '')
+                        global_vars.append(imported_node)
+                        self.global_vars[var_name] = imported_node
+                    # Handle imported functions (will be compiled in second pass)
+                    elif imported_type == 'function':
+                        # Collect for later compilation
+                        imported_functions.append(imported_node)
+            elif node_type == 'c_import':
+                # Handle #c_import directive - track C file to compile and link
+                c_file = node.get('file', '')
+                if c_file and c_file not in self.c_import_files:
+                    self.c_import_files.append(c_file)
+            elif node_type == 'bytecode_block':
                 # Collect bytecode blocks to emit after directives
                 bytecode_blocks.append(node)
-            elif node.get('type') == 'struct_def':
+            elif node_type == 'struct_def':
                 struct_name = node.get('name', '')
                 fields = node.get('fields', [])
 
@@ -1762,7 +1860,7 @@ class BytecodeCompiler:
                     'fields': fields,
                     'field_map': {f['name']: i for i, f in enumerate(fields)}
                 }
-            elif node.get('type') == 'py_import':
+            elif node_type == 'py_import':
                 # Register Python import
                 module_name = node.get('module', '')
                 alias = node.get('alias')
@@ -1789,12 +1887,13 @@ class BytecodeCompiler:
                             'module': module_name,
                             'type': 'module'
                         }
-            elif node.get('type') == 'var':
+            elif node_type == 'var':
                 # Collect global variable declarations
                 var_name = node.get('name', '')
                 global_vars.append(node)
                 # Store in global_vars dict for access by all functions
                 self.global_vars[var_name] = node
+            
         # Emit struct definitions as bytecode directives
         for struct_name, struct_def in self.struct_defs.items():
             struct_id = struct_def['id']
@@ -1815,6 +1914,12 @@ class BytecodeCompiler:
         if self.global_vars:
             results.append("")
 
+        # Emit C file imports as metadata (will be used by native compiler)
+        if self.c_import_files:
+            for c_file in self.c_import_files:
+                results.append(f"# C import: {c_file}")
+            results.append("")
+
         # Emit raw bytecode blocks (these may define functions)
         for block in bytecode_blocks:
             bytecode_lines = block.get('bytecode', [])
@@ -1823,8 +1928,21 @@ class BytecodeCompiler:
             if bytecode_lines:
                 results.append("")  # Add spacing after block
 
-        # Compile all functions
+        # Compile all functions (including imported ones)
         entry_point = None
+        
+        # First compile imported functions
+        for node in imported_functions:
+            func_name = node.get('name', '')
+
+            # Pass global variables to main function
+            inject_globals = global_vars if func_name == 'main' else []
+
+            # Compile the function
+            if bytecode := self.compile_function(node, inject_globals):
+                results.append(bytecode)
+        
+        # Then compile functions from main AST
         for node in ast:
             if node.get('type') == 'function':
                 func_name = node.get('name', '')

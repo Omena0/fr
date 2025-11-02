@@ -17,6 +17,54 @@
 // and function calling conventions
 #pragma GCC optimize("O0")
 
+// Global state for error formatting
+static int runtime_test_mode = -1;  // -1 = uninitialized, 0 = user mode, 1 = test mode
+static const char* runtime_source_file = NULL;
+static const char** runtime_source_lines = NULL;
+static int runtime_source_line_count = 0;
+
+// Check if we're in test mode (returns 1 for test mode, 0 for user mode)
+static int is_test_mode() {
+    if (runtime_test_mode == -1) {
+        // Check environment variable on first call
+        const char* env = getenv("FR_TEST_MODE");
+        runtime_test_mode = (env && strcmp(env, "1") == 0) ? 1 : 0;
+    }
+    return runtime_test_mode;
+}
+
+// Set source file information for error reporting
+void runtime_set_source_info(const char* filename, const char* source) {
+    runtime_source_file = filename;
+    
+    // Count lines
+    runtime_source_line_count = 1;
+    for (const char* p = source; *p; p++) {
+        if (*p == '\n') runtime_source_line_count++;
+    }
+    
+    // Split source into lines
+    runtime_source_lines = (const char**)malloc(runtime_source_line_count * sizeof(char*));
+    int line_idx = 0;
+    const char* line_start = source;
+    
+    for (const char* p = source; *p; p++) {
+        if (*p == '\n') {
+            size_t len = p - line_start;
+            char* line = (char*)malloc(len + 1);
+            memcpy(line, line_start, len);
+            line[len] = '\0';
+            runtime_source_lines[line_idx++] = line;
+            line_start = p + 1;
+        }
+    }
+    
+    // Last line (if doesn't end with newline)
+    if (line_start[0] != '\0') {
+        runtime_source_lines[line_idx] = strdup(line_start);
+    }
+}
+
 // ============================================================================
 // Basic I/O
 // ============================================================================
@@ -446,6 +494,69 @@ int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
     return list->items[index];
 }
 
+// Helper function to convert int64 to string (simple implementation)
+static void int64_to_str(int64_t value, char* buffer) {
+    if (value == 0) {
+        buffer[0] = '0';
+        buffer[1] = '\0';
+        return;
+    }
+    
+    int is_negative = 0;
+    if (value < 0) {
+        is_negative = 1;
+        value = -value;
+    }
+    
+    char temp[32];
+    int i = 0;
+    while (value > 0) {
+        temp[i++] = '0' + (value % 10);
+        value /= 10;
+    }
+    
+    int j = 0;
+    if (is_negative) {
+        buffer[j++] = '-';
+    }
+    while (i > 0) {
+        buffer[j++] = temp[--i];
+    }
+    buffer[j] = '\0';
+}
+
+int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line) {
+    // Validate list pointer
+    if (!list) {
+        runtime_error_at("Index error: null list pointer", line);
+    }
+    
+    // Handle negative indices (Python-style)
+    int64_t original_index = index;
+    if (index < 0) {
+        index = list->length + index;
+    }
+    
+    if (index < 0 || index >= list->length) {
+        // Manually construct error message without sprintf
+        static char msg[512];
+        char index_str[32];
+        char length_str[32];
+        
+        int64_to_str(original_index, index_str);
+        int64_to_str(list->length, length_str);
+        
+        strcpy(msg, "Index error: list index out of range: ");
+        strcat(msg, index_str);
+        strcat(msg, " (length: ");
+        strcat(msg, length_str);
+        strcat(msg, ")");
+        
+        runtime_error_at(msg, line);
+    }
+    return list->items[index];
+}
+
 void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     // Handle negative indices (Python-style)
     if (index < 0) {
@@ -455,6 +566,33 @@ void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
+    }
+    list->items[index] = value;
+}
+
+void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, int line) {
+    // Handle negative indices (Python-style)
+    int64_t original_index = index;
+    if (index < 0) {
+        index = list->length + index;
+    }
+    
+    if (index < 0 || index >= list->length) {
+        // Manually construct error message without sprintf
+        static char msg[512];
+        char index_str[32];
+        char length_str[32];
+        
+        int64_to_str(original_index, index_str);
+        int64_to_str(list->length, length_str);
+        
+        strcpy(msg, "Index error: list index out of range: ");
+        strcat(msg, index_str);
+        strcat(msg, " (length: ");
+        strcat(msg, length_str);
+        strcat(msg, ")");
+        
+        runtime_error_at(msg, line);
     }
     list->items[index] = value;
 }
@@ -761,11 +899,183 @@ void runtime_assert(bool condition, const char* message) {
 }
 
 // ============================================================================
+// Exception Handling
+// ============================================================================
+
+#define MAX_EXCEPTION_HANDLERS 256
+
+static RuntimeExceptionHandler exception_handlers[MAX_EXCEPTION_HANDLERS];
+static int exception_handler_count = 0;
+
+void runtime_exception_init() {
+    exception_handler_count = 0;
+}
+
+int runtime_exception_push(const char* exc_type) {
+    if (exception_handler_count >= MAX_EXCEPTION_HANDLERS) {
+        fprintf(stderr, "Error: Maximum exception handler depth exceeded\n");
+        exit(1);
+    }
+    
+    RuntimeExceptionHandler* handler = &exception_handlers[exception_handler_count];
+    handler->exc_type = exc_type;
+    
+    return exception_handler_count++;
+}
+
+jmp_buf* runtime_exception_get_jump_buffer() {
+    if (exception_handler_count == 0) {
+        return NULL;
+    }
+    return &exception_handlers[exception_handler_count - 1].jump_buffer;
+}
+
+void runtime_exception_pop() {
+    if (exception_handler_count > 0) {
+        exception_handler_count--;
+    }
+}
+
+void runtime_exception_raise(const char* exc_type, const char* message) {
+    // Search for matching exception handler (from most recent to oldest)
+    for (int i = exception_handler_count - 1; i >= 0; i--) {
+        RuntimeExceptionHandler* handler = &exception_handlers[i];
+        
+        // Check if handler matches exception type (empty string matches all)
+        if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
+            // Perform non-local jump to handler
+            // The longjmp will return to the setjmp location with value 1
+            // The handler's TRY_END will pop this handler from the stack
+            longjmp(handler->jump_buffer, 1);
+        }
+    }
+    
+    // No handler found - print error and exit
+    fprintf(stderr, "Uncaught exception: [%s] %s\n", exc_type, message);
+    exit(1);
+}
+
+void runtime_exception_raise_at(const char* exc_type, const char* message, int line) {
+    // Search for matching exception handler (from most recent to oldest)
+    for (int i = exception_handler_count - 1; i >= 0; i--) {
+        RuntimeExceptionHandler* handler = &exception_handlers[i];
+        
+        // Check if handler matches exception type (empty string matches all)
+        if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
+            // Perform non-local jump to handler
+            longjmp(handler->jump_buffer, 1);
+        }
+    }
+    
+    // No handler found - print error in expected format: ?line:[Type] message
+    // This format is for explicit raise statements
+    fprintf(stderr, "?%d:[%s] %s\n", line, exc_type, message);
+    exit(1);
+}
+
+void runtime_error_at(const char* message, int line) {
+    // Search for matching exception handler using "RuntimeError" as type
+    for (int i = exception_handler_count - 1; i >= 0; i--) {
+        RuntimeExceptionHandler* handler = &exception_handlers[i];
+        
+        // Extract exception type from message if present (e.g., "ZeroDivisionError")
+        // For runtime errors, we need to match against handler's expected type
+        // Default to RuntimeError if no type in message
+        const char* exc_type = "RuntimeError";
+        
+        // Check if message contains exception type (for division by zero, etc.)
+        if (strstr(message, "division by zero")) {
+            exc_type = "ZeroDivisionError";
+        }
+        
+        if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
+            longjmp(handler->jump_buffer, 1);
+        }
+    }
+    
+    // No handler found - print error and exit
+    if (is_test_mode()) {
+        // Test mode: concise format ?line,column:message
+        fprintf(stderr, "?%d,0:%s\n", line, message);
+    } else {
+        // User mode: detailed format similar to Python runtime
+        fprintf(stderr, "Exception: Runtime Error\n");
+        
+        if (runtime_source_file && runtime_source_lines && line > 0 && line <= runtime_source_line_count) {
+            // Print file location and source line
+            const char* source_line = runtime_source_lines[line - 1];
+            
+            // Try to find a reasonable column position based on the error message
+            int col = 0;
+            
+            // For index errors, try to find the '[' bracket and point to the index value
+            if (strstr(message, "Index error")) {
+                const char* bracket = strchr(source_line, '[');
+                if (bracket) {
+                    // Find the closing bracket
+                    const char* close_bracket = strchr(bracket, ']');
+                    if (close_bracket) {
+                        // Point just before the closing bracket (at the last character of the index)
+                        col = close_bracket - source_line - 1;
+                    } else {
+                        // No closing bracket, point at the opening bracket
+                        col = bracket - source_line;
+                    }
+                } else {
+                    // Fallback to end of line
+                    col = strlen(source_line);
+                }
+            } else {
+                // For other errors, position at end of line
+                col = strlen(source_line);
+            }
+            
+            fprintf(stderr, "  File \"%s\" line %d in main\n", runtime_source_file, line);
+            fprintf(stderr, "          %s\n", source_line);
+            fprintf(stderr, "          %*s^\n", col, "");  // Print spaces then ^
+            fprintf(stderr, "    %s:%d:%d: %s\n", runtime_source_file, line, col, message);
+        } else {
+            // No source info available - still show proper format
+            // Use "unknown" as filename and "0" as column
+            fprintf(stderr, "  File \"<unknown>\" line %d in main\n", line);
+            fprintf(stderr, "    <unknown>:%d:0: %s\n", line, message);
+        }
+    }
+    
+    exit(1);
+}
+
+void runtime_check_div_zero_i64(int64_t divisor) {
+    if (divisor == 0) {
+        runtime_exception_raise("ZeroDivisionError", "integer division by zero");
+    }
+}
+
+void runtime_check_div_zero_i64_at(int64_t divisor, int line) {
+    if (divisor == 0) {
+        runtime_error_at("integer division by zero", line);
+    }
+}
+
+void runtime_check_div_zero_f64(double divisor) {
+    if (divisor == 0.0) {
+        runtime_exception_raise("ZeroDivisionError", "float division by zero");
+    }
+}
+
+void runtime_check_div_zero_f64_at(double divisor, int line) {
+    if (divisor == 0.0) {
+        runtime_error_at("float division by zero", line);
+    }
+}
+
+// ============================================================================
 // Memory Management
 // ============================================================================
 
 void runtime_init() {
     // Initialize any global state here
+    runtime_exception_init();
 }
 
 void runtime_cleanup() {
@@ -913,6 +1223,27 @@ char* runtime_fread(int64_t fd, int64_t size) {
         fprintf(stderr, "Runtime error: invalid file descriptor\n");
         return "";
     }
+    
+    // If size is -1, read entire file
+    if (size == -1) {
+        // Get file size
+        long current_pos = ftell(fp);
+        fseek(fp, 0, SEEK_END);
+        long file_size = ftell(fp);
+        fseek(fp, current_pos, SEEK_SET);
+        
+        // Allocate buffer for entire file
+        char* buffer = malloc(file_size + 1);
+        if (!buffer) {
+            fprintf(stderr, "Runtime error: out of memory\n");
+            return "";
+        }
+        
+        size_t read = fread(buffer, 1, file_size, fp);
+        buffer[read] = '\0';
+        return buffer;
+    }
+    
     char* buffer = malloc(size + 1);
     if (!buffer) {
         fprintf(stderr, "Runtime error: out of memory\n");

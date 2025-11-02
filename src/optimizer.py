@@ -2033,13 +2033,15 @@ class BytecodeOptimizer:
         i = 0
         
         # Instructions that consume stack and may change types - not safe for DUP optimization
+        # Also includes void functions that consume their arguments without leaving a value
         unsafe_for_dup = {
             'BUILTIN_STR', 'TO_STR', 'TO_INT', 'TO_FLOAT', 'TO_BOOL',
             'BUILTIN_LEN', 'LIST_POP', 'LIST_GET', 'STRUCT_GET',
             'ADD_STR', 'ADD_I64', 'ADD_F64', 'SUB_I64', 'SUB_F64',
             'MUL_I64', 'MUL_F64', 'DIV_I64', 'DIV_F64', 'MOD_I64',
             'CMP_EQ', 'CMP_NE', 'CMP_LT', 'CMP_GT', 'CMP_LE', 'CMP_GE',
-            'AND', 'OR', 'NOT', 'NEG'
+            'AND', 'OR', 'NOT', 'NEG',
+            'BUILTIN_PRINTLN', 'BUILTIN_PRINT',  # Void functions that consume arguments
         }
         
         while i < len(lines):

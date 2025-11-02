@@ -3,11 +3,9 @@
         "enabled": true,
         "timeout": 10,
         "ignore": [
-            "runtime_errors",
             "syntax_errors",
             "python_interop",
-            "runtime",
-            "error_handling"
+            "runtime"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
@@ -25,7 +23,8 @@
         "enabled": true,
         "timeout": 10,
         "ignore": [
-            "runtime"
+            "runtime",
+            "imports/c_import.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

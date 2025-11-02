@@ -12,6 +12,7 @@ Architecture:
 - System V ABI calling convention (Linux/macOS)
 """
 
+import sys
 from typing import List, Dict, Tuple, Optional
 from native_optimizer import optimize_assembly
 
@@ -43,6 +44,10 @@ class X86Compiler:
         self.struct_data_offset = 0  # Offset into the struct data area
         self.last_struct_id: Optional[int] = None  # Track the struct_id from the last STRUCT_NEW
         self.in_label = False  # Track if we're inside a LABEL (for GOTO_CALL)
+        self.current_line: int = 1  # Current source line number for error reporting
+        self.source_file: Optional[str] = None  # Source file path from bytecode
+        self.source_lines_dict: Dict[int, str] = {}  # Maps line numbers to source text from .line directives
+        self.has_main: bool = False  # Track if main function exists
 
     def emit(self, line: str, indent: int = 1):
         """Emit a line of assembly code"""
@@ -103,6 +108,12 @@ class X86Compiler:
         instructions = []
         for line in bytecode.strip().split('\n'):
             line = line.strip()
+            
+            # Check for source file comment
+            if line.startswith('# source:'):
+                self.source_file = line.split('# source:', 1)[1].strip()
+                continue
+            
             if not line or line.startswith('#'):
                 continue
 
@@ -173,6 +184,69 @@ class X86Compiler:
 
         # Process instructions
         self._compile_instructions(instructions)
+        
+        # If we have main and source info, inject initialization code at start of main
+        if self.has_main and self.source_file and self.source_lines_dict:
+            # Reconstruct source from line dict (fill gaps with empty lines)
+            max_line = max(self.source_lines_dict.keys()) if self.source_lines_dict else 0
+            source_lines_list = []
+            for i in range(1, max_line + 1):
+                source_lines_list.append(self.source_lines_dict.get(i, ''))
+            source_content = '\n'.join(source_lines_list)
+            
+            # Create labels for filename and source content
+            filename_label = self.get_string_label(self.source_file)
+            source_label = self.get_string_label(source_content)
+            
+            # Find main: in output and inject after "sub rsp, 256"
+            main_found = False
+            for idx, line in enumerate(self.output):
+                if line.strip() == "main:":
+                    main_found = True
+                elif main_found and "sub rsp, 256" in line:
+                    # Insert runtime init and source info setup after this line
+                    init_code = []
+                    init_code.append("    # Initialize runtime and source info")
+                    
+                    # Generate runtime_init call
+                    init_code.append("    push rax  # Save rax and check alignment")
+                    init_code.append("    mov rax, rsp")
+                    init_code.append("    add rax, 8  # Account for the push")
+                    init_code.append("    test rax, 0xF")
+                    init_code.append("    pop rax")
+                    label_num = self.label_counter
+                    self.label_counter += 1
+                    init_code.append(f"    jz .Lruntime_init_aligned_{label_num}")
+                    init_code.append("    sub rsp, 8")
+                    init_code.append("    call runtime_init")
+                    init_code.append("    add rsp, 8")
+                    init_code.append(f"    jmp .Lruntime_init_done_{label_num}")
+                    init_code.append(f".Lruntime_init_aligned_{label_num}: ")
+                    init_code.append("    call runtime_init")
+                    init_code.append(f".Lruntime_init_done_{label_num}: ")
+                    
+                    # Generate runtime_set_source_info call
+                    init_code.append(f"    lea rdi, [{filename_label}]  # filename")
+                    init_code.append(f"    lea rsi, [{source_label}]  # source")
+                    init_code.append("    push rax  # Save rax and check alignment")
+                    init_code.append("    mov rax, rsp")
+                    init_code.append("    add rax, 8  # Account for the push")
+                    init_code.append("    test rax, 0xF")
+                    init_code.append("    pop rax")
+                    label_num = self.label_counter
+                    self.label_counter += 1
+                    init_code.append(f"    jz .Lruntime_set_source_info_aligned_{label_num}")
+                    init_code.append("    sub rsp, 8")
+                    init_code.append("    call runtime_set_source_info")
+                    init_code.append("    add rsp, 8")
+                    init_code.append(f"    jmp .Lruntime_set_source_info_done_{label_num}")
+                    init_code.append(f".Lruntime_set_source_info_aligned_{label_num}: ")
+                    init_code.append("    call runtime_set_source_info")
+                    init_code.append(f".Lruntime_set_source_info_done_{label_num}: ")
+                    
+                    # Insert after current line
+                    self.output = self.output[:idx+1] + init_code + self.output[idx+1:]
+                    break
 
         # Emit data section
         if self.data_section:
@@ -214,8 +288,7 @@ class X86Compiler:
             if handler := getattr(self, handler_name, None):
                 self.emit_comment(f"{opcode} {' '.join(args)}")
                 handler(args)
-            else:
-                # Unknown instruction - add comment for future implementation
+            elif not opcode.startswith('.'):
                 print(f"Warning: Unimplemented opcode {opcode} {' '.join(args)}")
                 self.emit_comment(f"TODO: {opcode} {' '.join(args)}")
                 self.emit(f"# Unimplemented: {opcode}", 1)
@@ -239,6 +312,10 @@ class X86Compiler:
         }
         self.local_types = {}  # Reset local types for new function
         # DON'T reset label_map - it needs to persist for label references to work
+
+        # Track if this is main
+        if func_name == 'main':
+            self.has_main = True
 
         # Emit function label
         self.emit(f"\n{func_name}:", 0)
@@ -279,10 +356,10 @@ class X86Compiler:
         
         # Only emit jump to skip labels for GOTO_CALL targets
         # Loop/control flow labels should not be skipped
-        # These include: for_, forin_, loop_, while_, if_, else_, end, switch_, case_, etc.
+        # These include: for_, forin_, loop_, while_, if_, else_, end, switch_, case_, except, etc.
         is_control_flow_label = any(x in label for x in [
             'for_', 'forin_', 'loop_', 'while_', 'if_', 'else_', 'end',
-            'switch_', 'case_', 'break_', 'continue_'
+            'switch_', 'case_', 'break_', 'continue_', 'except', 'try_'
         ])
         
         if not is_control_flow_label and self.current_function:
@@ -302,6 +379,24 @@ class X86Compiler:
     def _compile_version(self, args: List[str]):
         """Handle .version directive (ignore for now)"""
         pass
+
+    def _compile_line(self, args: List[str]):
+        """Handle .line directive - track current source line number and optional source text"""
+        if args:
+            self.current_line = int(args[0])
+            # Check if source text is provided (args[1] would be the quoted source line)
+            if len(args) > 1:
+                # Remove quotes from source text
+                source_text = args[1]
+                if source_text.startswith('"') and source_text.endswith('"'):
+                    source_text = source_text[1:-1]
+                # Unescape the source text
+                source_text = source_text.replace('\\\\', '\\').replace('\\"', '"')
+                
+                # Store in source_lines dict (1-indexed)
+                if not hasattr(self, 'source_lines_dict'):
+                    self.source_lines_dict = {}
+                self.source_lines_dict[self.current_line] = source_text
 
     def _compile_local(self, args: List[str]):
         """Handle .local variable declaration"""
@@ -350,8 +445,28 @@ class X86Compiler:
             self.emit("\n.global main", 0)
             self.emit("main:", 0)
             self.emit_runtime_call("runtime_init")
+            
+            # Initialize source info for error reporting if we have source lines from .line directives
+            if self.source_file and self.source_lines_dict:
+                # Reconstruct source from line dict (fill gaps with empty lines)
+                max_line = max(self.source_lines_dict.keys()) if self.source_lines_dict else 0
+                source_lines_list = []
+                for i in range(1, max_line + 1):
+                    source_lines_list.append(self.source_lines_dict.get(i, ''))
+                source_content = '\n'.join(source_lines_list)
+                
+                # Create labels for filename and source content
+                filename_label = self.get_string_label(self.source_file)
+                source_label = self.get_string_label(source_content)
+                
+                # Call runtime_set_source_info(filename, source)
+                self.emit(f"lea rdi, [{filename_label}]  # filename")
+                self.emit(f"lea rsi, [{source_label}]  # source")
+                self.emit_runtime_call("runtime_set_source_info")
+            
             self.emit(f"call {entry_point}")
             self.emit("ret")
+        # If entry_point == 'main', source info injection is handled in compile() post-processing
 
     # ============================================================================
     # Constants
@@ -501,6 +616,13 @@ class X86Compiler:
         """Divide two 64-bit integers"""
         self.emit("pop rbx")
         self.emit("pop rax")
+        # Check for division by zero
+        self.runtime_dependencies.add('runtime_check_div_zero_i64_at')
+        self.emit("push rax  # save dividend")
+        self.emit("mov rdi, rbx")
+        self.emit(f"mov rsi, {self.current_line}  # line number")
+        self.emit("call runtime_check_div_zero_i64_at")
+        self.emit("pop rax  # restore dividend")
         self.emit("cqo")  # Sign extend rax into rdx:rax
         self.emit("idiv rbx")
         self.emit("push rax")
@@ -514,6 +636,13 @@ class X86Compiler:
         """Modulo of two 64-bit integers"""
         self.emit("pop rbx")
         self.emit("pop rax")
+        # Check for division by zero
+        self.runtime_dependencies.add('runtime_check_div_zero_i64_at')
+        self.emit("push rax  # save dividend")
+        self.emit("mov rdi, rbx")
+        self.emit(f"mov rsi, {self.current_line}  # line number")
+        self.emit("call runtime_check_div_zero_i64_at")
+        self.emit("pop rax  # restore dividend")
         self.emit("cqo")
         self.emit("idiv rbx")
         self.emit("push rdx")  # Remainder is in rdx
@@ -587,6 +716,19 @@ class X86Compiler:
             # b is float - load and pop from stack
             self.emit("movsd xmm1, [rsp]")
             self.emit("add rsp, 8")
+        
+        # Check for division by zero
+        self.runtime_dependencies.add('runtime_check_div_zero_f64_at')
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm1  # save divisor")
+        self.emit("movsd xmm0, xmm1")
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm0")
+        self.emit(f"mov rdi, {self.current_line}  # line number")
+        self.emit("call runtime_check_div_zero_f64_at")
+        self.emit("add rsp, 8")
+        self.emit("movsd xmm1, [rsp]  # restore divisor")
+        self.emit("add rsp, 8")
         
         # Pop first operand (a)
         if operand1_is_int:
@@ -1203,7 +1345,16 @@ class X86Compiler:
         value = args[0]
         top_type = self.stack_types[-1] if self.stack_types else 'i64'
         
-        if top_type == 'f64':
+        # Check for division by zero constant
+        if int(value) == 0:
+            # Division by zero - always raise error
+            self.runtime_dependencies.add('runtime_error_at')
+            message_label = self.get_string_label("integer division by zero")
+            self.emit(f"lea rdi, [{message_label}]  # error message")
+            self.emit(f"mov rsi, {self.current_line}  # line number")
+            self.emit("call runtime_error_at")
+            self.emit("# Never reached - exception handler jumps away")
+        elif top_type == 'f64':
             # Float division
             self.emit("movsd xmm0, [rsp]")
             self.emit("add rsp, 8")
@@ -1279,18 +1430,29 @@ class X86Compiler:
     def _compile_div_const_f64(self, args: List[str]):
         """Divide top of stack by constant (float)"""
         value = args[0]
-        # Create a label for the constant
-        label = f".FLOAT{self.string_counter}"
-        self.string_counter += 1
-        self.data_section.append(f"{label}:")
-        self.data_section.append(f"    .double {value}")
         
-        self.emit(f"movsd xmm0, [{label}]")
-        self.emit("movsd xmm1, [rsp]")
-        self.emit("add rsp, 8")
-        self.emit("divsd xmm1, xmm0")
-        self.emit("sub rsp, 8")
-        self.emit("movsd [rsp], xmm1")
+        # Check for division by zero constant
+        if float(value) == 0.0:
+            # Division by zero - always raise error
+            self.runtime_dependencies.add('runtime_error_at')
+            message_label = self.get_string_label("float division by zero")
+            self.emit(f"lea rdi, [{message_label}]  # error message")
+            self.emit(f"mov rsi, {self.current_line}  # line number")
+            self.emit("call runtime_error_at")
+            self.emit("# Never reached - exception handler jumps away")
+        else:
+            # Create a label for the constant
+            label = f".FLOAT{self.string_counter}"
+            self.string_counter += 1
+            self.data_section.append(f"{label}:")
+            self.data_section.append(f"    .double {value}")
+            
+            self.emit(f"movsd xmm0, [{label}]")
+            self.emit("movsd xmm1, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit("divsd xmm1, xmm0")
+            self.emit("sub rsp, 8")
+            self.emit("movsd [rsp], xmm1")
 
     def _compile_copy_local(self, args: List[str]):
         """Copy local variable to another local (COPY_LOCAL dst src)"""
@@ -2077,7 +2239,10 @@ class X86Compiler:
                 return
         
         # Default to list indexing
-        self.emit_runtime_call("runtime_list_get_int")
+        self.runtime_dependencies.add('runtime_list_get_int_at')
+        # index and list already in rsi and rdi from above pops
+        self.emit(f"mov rdx, {self.current_line}  # line number")
+        self.emit("call runtime_list_get_int_at")
         self.emit("push rax")
         # Result is based on list contents - typically int64
         if len(self.stack_types) >= 2:
@@ -2087,10 +2252,13 @@ class X86Compiler:
 
     def _compile_list_set(self, args: List[str]):
         """Set element at index"""
-        self.emit("pop rdx")  # value
+        self.runtime_dependencies.add('runtime_list_set_int_at')
+        self.emit("pop r8")   # value (temporarily in r8)
         self.emit("pop rsi")  # index
         self.emit("pop rdi")  # list
-        self.emit_runtime_call("runtime_list_set_int")
+        self.emit("mov rdx, r8  # value")
+        self.emit(f"mov rcx, {self.current_line}  # line number")
+        self.emit("call runtime_list_set_int_at")
         self.emit("push rdi")  # push list back
         # Pop value, index, and list from stack_types, push list back
         if len(self.stack_types) >= 3:
@@ -2528,6 +2696,47 @@ class X86Compiler:
             else:
                 self.stack_types.append('i64')
 
+    def _compile_struct_set(self, args: List[str]):
+        """Set field in struct - store to struct data area"""
+        field_idx = int(args[0])
+        
+        # Stack: struct_ref value -> struct_ref
+        # Pop the new value and struct reference
+        self.emit("pop rbx  # new value")
+        self.emit("pop rax  # struct reference")
+        
+        # Pop from stack types
+        if len(self.stack_types) >= 2:
+            self.stack_types.pop()  # Pop value
+            self.stack_types.pop()  # Pop struct
+        
+        # Decode: instance_id = rax >> 16, struct_id = rax & 0xFFFF
+        self.emit("mov rcx, rax")
+        self.emit("shr rcx, 16  # rcx = instance_id")
+        self.emit("mov rdx, rax")
+        self.emit("and rdx, 0xFFFF  # rdx = struct_id")
+        
+        # Save struct reference for return
+        self.emit("push rax  # save struct reference for return")
+        
+        # Calculate address: base + (instance_id * 256) + (field_idx * 8)
+        self.emit("mov rax, rcx")
+        self.emit("mov rdx, 256")
+        self.emit("imul rax, rdx  # rax = instance_id * 256")
+        self.emit(f"add rax, {field_idx * 8}  # rax += field_idx * 8")
+        
+        # Store new value to struct_data
+        self.emit("lea rdx, [rip + struct_data]")
+        self.emit("mov [rdx + rax], rbx  # store new value")
+        
+        # Struct reference is already on stack as return value
+        # Restore the stack type to indicate we have a struct on top
+        # Determine struct type from the last_struct_id if available
+        if self.last_struct_id is not None:
+            self.stack_types.append(f'struct:{self.last_struct_id}')
+        else:
+            self.stack_types.append('i64')  # fallback
+
     # ============================================================================
     # Builtin Functions
     # ============================================================================
@@ -2699,6 +2908,75 @@ class X86Compiler:
         var_index = int(args[0])
         self.emit("pop rax")
         self.emit(f"mov [global_vars + {var_index * 8}], rax")
+
+    def _compile_try_begin(self, args: List[str]):
+        """Begin exception handler block (TRY_BEGIN "exc_type" handler_label)"""
+        # Parse: TRY_BEGIN "exc_type" label
+        # The bytecode format is: TRY_BEGIN "ExceptionType" label_name
+        # After parsing in bytecode, we get 2 args: exc_type and label
+        
+        if len(args) < 2:
+            # Malformed - should have been caught by parser
+            raise X86CompilerError("TRY_BEGIN requires exception type and label")
+        
+        exc_type = args[0].strip('"')
+        handler_label = args[1]
+        
+        # Get the assembly label for the handler
+        asm_label = self.label_map.get(handler_label, f".L{handler_label}")
+        
+        # Store the exception type string in data section
+        exc_type_label = self.get_string_label(exc_type)
+        
+        # Call runtime to push exception handler
+        # runtime_exception_push(exc_type)
+        self.runtime_dependencies.add('runtime_exception_push')
+        self.runtime_dependencies.add('runtime_exception_get_jump_buffer')
+        
+        self.emit(f"lea rdi, [{exc_type_label}]  # exc_type")
+        self.emit("call runtime_exception_push")
+        
+        # Get the jump buffer and save the current context with setjmp
+        self.emit("call runtime_exception_get_jump_buffer")
+        self.emit("mov rdi, rax  # jump buffer pointer")
+        self.emit("call setjmp@PLT  # returns 0 first time, 1 when longjmp is called")
+        
+        # Check if we just returned from setjmp (0) or from longjmp (non-zero)
+        self.emit("test rax, rax")
+        self.emit(f"jnz {asm_label}  # if non-zero, jump to exception handler")
+        # Otherwise, continue with try block
+        
+    def _compile_try_end(self, args: List[str]):
+        """End exception handler block (TRY_END)"""
+        # Pop exception handler from stack
+        self.runtime_dependencies.add('runtime_exception_pop')
+        self.emit("call runtime_exception_pop")
+    
+    def _compile_raise(self, args: List[str]):
+        """Raise an exception (RAISE "exc_type" "message")"""
+        # Parse the arguments - they're quoted strings
+        # Format: RAISE "ExceptionType" "message"
+        
+        if len(args) < 2:
+            raise X86CompilerError("RAISE requires exception type and message")
+        
+        exc_type = args[0].strip('"')
+        message = args[1].strip('"') if len(args) > 1 else ""
+        
+        # Store strings in data section
+        exc_type_label = self.get_string_label(exc_type)
+        message_label = self.get_string_label(message)
+        
+        # Call runtime_exception_raise_at(exc_type, message, line)
+        # This either jumps to a handler via longjmp or exits the program
+        self.runtime_dependencies.add('runtime_exception_raise_at')
+        
+        self.emit(f"lea rdi, [{exc_type_label}]")
+        self.emit(f"lea rsi, [{message_label}]")
+        self.emit(f"mov rdx, {self.current_line}  # line number")
+        self.emit("call runtime_exception_raise_at")
+        # This function never returns if a handler is found
+        # If we get here, the program has exited
 
 def compile(bytecode: str, optimize: bool = False) -> Tuple[str, set]:
     """

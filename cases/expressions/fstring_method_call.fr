@@ -1,7 +1,4 @@
-// Hello World
-// HELLO WORLD
-// hello world
-// 'test'
+// !Hello World\nHELLO WORLD\nhello world\n'test'
 
 void main() {
     str name = "World"
@@ -19,3 +16,4 @@ void main() {
     str text = "test"
     println(f"'{f"  {text}  ".strip()}'")
 }
+

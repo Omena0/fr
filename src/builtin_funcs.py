@@ -98,6 +98,13 @@ def _file_rmdir(path: str):
     _os.rmdir(path)
     return None
 
+def _assert(condition: bool, message: str = "Assertion failed"):
+    """Assert that condition is true, otherwise print message and exit"""
+    if not condition:
+        print(message)
+        sys.exit(1)
+    return None
+
 def _file_rename(old_path: str, new_path: str):
     """Rename or move a file or directory"""
     _os.rename(old_path, new_path)
@@ -448,6 +455,16 @@ funcs:dict[ # Holy type annotations
             "text": "string"
         },
         "func": print,
+        "return_type": "none",
+        "can_eval": False
+    },
+    'assert': {
+        "type": "builtin",
+        "args": {
+            "condition": "bool",
+            "message": "str"
+        },
+        "func": _assert,
         "return_type": "none",
         "can_eval": False
     },
