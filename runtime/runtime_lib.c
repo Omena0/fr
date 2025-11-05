@@ -12,11 +12,6 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-// Disable optimizations for the entire runtime library
-// gcc's aggressive optimizations at -O2+ cause issues with the memory layout
-// and function calling conventions
-#pragma GCC optimize("O0")
-
 // Global state for error formatting
 static int runtime_test_mode = -1;  // -1 = uninitialized, 0 = user mode, 1 = test mode
 static const char* runtime_source_file = NULL;
@@ -36,18 +31,18 @@ static int is_test_mode() {
 // Set source file information for error reporting
 void runtime_set_source_info(const char* filename, const char* source) {
     runtime_source_file = filename;
-    
+
     // Count lines
     runtime_source_line_count = 1;
     for (const char* p = source; *p; p++) {
         if (*p == '\n') runtime_source_line_count++;
     }
-    
+
     // Split source into lines
     runtime_source_lines = (const char**)malloc(runtime_source_line_count * sizeof(char*));
     int line_idx = 0;
     const char* line_start = source;
-    
+
     for (const char* p = source; *p; p++) {
         if (*p == '\n') {
             size_t len = p - line_start;
@@ -58,7 +53,7 @@ void runtime_set_source_info(const char* filename, const char* source) {
             line_start = p + 1;
         }
     }
-    
+
     // Last line (if doesn't end with newline)
     if (line_start[0] != '\0') {
         runtime_source_lines[line_idx] = strdup(line_start);
@@ -161,17 +156,17 @@ int64_t runtime_str_len(const char* str) {
 
 char* runtime_str_get_char(const char* str, int64_t index) {
     int64_t len = (int64_t)strlen(str);
-    
+
     // Handle negative indices
     if (index < 0) {
         index = len + index;
     }
-    
+
     if (index < 0 || index >= len) {
         fprintf(stderr, "Runtime error: string index out of bounds\n");
         exit(1);
     }
-    
+
     char* result = malloc(2);
     if (!result) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -216,7 +211,7 @@ char* runtime_int_to_str(int64_t value) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    
+
     // Manual int to string conversion
     if (value == 0) {
         result[0] = '0';
@@ -225,7 +220,7 @@ char* runtime_int_to_str(int64_t value) {
         // Handle negative numbers
         int is_negative = value < 0;
         if (is_negative) value = -value;
-        
+
         // Extract digits in reverse order
         int len = 0;
         int64_t temp = value;
@@ -233,22 +228,22 @@ char* runtime_int_to_str(int64_t value) {
             result[len++] = '0' + (temp % 10);
             temp /= 10;
         }
-        
+
         // Add negative sign if needed
         if (is_negative) {
             result[len++] = '-';
         }
-        
+
         // Reverse the string
         for (int i = 0; i < len / 2; i++) {
             char tmp = result[i];
             result[i] = result[len - 1 - i];
             result[len - 1 - i] = tmp;
         }
-        
+
         result[len] = '\0';
     }
-    
+
     return result;
 }
 
@@ -299,11 +294,11 @@ char* runtime_str_strip(const char* str) {
     if (*str == '\0') {
         return strdup("");
     }
-    
+
     // Find end (skip trailing whitespace)
     const char* end = str + strlen(str) - 1;
     while (end > str && isspace(*end)) end--;
-    
+
     // Copy the stripped string
     size_t len = end - str + 1;
     char* result = malloc(len + 1);
@@ -320,14 +315,14 @@ RuntimeList* runtime_str_split(const char* str, const char* delim) {
     RuntimeList* list = runtime_list_new();
     char* str_copy = strdup(str);
     char* token = strtok(str_copy, delim);
-    
+
     while (token != NULL) {
         // For now, store the pointer as an int64_t
         // In a full implementation, we'd have a proper list of strings
         runtime_list_append_int(list, (int64_t)strdup(token));
         token = strtok(NULL, delim);
     }
-    
+
     free(str_copy);
     return list;
 }
@@ -336,7 +331,7 @@ char* runtime_str_join(RuntimeList* list, const char* delim) {
     if (list->length == 0) {
         return strdup("");
     }
-    
+
     // Calculate total length
     size_t total_len = 0;
     size_t delim_len = strlen(delim);
@@ -347,14 +342,14 @@ char* runtime_str_join(RuntimeList* list, const char* delim) {
             total_len += delim_len;
         }
     }
-    
+
     // Build result string
     char* result = malloc(total_len + 1);
     if (!result) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    
+
     result[0] = '\0';
     for (int64_t i = 0; i < list->length; i++) {
         char* str = (char*)list->items[i];
@@ -363,7 +358,7 @@ char* runtime_str_join(RuntimeList* list, const char* delim) {
             strcat(result, delim);
         }
     }
-    
+
     return result;
 }
 
@@ -371,7 +366,7 @@ char* runtime_str_replace(const char* str, const char* old, const char* new) {
     if (!old || !new || strlen(old) == 0) {
         return strdup(str);
     }
-    
+
     // Count occurrences
     int count = 0;
     const char* p = str;
@@ -380,11 +375,11 @@ char* runtime_str_replace(const char* str, const char* old, const char* new) {
         count++;
         p += old_len;
     }
-    
+
     if (count == 0) {
         return strdup(str);
     }
-    
+
     // Allocate result
     size_t new_len = strlen(new);
     size_t result_len = strlen(str) + count * (new_len - old_len);
@@ -393,7 +388,7 @@ char* runtime_str_replace(const char* str, const char* old, const char* new) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    
+
     // Build result
     char* dst = result;
     const char* src = str;
@@ -406,7 +401,7 @@ char* runtime_str_replace(const char* str, const char* old, const char* new) {
         src = p + old_len;
     }
     strcpy(dst, src);
-    
+
     return result;
 }
 
@@ -424,13 +419,13 @@ int64_t runtime_str_to_int(const char* str) {
     // Convert string to integer
     char* endptr;
     long long value = strtoll(str, &endptr, 10);
-    
+
     // Check if conversion was successful (optional: could handle errors differently)
     if (str == endptr) {
         // Conversion failed - return 0
         return 0;
     }
-    
+
     return (int64_t)value;
 }
 
@@ -438,13 +433,13 @@ double runtime_str_to_float(const char* str) {
     // Convert string to float
     char* endptr;
     double value = strtod(str, &endptr);
-    
+
     // Check if conversion was successful (optional: could handle errors differently)
     if (str == endptr) {
         // Conversion failed - return 0.0
         return 0.0;
     }
-    
+
     return value;
 }
 
@@ -486,7 +481,7 @@ int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
     if (index < 0) {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
@@ -501,20 +496,20 @@ static void int64_to_str(int64_t value, char* buffer) {
         buffer[1] = '\0';
         return;
     }
-    
+
     int is_negative = 0;
     if (value < 0) {
         is_negative = 1;
         value = -value;
     }
-    
+
     char temp[32];
     int i = 0;
     while (value > 0) {
         temp[i++] = '0' + (value % 10);
         value /= 10;
     }
-    
+
     int j = 0;
     if (is_negative) {
         buffer[j++] = '-';
@@ -530,28 +525,28 @@ int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line) {
     if (!list) {
         runtime_error_at("Index error: null list pointer", line);
     }
-    
+
     // Handle negative indices (Python-style)
     int64_t original_index = index;
     if (index < 0) {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length) {
         // Manually construct error message without sprintf
         static char msg[512];
         char index_str[32];
         char length_str[32];
-        
+
         int64_to_str(original_index, index_str);
         int64_to_str(list->length, length_str);
-        
+
         strcpy(msg, "Index error: list index out of range: ");
         strcat(msg, index_str);
         strcat(msg, " (length: ");
         strcat(msg, length_str);
         strcat(msg, ")");
-        
+
         runtime_error_at(msg, line);
     }
     return list->items[index];
@@ -562,7 +557,7 @@ void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     if (index < 0) {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
@@ -576,22 +571,22 @@ void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, in
     if (index < 0) {
         index = list->length + index;
     }
-    
+
     if (index < 0 || index >= list->length) {
         // Manually construct error message without sprintf
         static char msg[512];
         char index_str[32];
         char length_str[32];
-        
+
         int64_to_str(original_index, index_str);
         int64_to_str(list->length, length_str);
-        
+
         strcpy(msg, "Index error: list index out of range: ");
         strcat(msg, index_str);
         strcat(msg, " (length: ");
         strcat(msg, length_str);
         strcat(msg, ")");
-        
+
         runtime_error_at(msg, line);
     }
     list->items[index] = value;
@@ -692,14 +687,14 @@ void runtime_set_add(RuntimeSet* set, int64_t value) {
             set->elem_type = 0; // Integer type
         }
     }
-    
+
     // Check if already exists
     for (int64_t i = 0; i < set->length; i++) {
         if (set->items[i] == value) {
             return;  // Already in set
         }
     }
-    
+
     // Resize if needed
     if (set->length >= set->capacity) {
         set->capacity *= 2;
@@ -709,7 +704,7 @@ void runtime_set_add(RuntimeSet* set, int64_t value) {
             exit(1);
         }
     }
-    
+
     set->items[set->length++] = value;
 }
 
@@ -718,14 +713,14 @@ void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
     if (set->elem_type == -1) {
         set->elem_type = elem_type;
     }
-    
+
     // Check if already exists
     for (int64_t i = 0; i < set->length; i++) {
         if (set->items[i] == value) {
             return;  // Already in set
         }
     }
-    
+
     // Resize if needed
     if (set->length >= set->capacity) {
         set->capacity *= 2;
@@ -735,7 +730,7 @@ void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
             exit(1);
         }
     }
-    
+
     set->items[set->length++] = value;
 }
 
@@ -814,7 +809,7 @@ RuntimePyObject* runtime_py_import(const char* module_name) {
     return NULL;
 }
 
-int64_t runtime_py_call_int(RuntimePyObject* module, const char* func_name, 
+int64_t runtime_py_call_int(RuntimePyObject* module, const char* func_name,
                              int argc, int64_t* args) {
     fprintf(stderr, "Runtime error: Python interop not yet implemented\n");
     exit(1);
@@ -916,10 +911,10 @@ int runtime_exception_push(const char* exc_type) {
         fprintf(stderr, "Error: Maximum exception handler depth exceeded\n");
         exit(1);
     }
-    
+
     RuntimeExceptionHandler* handler = &exception_handlers[exception_handler_count];
     handler->exc_type = exc_type;
-    
+
     return exception_handler_count++;
 }
 
@@ -936,11 +931,16 @@ void runtime_exception_pop() {
     }
 }
 
+// Functions that call longjmp must be compiled with reduced optimizations
+// to prevent issues with register allocation and variable caching.
+// We use -fno-omit-frame-pointer and disable inline optimizations.
+__attribute__((optimize("no-omit-frame-pointer")))
+__attribute__((noinline))
 void runtime_exception_raise(const char* exc_type, const char* message) {
     // Search for matching exception handler (from most recent to oldest)
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
-        
+
         // Check if handler matches exception type (empty string matches all)
         if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
             // Perform non-local jump to handler
@@ -949,50 +949,74 @@ void runtime_exception_raise(const char* exc_type, const char* message) {
             longjmp(handler->jump_buffer, 1);
         }
     }
-    
+
     // No handler found - print error and exit
     fprintf(stderr, "Uncaught exception: [%s] %s\n", exc_type, message);
     exit(1);
 }
 
+__attribute__((optimize("no-omit-frame-pointer")))
+__attribute__((noinline))
 void runtime_exception_raise_at(const char* exc_type, const char* message, int line) {
     // Search for matching exception handler (from most recent to oldest)
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
-        
+
         // Check if handler matches exception type (empty string matches all)
         if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
             // Perform non-local jump to handler
             longjmp(handler->jump_buffer, 1);
         }
     }
-    
-    // No handler found - print error in expected format: ?line:[Type] message
-    // This format is for explicit raise statements
-    fprintf(stderr, "?%d:[%s] %s\n", line, exc_type, message);
+
+    // No handler found - print error with dual format support
+    if (is_test_mode()) {
+        // Test mode: concise format ?line,column:[Type] message
+        fprintf(stderr, "?%d,0:[%s] %s\n", line, exc_type, message);
+    } else {
+        // User mode: detailed format similar to Python runtime
+        fprintf(stderr, "Exception: %s\n", exc_type);
+
+        if (runtime_source_file && runtime_source_lines && line > 0 && line <= runtime_source_line_count) {
+            // Print file location and source line (no caret for raise statements)
+            const char* source_line = runtime_source_lines[line - 1];
+
+            fprintf(stderr, "  File \"%s\" line %d in main\n", runtime_source_file, line);
+            fprintf(stderr, "      %s\n", source_line);
+            fprintf(stderr, "\n");  // Blank line instead of caret
+            fprintf(stderr, "    %s:%d: %s\n", runtime_source_file, line, message);
+        } else {
+            // No source info available - still show proper format
+            fprintf(stderr, "  File \"<unknown>\" line %d in main\n", line);
+            fprintf(stderr, "    <unknown>:%d: %s\n", line, message);
+        }
+    }
+
     exit(1);
 }
 
+__attribute__((optimize("no-omit-frame-pointer")))
+__attribute__((noinline))
 void runtime_error_at(const char* message, int line) {
     // Search for matching exception handler using "RuntimeError" as type
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
-        
+
         // Extract exception type from message if present (e.g., "ZeroDivisionError")
         // For runtime errors, we need to match against handler's expected type
         // Default to RuntimeError if no type in message
         const char* exc_type = "RuntimeError";
-        
+
         // Check if message contains exception type (for division by zero, etc.)
         if (strstr(message, "division by zero")) {
             exc_type = "ZeroDivisionError";
         }
-        
+
         if (strcmp(handler->exc_type, "") == 0 || strcmp(handler->exc_type, exc_type) == 0) {
             longjmp(handler->jump_buffer, 1);
         }
     }
-    
+
     // No handler found - print error and exit
     if (is_test_mode()) {
         // Test mode: concise format ?line,column:message
@@ -1000,14 +1024,14 @@ void runtime_error_at(const char* message, int line) {
     } else {
         // User mode: detailed format similar to Python runtime
         fprintf(stderr, "Exception: Runtime Error\n");
-        
+
         if (runtime_source_file && runtime_source_lines && line > 0 && line <= runtime_source_line_count) {
             // Print file location and source line
             const char* source_line = runtime_source_lines[line - 1];
-            
+
             // Try to find a reasonable column position based on the error message
             int col = 0;
-            
+
             // For index errors, try to find the '[' bracket and point to the index value
             if (strstr(message, "Index error")) {
                 const char* bracket = strchr(source_line, '[');
@@ -1029,10 +1053,10 @@ void runtime_error_at(const char* message, int line) {
                 // For other errors, position at end of line
                 col = strlen(source_line);
             }
-            
+
             fprintf(stderr, "  File \"%s\" line %d in main\n", runtime_source_file, line);
-            fprintf(stderr, "          %s\n", source_line);
-            fprintf(stderr, "          %*s^\n", col, "");  // Print spaces then ^
+            fprintf(stderr, "      %s\n", source_line);
+            fprintf(stderr, "      %*s^\n", col, "");  // Print spaces then ^
             fprintf(stderr, "    %s:%d:%d: %s\n", runtime_source_file, line, col, message);
         } else {
             // No source info available - still show proper format
@@ -1041,7 +1065,7 @@ void runtime_error_at(const char* message, int line) {
             fprintf(stderr, "    <unknown>:%d:0: %s\n", line, message);
         }
     }
-    
+
     exit(1);
 }
 
@@ -1099,23 +1123,35 @@ char* runtime_set_to_str(RuntimeSet* set) {
 // ============================================================================
 
 char* runtime_list_repr(RuntimeList* list) {
+    if (!list) return strdup("[]");
+
+    // Add compiler barrier to prevent aggressive optimization of list pointer
+    __asm__ __volatile__("" : : "r"(list) : "memory");
+
+    // Validate list structure before accessing
+    if (!list->items && list->length > 0) {
+        fprintf(stderr, "Runtime error: corrupted list structure (items=NULL, length=%ld)\n", list->length);
+        return strdup("[corrupted]");
+    }
+
     char* result = malloc(4096);
     if (!result) return NULL;
-    
+
     strcpy(result, "[");
     for (int64_t i = 0; i < list->length; i++) {
         if (i > 0) strcat(result, ", ");
-        
+
         // Use type information to format correctly
         if (list->elem_type == 1) {
             // String type
             const char* str = (const char*)list->items[i];
             strcat(result, str);
         } else if (list->elem_type == 2) {
-            // Float type
-            double val = *(double*)&list->items[i];
+            // Float type - use union for type-safe punning
+            union { int64_t i; double d; } pun;
+            pun.i = list->items[i];
             char tmp[32];
-            snprintf(tmp, 32, "%g", val);
+            snprintf(tmp, 32, "%g", pun.d);
             strcat(result, tmp);
         } else {
             // Integer type (or unknown)
@@ -1131,11 +1167,11 @@ char* runtime_list_repr(RuntimeList* list) {
 char* runtime_set_repr(RuntimeSet* set) {
     char* result = malloc(4096);
     if (!result) return NULL;
-    
+
     strcpy(result, "{");
     for (int64_t i = 0; i < set->length; i++) {
         if (i > 0) strcat(result, ", ");
-        
+
         // Use type information to format correctly
         if (set->elem_type == 1) {
             // String type
@@ -1223,7 +1259,7 @@ char* runtime_fread(int64_t fd, int64_t size) {
         fprintf(stderr, "Runtime error: invalid file descriptor\n");
         return "";
     }
-    
+
     // If size is -1, read entire file
     if (size == -1) {
         // Get file size
@@ -1231,19 +1267,19 @@ char* runtime_fread(int64_t fd, int64_t size) {
         fseek(fp, 0, SEEK_END);
         long file_size = ftell(fp);
         fseek(fp, current_pos, SEEK_SET);
-        
+
         // Allocate buffer for entire file
         char* buffer = malloc(file_size + 1);
         if (!buffer) {
             fprintf(stderr, "Runtime error: out of memory\n");
             return "";
         }
-        
+
         size_t read = fread(buffer, 1, file_size, fp);
         buffer[read] = '\0';
         return buffer;
     }
-    
+
     char* buffer = malloc(size + 1);
     if (!buffer) {
         fprintf(stderr, "Runtime error: out of memory\n");

@@ -61,12 +61,23 @@ def format_runtime_exception(e: Exception) -> str:
     # Format location
     location = f"{ctx['file']}:{ctx['line']}:{char_pos}" if ctx['file'] else f"Line {ctx['line']}:{char_pos}"
     
+    # Check if this is a raise statement (has [Type] marker)
+    is_raise = error_msg.startswith('[') and ']' in error_msg
+    
     # Build error message in same format as parse errors
     if source_line:
-        pointer = ' ' * char_pos + '^'
-        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
+        if is_raise:
+            # For raise statements: no caret, no column number
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n\n    {ctx['file']}:{ctx['line']}: {error_msg}"
+        else:
+            # For runtime errors: show caret and column number
+            pointer = ' ' * char_pos + '^'
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
     else:
-        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
+        if is_raise:
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {ctx['file']}:{ctx['line']}: {error_msg}"
+        else:
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
     
     return formatted
 

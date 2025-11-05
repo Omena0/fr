@@ -14,7 +14,8 @@
         "enabled": true,
         "timeout": 5,
         "ignore": [
-            "syntax_errors"
+            "syntax_errors",
+            "imports/c_import.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

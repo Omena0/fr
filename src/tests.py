@@ -358,7 +358,7 @@ def main():
     print()
 
     # Run tests in parallel
-    max_workers = min(os.cpu_count() or 4, len(test_files))
+    max_workers = 12
     results = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
