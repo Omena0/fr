@@ -4,6 +4,7 @@ Compiles typed functions to bytecode format specified in BYTECODE.md
 """
 
 from typing import Any, Dict, List, Optional
+import re
 try:
     from src.optimizer import BytecodeOptimizer
     from src.parser import parse, AstType, VarType
@@ -13,6 +14,78 @@ except ImportError:
 import sys
 
 flags = sys.argv[1:]
+
+builtin_map = {
+    'println': 'BUILTIN_PRINTLN',
+    'print': 'BUILTIN_PRINT',
+    'str': 'BUILTIN_STR',
+    'input': 'INPUT',
+    'len': 'BUILTIN_LEN',
+    'sqrt': 'BUILTIN_SQRT',
+    'round': 'BUILTIN_ROUND',
+    'floor': 'BUILTIN_FLOOR',
+    'ceil': 'BUILTIN_CEIL',
+    'PI': 'BUILTIN_PI',
+    'int': 'TO_INT',
+    'float': 'TO_FLOAT',
+    'bool': 'TO_BOOL',
+    'encode': 'ENCODE',
+    'decode': 'DECODE',
+    'upper': 'STR_UPPER',
+    'lower': 'STR_LOWER',
+    'strip': 'STR_STRIP',
+    'split': 'STR_SPLIT',
+    'join': 'STR_JOIN',
+    'replace': 'STR_REPLACE',
+    'abs': 'ABS',
+    'pow': 'POW',
+    'min': 'MIN',
+    'max': 'MAX',
+    # File I/O
+    'fopen': 'FILE_OPEN',
+    'fread': 'FILE_READ',
+    'fwrite': 'FILE_WRITE',
+    'fclose': 'FILE_CLOSE',
+    'exists': 'FILE_EXISTS',
+    'isfile': 'FILE_ISFILE',
+    'isdir': 'FILE_ISDIR',
+    'listdir': 'FILE_LISTDIR',
+    'mkdir': 'FILE_MKDIR',
+    'makedirs': 'FILE_MAKEDIRS',
+    'remove': 'FILE_REMOVE',
+    'rmdir': 'FILE_RMDIR',
+    'rename': 'FILE_RENAME',
+    'getsize': 'FILE_GETSIZE',
+    'getcwd': 'FILE_GETCWD',
+    'chdir': 'FILE_CHDIR',
+    'abspath': 'FILE_ABSPATH',
+    'basename': 'FILE_BASENAME',
+    'dirname': 'FILE_DIRNAME',
+    'pathjoin': 'FILE_JOIN',
+    # Process management
+    'fork': 'FORK',
+    'wait': 'JOIN',
+    'sleep': 'SLEEP',
+    'exit': 'EXIT',
+    'getpid': 'GETPID',
+    # Socket I/O
+    'socket': 'SOCKET_CREATE',
+    'connect': 'SOCKET_CONNECT',
+    'bind': 'SOCKET_BIND',
+    'listen': 'SOCKET_LISTEN',
+    'accept': 'SOCKET_ACCEPT',
+    'send': 'SOCKET_SEND',
+    'recv': 'SOCKET_RECV',
+    'sclose': 'SOCKET_CLOSE',
+    'setsockopt': 'SOCKET_SETSOCKOPT',
+    # Python library integration
+    'py_import': 'PY_IMPORT',
+    'py_call': 'PY_CALL',
+    'py_getattr': 'PY_GETATTR',
+    'py_setattr': 'PY_SETATTR',
+    'py_call_method': 'PY_CALL_METHOD',
+}
+
 
 class CompilerError(Exception):
     """Raised when compilation fails"""
@@ -78,6 +151,8 @@ class BytecodeCompiler:
         self.last_emitted_line: int = 1  # Last line number emitted as a directive (start at 1 to avoid emitting .line 1 initially)
         self.global_vars: Dict[str, Any] = {}  # Maps global variable names to their AST nodes
         self.c_import_files: List[str] = []  # Track C files to compile and link
+        self.c_functions: Dict[str, Dict[str, Any]] = {}  # Maps C function names to their signatures
+        self.c_link_flags: List[str] = []  # Track linker flags from c_link directives
         self.source_lines: List[str] = []  # Source code lines for .line directives
         self.source_file: str = ""  # Source filename for error messages
 
@@ -95,12 +170,12 @@ class BytecodeCompiler:
             if self.source_lines and 0 < self.current_line <= len(self.source_lines):
                 source_text = self.source_lines[self.current_line - 1].rstrip()  # Only strip trailing whitespace
                 # Escape quotes in source text for bytecode
-                source_text = source_text.replace('\\', '\\\\').replace('"', '\\"')
+                source_text = source_text.replace('\\', '\\\\').replace('"', '\\"').strip()
                 self.output.append(f'  .line {self.current_line} "{source_text}"')
             else:
                 self.output.append(f"  .line {self.current_line}")
             self.last_emitted_line = self.current_line
-        
+
         self.output.append(f"  {instruction}")
         # Only track line numbers for actual executable instructions, not directives
         if not instruction.lstrip().startswith('.'):
@@ -170,6 +245,10 @@ class BytecodeCompiler:
             'any': 'i64',
         }
 
+        # Check if it's a struct type
+        if type_str in self.struct_defs:
+            return f'struct:{type_str}'  # Return struct name with prefix
+        
         return type_map.get(type_str, 'i64')  # Default to i64
 
     def normalize_type(self, type_str: str) -> str:
@@ -179,6 +258,42 @@ class BytecodeCompiler:
             'pyobj': 'pyobject',
         }
         return type_aliases.get(type_str, type_str)
+
+    def get_expr_struct_type(self, expr: Any) -> str:
+        """Determine what struct type an expression evaluates to, if any"""
+        if expr is None or not isinstance(expr, dict):
+            return ''
+        
+        # If it's a variable, check its type
+        if 'id' in expr:
+            var_name = expr['id']
+            var_type = self.var_types.get(var_name, '')
+            # Check if this is a struct type
+            if var_type in self.struct_defs:
+                return var_type
+            return ''
+        
+        # If it's a member access (nested struct field)
+        if 'attr' in expr and 'value' in expr:
+            field_name = expr['attr']
+            # Get the type of the base expression
+            base_type = self.get_expr_struct_type(expr['value'])
+            
+            if base_type and base_type in self.struct_defs:
+                # Find the field in this struct
+                struct_def = self.struct_defs[base_type]
+                fields = struct_def.get('fields', [])
+                for i, field in enumerate(fields):
+                    if field.get('name') == field_name:
+                        # Get the field's type
+                        field_type = field.get('type', '')
+                        # Check if this field type is a struct
+                        if field_type in self.struct_defs:
+                            return field_type
+                        return ''
+            return ''
+        
+        return ''
 
     def compile_expr(self, expr: Any, expr_type: str = 'i64'):
         """Compile an expression node to bytecode (pushes result to stack)"""
@@ -296,7 +411,7 @@ class BytecodeCompiler:
                 self.emit(f"GOTO_CALL {label_name}")
                 # After return, the value will be on the stack
                 return
-            
+
             # Boolean operations (And, Or): {'op': 'And'/'Or', 'values': [...]}
             # Must check before f-string since both have 'values' key
             if 'op' in expr and expr['op'] in ('And', 'Or') and 'values' in expr:
@@ -380,19 +495,30 @@ class BytecodeCompiler:
                 # Compile the struct value (could be a variable, list element, etc.)
                 self.compile_expr(expr['value'], expr_type)
 
+                # Determine which struct this field belongs to
+                struct_type = self.get_expr_struct_type(expr['value'])
+                
                 # Determine field index
-                # Find first struct that has this field
                 field_idx = -1
-                for struct_name, struct_def in self.struct_defs.items():
+                
+                if struct_type and struct_type in self.struct_defs:
+                    # We know which struct type this is, use it
+                    struct_def = self.struct_defs[struct_type]
                     if field_name in struct_def['field_map']:
                         field_idx = struct_def['field_map'][field_name]
-                        break
+                else:
+                    # Fall back to searching all structs (for backward compatibility)
+                    for struct_name, struct_def in self.struct_defs.items():
+                        if field_name in struct_def['field_map']:
+                            field_idx = struct_def['field_map'][field_name]
+                            break
 
                 if field_idx < 0:
                     raise ValueError(f"Unknown field: {field_name}")
 
                 self.emit(f"STRUCT_GET {field_idx}")
                 return
+
             # List literal in AST format with 'elts'
             if 'elts' in expr:
                 # Create new list
@@ -592,7 +718,7 @@ class BytecodeCompiler:
                             # Compile any arguments for the method
                             for arg in args:
                                 self.compile_expr(arg, expr_type)
-                            
+
                             # Add default parameters for methods that need them
                             if method_name == 'encode' and len(args) == 0:
                                 # encode() defaults to utf-8
@@ -600,7 +726,7 @@ class BytecodeCompiler:
                             elif method_name == 'decode' and len(args) == 0:
                                 # decode() defaults to utf-8
                                 self.emit('CONST_STR "utf-8"')
-                            
+
                             # Emit the builtin instruction
                             self.emit(builtin_methods[method_name])
                             return
@@ -633,23 +759,23 @@ class BytecodeCompiler:
                             # Convert to py_call(module_name, func_name, *args)
                             module_alias = value_node['id']
                             func_name = func_info['attr']
-                            
+
                             # Resolve alias to actual module name
                             import_info = self.py_imports[module_alias]
                             actual_module = import_info['module']
-                            
+
                             # Push actual module name (not alias) as string
                             escaped_module = escape_string_for_bytecode(actual_module)
                             self.emit(f'CONST_STR "{escaped_module}"')
-                            
+
                             # Push function name as string
                             escaped_func = escape_string_for_bytecode(func_name)
                             self.emit(f'CONST_STR "{escaped_func}"')
-                            
+
                             # Push arguments
                             for arg in args:
                                 self.compile_expr(arg, expr_type)
-                            
+
                             # Push num_args and call
                             self.emit(f"CONST_I64 {len(args)}")
                             self.emit('PY_CALL')
@@ -687,7 +813,7 @@ class BytecodeCompiler:
                     if module_ref and module_ref in self.py_imports:
                         import_info = self.py_imports[module_ref]
                         actual_module = import_info['module']
-                        
+
                         if import_info.get('type') == 'name':
                             # For "from module import name", replace module arg with actual module
                             # and func arg with the imported name
@@ -698,13 +824,14 @@ class BytecodeCompiler:
                             # For "import module as alias", just replace the module name
                             args[0] = {'value': actual_module}
 
-                # Check if it's a struct constructor
+                # Check if it's a struct constructor (C struct or user-defined)
                 if func_name in self.struct_defs:
                     struct_def = self.struct_defs[func_name]
-                    # Compile arguments (field values) in order
-                    for arg in args:
-                        self.compile_expr(arg, expr_type)
-                    # Create struct instance
+                    field_types = struct_def.get('field_types', [])
+                    # Compile args for each field
+                    for i, arg in enumerate(args):
+                        self.compile_expr(arg, field_types[i] if i < len(field_types) else expr_type)
+                    # Emit struct creation
                     self.emit(f"STRUCT_NEW {struct_def['id']}")
                     return
 
@@ -718,77 +845,6 @@ class BytecodeCompiler:
                     self.emit('CONST_STR "r"')
 
                 # Check if builtin
-                builtin_map = {
-                    'println': 'BUILTIN_PRINTLN',
-                    'print': 'BUILTIN_PRINT',
-                    'str': 'BUILTIN_STR',
-                    'input': 'INPUT',
-                    'len': 'BUILTIN_LEN',
-                    'sqrt': 'BUILTIN_SQRT',
-                    'round': 'BUILTIN_ROUND',
-                    'floor': 'BUILTIN_FLOOR',
-                    'ceil': 'BUILTIN_CEIL',
-                    'PI': 'BUILTIN_PI',
-                    'int': 'TO_INT',
-                    'float': 'TO_FLOAT',
-                    'bool': 'TO_BOOL',
-                    'encode': 'ENCODE',
-                    'decode': 'DECODE',
-                    'upper': 'STR_UPPER',
-                    'lower': 'STR_LOWER',
-                    'strip': 'STR_STRIP',
-                    'split': 'STR_SPLIT',
-                    'join': 'STR_JOIN',
-                    'replace': 'STR_REPLACE',
-                    'abs': 'ABS',
-                    'pow': 'POW',
-                    'min': 'MIN',
-                    'max': 'MAX',
-                    # File I/O
-                    'fopen': 'FILE_OPEN',
-                    'fread': 'FILE_READ',
-                    'fwrite': 'FILE_WRITE',
-                    'fclose': 'FILE_CLOSE',
-                    'exists': 'FILE_EXISTS',
-                    'isfile': 'FILE_ISFILE',
-                    'isdir': 'FILE_ISDIR',
-                    'listdir': 'FILE_LISTDIR',
-                    'mkdir': 'FILE_MKDIR',
-                    'makedirs': 'FILE_MAKEDIRS',
-                    'remove': 'FILE_REMOVE',
-                    'rmdir': 'FILE_RMDIR',
-                    'rename': 'FILE_RENAME',
-                    'getsize': 'FILE_GETSIZE',
-                    'getcwd': 'FILE_GETCWD',
-                    'chdir': 'FILE_CHDIR',
-                    'abspath': 'FILE_ABSPATH',
-                    'basename': 'FILE_BASENAME',
-                    'dirname': 'FILE_DIRNAME',
-                    'pathjoin': 'FILE_JOIN',
-                    # Process management
-                    'fork': 'FORK',
-                    'wait': 'JOIN',
-                    'sleep': 'SLEEP',
-                    'exit': 'EXIT',
-                    'getpid': 'GETPID',
-                    # Socket I/O
-                    'socket': 'SOCKET_CREATE',
-                    'connect': 'SOCKET_CONNECT',
-                    'bind': 'SOCKET_BIND',
-                    'listen': 'SOCKET_LISTEN',
-                    'accept': 'SOCKET_ACCEPT',
-                    'send': 'SOCKET_SEND',
-                    'recv': 'SOCKET_RECV',
-                    'sclose': 'SOCKET_CLOSE',
-                    'setsockopt': 'SOCKET_SETSOCKOPT',
-                    # Python library integration
-                    'py_import': 'PY_IMPORT',
-                    'py_call': 'PY_CALL',
-                    'py_getattr': 'PY_GETATTR',
-                    'py_setattr': 'PY_SETATTR',
-                    'py_call_method': 'PY_CALL_METHOD',
-                }
-
                 if func_name in builtin_map:
                     # Special handling for functions that can be both builtin and set operations
                     # set_remove() with 2 args is set operation
@@ -797,7 +853,7 @@ class BytecodeCompiler:
                         # Args are already on stack: set, value
                         self.emit("SET_REMOVE")
                         return
-                    
+
                     # Special handling for socket() with default arguments
                     if func_name == 'socket' and len(args) == 0:
                         # Push default arguments: "inet" and "stream"
@@ -844,7 +900,7 @@ class BytecodeCompiler:
                             if key == module_ref or import_info['module'] == module_ref:
                                 found_import = True
                                 break
-                        
+
                         if not found_import and module_ref:
                             raise CompilerError(f"Module '{module_ref}' must be imported with py_import at the top of the file")
 
@@ -892,7 +948,42 @@ class BytecodeCompiler:
                     # Args are already on stack: set, value
                     self.emit("SET_CONTAINS")
                 else:
-                    self.emit(f"CALL {func_name} {len(args)}")
+                    # Check if this is a C function with type information
+                    if func_name in self.c_functions:
+                        func_info = self.c_functions[func_name]
+                        params = func_info.get('params', [])
+                        return_type = func_info.get('return_type', 'void')
+
+                        # Build type signature string for CALL instruction
+                        # Format: "i" for int, "f" for float/double, "s" for struct
+                        type_sig = ""
+                        for i, param in enumerate(params[:len(args)]):
+                            param_type = param.get('type', 'int')
+                            if 'float' in param_type or 'double' in param_type:
+                                type_sig += "f"
+                            elif param_type in self.struct_defs:
+                                # Struct parameter - will be passed as packed i64
+                                type_sig += "s"
+                            else:
+                                type_sig += "i"
+
+                        # Add return type indicator at the end (separated by |)
+                        # Format: "i" for int, "f" for float, "v" for void
+                        if 'float' in return_type or 'double' in return_type:
+                            type_sig += "|f"
+                        elif return_type != 'void':
+                            type_sig += "|i"
+                        else:
+                            type_sig += "|v"
+
+                        if type_sig:
+                            # Emit as space-separated: CALL func_name arg_count type_sig
+                            self.emit(f"CALL {func_name} {len(args)} {type_sig}")
+                        else:
+                            self.emit(f"CALL {func_name} {len(args)}")
+                    else:
+                        # For user-defined functions, emit simple CALL
+                        self.emit(f"CALL {func_name} {len(args)}")
                 return
 
         # Default: treat as constant 0
@@ -903,7 +994,7 @@ class BytecodeCompiler:
         # Update current line if available
         if 'line' in node:
             self.current_line = node['line']
-        
+
         node_type = node.get('type')
 
         # Variable declaration/assignment
@@ -920,7 +1011,7 @@ class BytecodeCompiler:
                 value = value['value']
 
             # Special handling for dict type with empty set literal (parser treats {} as empty set)
-            if (value_type_str == 'dict' and value and is_literal_value(value) and 
+            if (value_type_str == 'dict' and value and is_literal_value(value) and
                 value.get('type') == 'set'):
                 set_value = value.get('value', [])
                 if len(set_value) == 0:
@@ -988,14 +1079,14 @@ class BytecodeCompiler:
                 # Load the module object (stored as a variable)
                 var_id = self.get_var_id(target_name)
                 self.emit_load(target_name)
-                
+
                 # Push attribute name
                 escaped_attr = escape_string_for_bytecode(field_name)
                 self.emit(f'CONST_STR "{escaped_attr}"')
-                
+
                 # Push value
                 self.compile_expr(value)
-                
+
                 # Call PY_SETATTR(module, attr_name, value)
                 self.emit('PY_SETATTR')
                 # PY_SETATTR leaves a none value on stack, pop it
@@ -1003,21 +1094,21 @@ class BytecodeCompiler:
                 return
 
             var_id = self.get_var_id(target_name)
-            
+
             # Check if target is a pyobject variable
             var_type = self.var_types.get(target_name, '')
             if var_type == 'pyobject':
                 # Python object attribute assignment: window.debug = False
                 # Load the pyobject
                 self.emit_load(target_name)
-                
+
                 # Push attribute name
                 escaped_attr = escape_string_for_bytecode(field_name)
                 self.emit(f'CONST_STR "{escaped_attr}"')
-                
+
                 # Push value
                 self.compile_expr(value)
-                
+
                 # Call PY_SETATTR(obj, attr_name, value)
                 self.emit('PY_SETATTR')
                 # PY_SETATTR leaves a none value on stack, pop it
@@ -1026,7 +1117,7 @@ class BytecodeCompiler:
 
             # Load the struct
             self.emit_load(target_name)
-            
+
             field_idx = next(
                 (
                     struct_def['field_map'][field_name]
@@ -1059,11 +1150,11 @@ class BytecodeCompiler:
         elif node_type == 'raise':
             exc_type = node.get('exc_type', '')
             message = node.get('message', '')
-            
+
             # Escape strings for bytecode
             escaped_exc_type = escape_string_for_bytecode(exc_type) if exc_type else ''
             escaped_message = escape_string_for_bytecode(message) if message else ''
-            
+
             # Emit RAISE instruction with exception type and message
             if exc_type and message:
                 self.emit(f'RAISE "{escaped_exc_type}" "{escaped_message}"')
@@ -1238,7 +1329,7 @@ class BytecodeCompiler:
             # Need to pop it after running the exception handler
             for stmt in except_scope:
                 self.compile_statement(stmt, func_return_type)
-            
+
             # Pop the exception handler after running the except block
             self.emit("TRY_END")
 
@@ -1401,7 +1492,7 @@ class BytecodeCompiler:
                     # Store result back to the variable
                     self.emit_store(var_name)
                     return
-            
+
             # Special handling for set-modifying functions
             if func_name in ('set_add', 'set_remove') and len(node.get('args', [])) >= 1:
                 # set_add(set, value) / set_remove(set, value) - modifies set in place
@@ -1434,17 +1525,17 @@ class BytecodeCompiler:
         elif 'func' in node and 'args' in node:
             # This is a call expression node from Python's AST (or transformed method call)
             self.compile_expr(node)
-            
+
             # Check if this is a void function - don't pop if it returns None
             func_ref = node.get('func', {})
             func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
-            
+
             if func_name:
                 try:
                     from src.builtin_funcs import funcs as builtin_funcs
                 except ImportError:
                     from builtin_funcs import funcs as builtin_funcs
-                
+
                 # Check if it's a builtin function with void/none return type
                 if func_name in builtin_funcs:
                     return_type = builtin_funcs[func_name].get('return_type', '')
@@ -1604,14 +1695,14 @@ class BytecodeCompiler:
 
     def compile_function(self, func_node: dict, global_vars: list | None = None) -> Optional[str]:
         """Compile a function node to bytecode. Returns bytecode string or None if can't compile.
-        
+
         Args:
             func_node: The function AST node to compile
             global_vars: List of global variable declarations to inject at the start (for main function)
         """
         if global_vars is None:
             global_vars = []
-            
+
         func_name = func_node.get('name', 'unknown')
 
         if inferred_types := self.infer_parameter_types(func_node):
@@ -1664,7 +1755,7 @@ class BytecodeCompiler:
         self.label_counter = 0
         self.var_mapping = {}
         self.next_var_id = 0
-        
+
         # DO NOT pre-allocate variable IDs for globals here!
         # Global variables use LOAD_GLOBAL/STORE_GLOBAL with their own indices,
         # separate from local variable indices.
@@ -1704,9 +1795,9 @@ class BytecodeCompiler:
             # Skip global variables - they're declared at module level
             if local_name in self.global_vars:
                 continue
-                
+
             var_id = self.get_var_id(local_name)
-            
+
             # Check if this is a global variable passed to main
             global_var_node = next((gv for gv in global_vars if gv.get('name') == local_name), None)
             if global_var_node:
@@ -1749,7 +1840,7 @@ class BytecodeCompiler:
         # Set current line to first statement's line if available
         if scope and isinstance(scope[0], dict) and 'line' in scope[0]:
             self.current_line = scope[0]['line']
-        
+
         for stmt in scope:
             self.compile_statement(stmt, return_type)
 
@@ -1771,7 +1862,7 @@ class BytecodeCompiler:
     def compile_ast(self, ast: AstType) -> str:
         """Compile entire AST to bytecode"""
         results = [".version 1", ""]
-        
+
         # Add source file if available (from AST metadata)
         source_file = None
         for node in ast:
@@ -1783,11 +1874,11 @@ class BytecodeCompiler:
                 if 'source_file' in node:
                     source_file = node['source_file']
                     break
-        
+
         if source_file:
             results.append(f"# source: {source_file}")
             results.append("")
-            
+
             # Store source file and read its content
             self.source_file = source_file
             try:
@@ -1796,10 +1887,10 @@ class BytecodeCompiler:
             except (FileNotFoundError, IOError):
                 # If source file can't be read, continue without it
                 pass
-        
+
         # Collect global variable declarations
         global_vars = []
-        
+
         # Collect raw bytecode blocks
         bytecode_blocks = []
         imported_functions = []
@@ -1807,11 +1898,11 @@ class BytecodeCompiler:
         # First pass: Register all struct definitions, Python imports, global variables, and bytecode blocks
         for node in ast:
             node_type = node.get('type')
-            
+
             # Skip metadata nodes
             if node_type == 'metadata':
                 continue
-            
+
             if node_type == 'import':
                 # Handle import directive - inline the imported AST nodes into current AST
                 imported_ast = node.get('ast', [])
@@ -1843,6 +1934,59 @@ class BytecodeCompiler:
                 c_file = node.get('file', '')
                 if c_file and c_file not in self.c_import_files:
                     self.c_import_files.append(c_file)
+
+                # Register C functions from the import
+                c_functions = node.get('functions', {})
+                for func_name, func_info in c_functions.items():
+                    self.c_functions[func_name] = func_info
+
+                # Register C structs from the import
+                c_structs = node.get('structs', {})
+                for struct_name, struct_info in c_structs.items():
+                    # Mark as C struct so we can distinguish from user-defined structs
+                    struct_info['is_c_struct'] = True
+                    fields = struct_info.get('fields', [])
+
+                    # Assign unique ID to this struct
+                    struct_id = self.struct_id_counter
+                    self.struct_id_counter += 1
+
+                    # Sanitize fields
+                    clean_fields = []
+                    for f in fields:
+                        name = f.get('name', '').strip().strip(',')
+                        ftype = f.get('type', '').strip().strip(',')
+                        # Split comma-separated lists (like "m0, m4, m8")
+                        for name_part in re.split(r'[,\s]+', name):
+                            if not name_part:
+                                continue
+                            clean_fields.append({'name': name_part, 'type': ftype})
+                    fields = clean_fields
+
+
+                    # Build field_map for fast field access
+                    field_map = {}
+                    for idx, field in enumerate(fields):
+                        field_map[field.get('name')] = idx
+
+                    # Store struct metadata with C flag
+                    self.struct_defs[struct_name] = {
+                        'id': struct_id,
+                        'fields': fields,
+                        'field_map': field_map,
+                        'is_c_struct': True
+                    }
+            elif node_type == 'c_link':
+                # Handle #c_link directive - track linker flags
+                library_str = node.get('library', '')
+                if library_str:
+                    # The library string may contain multiple space-separated flags
+                    # e.g., "lib/libraylib.a -lGL -lm -lpthread..."
+                    # Split and store each part
+                    flags = library_str.split()
+                    for flag in flags:
+                        if flag not in self.c_link_flags:
+                            self.c_link_flags.append(flag)
             elif node_type == 'bytecode_block':
                 # Collect bytecode blocks to emit after directives
                 bytecode_blocks.append(node)
@@ -1893,14 +2037,64 @@ class BytecodeCompiler:
                 global_vars.append(node)
                 # Store in global_vars dict for access by all functions
                 self.global_vars[var_name] = node
-            
+
         # Emit struct definitions as bytecode directives
         for struct_name, struct_def in self.struct_defs.items():
             struct_id = struct_def['id']
             fields = struct_def['fields']
-            field_names = ' '.join(f['name'] for f in fields)
-            field_types = ' '.join(f['type'] for f in fields)
-            results.append(f".struct {struct_id} {len(fields)} {field_names} {field_types}")
+
+            # Clean up names and types
+            field_names = ' '.join(f['name'].strip(',') for f in fields)
+            field_types = ' '.join(f['type'].strip(',') for f in fields)
+
+            # Compute struct size for C/imported structs
+            total_size = 256  # default fallback
+            field_type_list = [f['type'].strip(',').strip() for f in fields]
+            if field_type_list and all(ft for ft in field_type_list):
+                # Calculate struct size with alignment
+                def type_info(ctype: str):
+                    t = ctype.lower().strip()
+                    if t in ('unsigned char', 'uchar', 'char', 'byte', 'u8'):
+                        return (1, 1)
+                    if t in ('short', 'unsigned short'):
+                        return (2, 2)
+                    if t in ('float',):
+                        return (4, 4)
+                    if t in ('int', 'unsigned int', 'uint', 'i32', 'u32'):
+                        return (4, 4)
+                    if t in ('double', 'float64'):
+                        return (8, 8)
+                    if t in ('long', 'unsigned long', 'i64', 'u64'):
+                        return (8, 8)
+                    # fallback: pointer-sized
+                    return (8, 8)
+
+                cur_offset = 0
+                max_align = 1
+                for ftype in field_type_list:
+                    size, align = type_info(ftype)
+                    # Align current offset
+                    if align > 1:
+                        pad = (-(cur_offset)) % align
+                        if pad:
+                            cur_offset += pad
+                    cur_offset += size
+                    if align > max_align:
+                        max_align = align
+                # Round total size to alignment
+                if max_align > 1:
+                    total_size = cur_offset + ((-(cur_offset)) % max_align)
+                else:
+                    total_size = cur_offset
+
+            results.append(f".struct {struct_id} {len(fields)} {total_size} {field_names} {field_types}")
+        
+        # Emit struct type mappings for nested struct field resolution
+        # This allows the native compiler to map type names like "Point" to struct_ids
+        if self.struct_defs:
+            for struct_name, struct_def in self.struct_defs.items():
+                struct_id = struct_def['id']
+                results.append(f".struct_type {struct_name} {struct_id}")
 
         if self.struct_defs:
             results.append("")
@@ -1920,6 +2114,13 @@ class BytecodeCompiler:
                 results.append(f"# C import: {c_file}")
             results.append("")
 
+        # Emit C linker flags as metadata (will be used by native compiler)
+        if self.c_link_flags:
+            # Combine all flags into a single "# Link:" comment for the native compiler
+            link_line = ' '.join(self.c_link_flags)
+            results.append(f"# Link: {link_line}")
+            results.append("")
+
         # Emit raw bytecode blocks (these may define functions)
         for block in bytecode_blocks:
             bytecode_lines = block.get('bytecode', [])
@@ -1930,7 +2131,7 @@ class BytecodeCompiler:
 
         # Compile all functions (including imported ones)
         entry_point = None
-        
+
         # First compile imported functions
         for node in imported_functions:
             func_name = node.get('name', '')
@@ -1941,7 +2142,7 @@ class BytecodeCompiler:
             # Compile the function
             if bytecode := self.compile_function(node, inject_globals):
                 results.append(bytecode)
-        
+
         # Then compile functions from main AST
         for node in ast:
             if node.get('type') == 'function':

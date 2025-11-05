@@ -108,6 +108,7 @@ def main():
     skip_native = '--skip-native' in original_argv
 
     # Test content is read from stdin
+    print("Test content: ", end="")
     content = sys.stdin.read()
 
     # Parse test - collect expectation comment lines at the beginning
@@ -314,12 +315,17 @@ def main():
             # Build VM command with .so files
             vm_command = [vm_path, '--debug-info', bc_file] + c_import_so_files
 
+            # Set FR_TEST_MODE=1 for test error format
+            env = os.environ.copy()
+            env['FR_TEST_MODE'] = '1'
+
             result = subprocess.run(
                 vm_command,
                 input=debug_info,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                env=env
             )
 
             os.unlink(bc_file)
@@ -389,6 +395,24 @@ def main():
                 asm_file = f.name
                 f.write(assembly)
 
+            # Assemble to object file (like cli.py does)
+            obj_file = asm_file.replace('.s', '.o')
+            asm_result = subprocess.run(
+                ['as', asm_file, '-o', obj_file],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if asm_result.returncode != 0:
+                native_error = extract_error_message(asm_result.stderr)
+                native_output = None
+                # Clean up
+                os.remove(asm_file)
+                os.remove(runtime_file)
+                print(f"NATIVE_OUTPUT:{native_output}")
+                print(f"NATIVE_ERROR:{native_error}")
+                return 0  # Skip to next runtime
+
             # Find runtime library header (for compilation)
             from pathlib import Path
             runtime_h = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.h'
@@ -398,14 +422,20 @@ def main():
             with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
                 native_bin = f.name
 
+            # Use same compilation flags as cli.py to ensure ABI compatibility
+            # Using -O0 with selected optimizations because -O2+ breaks handwritten assembly
             compile_cmd = [
                 'gcc',
+                obj_file,
+                runtime_file,
                 f'-I{runtime_include_dir}',
-                '-Ofast',
+                '-O0', '-march=native', '-mtune=native',
+                '-finline-functions', '-funroll-loops',
+                '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
+                '-ffunction-sections', '-fdata-sections',
+                '-Wl,--gc-sections',
                 '-o',
                 native_bin,
-                asm_file,
-                runtime_file,
             ] + c_import_files + [  # Add C import files to the command
                 '-lm',
                 '-no-pie',
@@ -460,6 +490,7 @@ def main():
             # Clean up temporary files
             try:
                 os.unlink(asm_file)
+                os.unlink(obj_file)
                 os.unlink(runtime_file)
             except:
                 pass

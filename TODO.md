@@ -3,10 +3,10 @@
 
 ## Native
 
-- Runtime errors
-- Implement error handling
-- Python interop?
-- Bigint???
+- [x] Runtime errors
+- [x] Implement error handling
+- [ ] Python interop?
+- [ ] Bigint???
 
 ## C VM
 
