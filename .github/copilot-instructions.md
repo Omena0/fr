@@ -48,3 +48,4 @@ parse creates `out.bin`
 compile creates `out.bc`
 
 !! DO NOT COMMIT EVER !!
+(unless you're on a branch other than main)
