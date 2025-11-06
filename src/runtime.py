@@ -50,20 +50,20 @@ def format_runtime_exception(e: Exception) -> str:
     ctx = get_runtime_context()
     error_msg = str(e)
     char_pos = ctx['char']
-    
+
     # Get the source line if available
     source_line = ""
     if ctx['source'] and ctx['line'] > 0:
         lines = ctx['source'].split('\n')
         if 0 < ctx['line'] <= len(lines):
             source_line = lines[ctx['line'] - 1]
-    
+
     # Format location
     location = f"{ctx['file']}:{ctx['line']}:{char_pos}" if ctx['file'] else f"Line {ctx['line']}:{char_pos}"
-    
+
     # Check if this is a raise statement (has [Type] marker)
     is_raise = error_msg.startswith('[') and ']' in error_msg
-    
+
     # Build error message in same format as parse errors
     if source_line:
         if is_raise:
@@ -73,12 +73,11 @@ def format_runtime_exception(e: Exception) -> str:
             # For runtime errors: show caret and column number
             pointer = ' ' * char_pos + '^'
             formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
+    elif is_raise:
+        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {ctx['file']}:{ctx['line']}: {error_msg}"
     else:
-        if is_raise:
-            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {ctx['file']}:{ctx['line']}: {error_msg}"
-        else:
-            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
-    
+        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
+
     return formatted
 
 sys.setrecursionlimit(1000000000)
@@ -448,15 +447,10 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
             var_value = vars[value].get('value')
             # Return the actual value, even if it's None
             # Only return the variable name if the key doesn't exist
-            if 'value' in vars[value]:
-                return var_value
-            return value
+            return var_value if 'value' in vars[value] else value
         # At parse time, if variable not found, return the node unchanged
         # This prevents treating undefined variables as string literals
-        if not runtime:
-            return node
-        return value
-    
+        return value if runtime else node
     # Function call (from parse_expr - has 'func' key)
     # OR call from f-string expansion (has 'name' key)
     if 'func' in node or ('name' in node and 'type' in node and node['type'] == 'call'):
@@ -520,7 +514,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         else:
             # Check if node has 'name' key directly (from f-string expansion)
             func_id = node.get('name')
-            
+
         if isinstance(func_id, str):
             return run_func(func_id, new_args)
         raise RuntimeError(f"Invalid function call: {func}")
@@ -545,7 +539,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     if 'type' in node and node['type'] == 'set':
         # Convert to Python set, evaluating each element
         elements = node.get('value', [])
-        return set(eval_expr_node(elem) for elem in elements)
+        return {eval_expr_node(elem) for elem in elements}
 
     # Direct value
     if 'value' in node:
@@ -827,11 +821,11 @@ def _execute_node_field_assign(node: dict):
 def _execute_node_if(node: dict) -> Any:
     """Handle if/elif/else statement"""
     condition_result = eval_expr(node['condition'])
-    
+
     # Convert to boolean properly - handle None as False
     # but use Python truthiness for numbers/strings
     is_truthy = bool(condition_result) if condition_result is not None else False
-    
+
     if is_truthy:
         return run_scope(node['scope'])
 
@@ -844,9 +838,7 @@ def _execute_node_if(node: dict) -> Any:
                 return run_scope(elif_node['scope'])
 
     # Execute else if present
-    if node['else']:
-        return run_scope(node['else'])
-    return None
+    return run_scope(node['else']) if node['else'] else None
 
 def _execute_node_switch(node: dict) -> Any:
     """Handle switch statement"""
@@ -927,19 +919,15 @@ def _execute_node_assert(node: dict):
 def _execute_node_try(node: dict, level: int) -> Any:
     """Handle try-except statement"""
     try:
-        # Execute the try block
-        result = run_scope(node['try_scope'], level+1)
-        return result
+        return run_scope(node['try_scope'], level+1)
     except Exception as e:
         # Get the exception type name
         exc_name = type(e).__name__
         expected_exc = node['exc_type']
-        
+
         # Check if the exception type matches
         if exc_name == expected_exc:
-            # Execute the except block
-            result = run_scope(node['except_scope'], level+1)
-            return result
+            return run_scope(node['except_scope'], level+1)
         else:
             # Re-raise if it doesn't match
             raise

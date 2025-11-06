@@ -230,6 +230,9 @@ class BytecodeCompiler:
         if not type_str or type_str == 'none':
             return 'void'
 
+        if type_str in self.struct_defs:
+            return f'struct:{type_str}'  # Return struct name with prefix
+
         type_map = {
             'int': 'i64',
             'i64': 'i64',
@@ -245,10 +248,6 @@ class BytecodeCompiler:
             'any': 'i64',
         }
 
-        # Check if it's a struct type
-        if type_str in self.struct_defs:
-            return f'struct:{type_str}'  # Return struct name with prefix
-        
         return type_map.get(type_str, 'i64')  # Default to i64
 
     def normalize_type(self, type_str: str) -> str:
@@ -263,36 +262,31 @@ class BytecodeCompiler:
         """Determine what struct type an expression evaluates to, if any"""
         if expr is None or not isinstance(expr, dict):
             return ''
-        
+
         # If it's a variable, check its type
         if 'id' in expr:
             var_name = expr['id']
             var_type = self.var_types.get(var_name, '')
             # Check if this is a struct type
-            if var_type in self.struct_defs:
-                return var_type
-            return ''
-        
+            return var_type if var_type in self.struct_defs else ''
         # If it's a member access (nested struct field)
         if 'attr' in expr and 'value' in expr:
             field_name = expr['attr']
             # Get the type of the base expression
             base_type = self.get_expr_struct_type(expr['value'])
-            
+
             if base_type and base_type in self.struct_defs:
                 # Find the field in this struct
                 struct_def = self.struct_defs[base_type]
                 fields = struct_def.get('fields', [])
-                for i, field in enumerate(fields):
+                for field in fields:
                     if field.get('name') == field_name:
                         # Get the field's type
                         field_type = field.get('type', '')
                         # Check if this field type is a struct
-                        if field_type in self.struct_defs:
-                            return field_type
-                        return ''
+                        return field_type if field_type in self.struct_defs else ''
             return ''
-        
+
         return ''
 
     def compile_expr(self, expr: Any, expr_type: str = 'i64'):

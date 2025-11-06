@@ -14,7 +14,7 @@ sys.path.insert(0, str(src_dir))
 from binary import encode_binary, decode_binary
 from compiler import compile_ast_to_bytecode
 from parser import parse
-from runtime import run, format_runtime_exception
+from runtime import run, format_runtime_exception # type: ignore
 from debug_runtime import run_with_debug, init_debug_runtime
 
 def get_vm_path():
@@ -184,18 +184,18 @@ def run_cmd(cmd, args):
                 sys.exit(1)
             bytecode, line_map = compile_ast_to_bytecode(ast)
 
-        # ===== PHASE 4: Prepare bytecode file =====
-        c_link_flags = []
-        
         # Extract c_link flags from bytecode if present
         if bytecode:
+            # ===== PHASE 4: Prepare bytecode file =====
+            c_link_flags = []
+
             for line in bytecode.split('\n'):
                 if line.startswith('# c_link:'):
                     # Extract flag after "# c_link: "
                     flag = line[len('# c_link:'):].strip()
                     if flag and flag not in c_link_flags:
                         c_link_flags.append(flag)
-        
+
         if use_c_backend:
             # Need to write bytecode to file for C VM
             if temp_bc is None:
@@ -262,15 +262,13 @@ def run_cmd(cmd, args):
         if force_c_backend:
             # User explicitly requested compilation, show error and exit
             print(f"Error: {e}", file=sys.stderr)
-            if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
-                os.unlink(temp_bc)
-            sys.exit(1)
         else:
             # Try to fall back to Python runtime
             print(f"Warning: {e}", file=sys.stderr)
-            if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
-                os.unlink(temp_bc)
-            sys.exit(1)
+
+        if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
+            os.unlink(temp_bc)
+        sys.exit(1)
 
 def parse_cmd(args):
     """Parse source code to AST"""

@@ -1551,8 +1551,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
         }
 
         // No more handlers - will fall through to error printing
-        // Use display_message for cleaner output
-        message = display_message;
+        // Keep original message with [ExceptionType] for accurate error reporting
     }
 
     // No handler found or handler doesn't match - print error and exit

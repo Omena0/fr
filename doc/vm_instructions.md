@@ -30,6 +30,7 @@ This document describes all bytecode instructions supported by the fr VM.
 ## Constants
 
 ### CONST_I64
+
 Push a 64-bit integer constant onto the stack.
 
 **Syntax:** `CONST_I64 <value>`
@@ -37,6 +38,7 @@ Push a 64-bit integer constant onto the stack.
 **Stack:** `-> int64`
 
 ### CONST_F64
+
 Push a 64-bit float constant onto the stack.
 
 **Syntax:** `CONST_F64 <value>`
@@ -44,6 +46,7 @@ Push a 64-bit float constant onto the stack.
 **Stack:** `-> float64`
 
 ### CONST_STR
+
 Push a string constant onto the stack.
 
 **Syntax:** `CONST_STR <string>`
@@ -51,6 +54,7 @@ Push a string constant onto the stack.
 **Stack:** `-> string`
 
 ### CONST_BOOL
+
 Push a boolean constant onto the stack.
 
 **Syntax:** `CONST_BOOL <true|false>`
@@ -58,6 +62,7 @@ Push a boolean constant onto the stack.
 **Stack:** `-> bool`
 
 ### CONST_I64_MULTI
+
 Push multiple int64 constants onto the stack.
 
 **Syntax:** `CONST_I64_MULTI <count> <val1> <val2> ...`
@@ -65,6 +70,7 @@ Push multiple int64 constants onto the stack.
 **Stack:** `-> int64 int64 ...`
 
 ### CONST_F64_MULTI
+
 Push multiple float64 constants onto the stack.
 
 **Syntax:** `CONST_F64_MULTI <count> <val1> <val2> ...`
@@ -72,6 +78,7 @@ Push multiple float64 constants onto the stack.
 **Stack:** `-> float64 float64 ...`
 
 ### CONST_STR_MULTI
+
 Push multiple string constants onto the stack.
 
 **Syntax:** `CONST_STR_MULTI <count> <str1> <str2> ...`
@@ -79,6 +86,7 @@ Push multiple string constants onto the stack.
 **Stack:** `-> string string ...`
 
 ### CONST_BOOL_MULTI
+
 Push multiple boolean constants onto the stack.
 
 **Syntax:** `CONST_BOOL_MULTI <count> <val1> <val2> ...`
@@ -86,6 +94,7 @@ Push multiple boolean constants onto the stack.
 **Stack:** `-> bool bool ...`
 
 ### CONST_BYTES
+
 Push a bytes constant onto the stack.
 
 **Syntax:** `CONST_BYTES "data"`
@@ -99,6 +108,7 @@ Push a bytes constant onto the stack.
 ## Memory Operations
 
 ### LOAD
+
 Load a local variable onto the stack.
 
 **Syntax:** `LOAD <var_index>`
@@ -106,6 +116,7 @@ Load a local variable onto the stack.
 **Stack:** `-> value`
 
 ### STORE
+
 Pop a value from the stack and store it in a local variable.
 
 **Syntax:** `STORE <var_index>`
@@ -113,6 +124,7 @@ Pop a value from the stack and store it in a local variable.
 **Stack:** `value ->`
 
 ### LOAD_GLOBAL
+
 Load a global variable onto the stack.
 
 **Syntax:** `LOAD_GLOBAL <var_index>`
@@ -120,6 +132,7 @@ Load a global variable onto the stack.
 **Stack:** `-> value`
 
 ### STORE_GLOBAL
+
 Pop a value from the stack and store it in a global variable.
 
 **Syntax:** `STORE_GLOBAL <var_index>`
@@ -127,6 +140,7 @@ Pop a value from the stack and store it in a global variable.
 **Stack:** `value ->`
 
 ### STORE_CONST_I64
+
 Store integer constants directly to variable slots without using the stack.
 
 **Syntax:** `STORE_CONST_I64 <count> <slot1> <val1> <slot2> <val2> ...`
@@ -134,6 +148,7 @@ Store integer constants directly to variable slots without using the stack.
 **Stack:** `->`
 
 ### STORE_CONST_F64
+
 Store float constants directly to variable slots without using the stack.
 
 **Syntax:** `STORE_CONST_F64 <count> <slot1> <val1> <slot2> <val2> ...`
@@ -141,6 +156,7 @@ Store float constants directly to variable slots without using the stack.
 **Stack:** `->`
 
 ### STORE_CONST_BOOL
+
 Store boolean constants directly to variable slots without using the stack.
 
 **Syntax:** `STORE_CONST_BOOL <count> <slot1> <val1> <slot2> <val2> ...`
@@ -148,6 +164,7 @@ Store boolean constants directly to variable slots without using the stack.
 **Stack:** `->`
 
 ### STORE_CONST_STR
+
 Store string constants directly to variable slots without using the stack.
 
 **Syntax:** `STORE_CONST_STR <count> <slot1> <val1> <slot2> <val2> ...`
@@ -155,6 +172,7 @@ Store string constants directly to variable slots without using the stack.
 **Stack:** `->`
 
 ### STORE_REF
+
 Store a reference/pointer instead of copying the value (for aliasing).
 
 **Syntax:** `STORE_REF <var_index>`
@@ -162,6 +180,7 @@ Store a reference/pointer instead of copying the value (for aliasing).
 **Stack:** `value ->`
 
 ### COPY_LOCAL
+
 Copy one local variable to another without using the stack (deep copy).
 
 **Syntax:** `COPY_LOCAL <src> <dst>`
@@ -169,6 +188,7 @@ Copy one local variable to another without using the stack (deep copy).
 **Stack:** `->`
 
 ### COPY_LOCAL_REF
+
 Alias one local variable to another (pointer alias, not a copy).
 
 **Syntax:** `COPY_LOCAL_REF <src> <dst>`
@@ -176,6 +196,7 @@ Alias one local variable to another (pointer alias, not a copy).
 **Stack:** `->`
 
 ### LOAD_MULTI
+
 Load multiple variables onto the stack at once.
 
 **Syntax:** `LOAD_MULTI <count> <var1> <var2> ...`
@@ -183,6 +204,7 @@ Load multiple variables onto the stack at once.
 **Stack:** `-> value1 value2 ...`
 
 ### FUSED_LOAD_STORE
+
 Interleaved load/store operations.
 
 **Syntax:** `FUSED_LOAD_STORE <count> <src1> <dst1> <src2> <dst2> ...`
@@ -190,6 +212,7 @@ Interleaved load/store operations.
 **Stack:** `->`
 
 ### FUSED_STORE_LOAD
+
 Interleaved store/load operations.
 
 **Syntax:** `FUSED_STORE_LOAD <count> <dst1> <src1> <dst2> <src2> ...`
@@ -201,6 +224,7 @@ Interleaved store/load operations.
 ## Arithmetic Operations
 
 ### ADD_I64
+
 Add two 64-bit integers.
 
 **Syntax:** `ADD_I64`
@@ -208,6 +232,7 @@ Add two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### SUB_I64
+
 Subtract two 64-bit integers.
 
 **Syntax:** `SUB_I64`
@@ -215,6 +240,7 @@ Subtract two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### MUL_I64
+
 Multiply two 64-bit integers.
 
 **Syntax:** `MUL_I64`
@@ -222,6 +248,7 @@ Multiply two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### DIV_I64
+
 Divide two 64-bit integers.
 
 **Syntax:** `DIV_I64`
@@ -229,6 +256,7 @@ Divide two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### MOD_I64
+
 Compute modulo of two 64-bit integers.
 
 **Syntax:** `MOD_I64`
@@ -236,6 +264,7 @@ Compute modulo of two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### ADD_F64
+
 Add two 64-bit floats.
 
 **Syntax:** `ADD_F64`
@@ -243,6 +272,7 @@ Add two 64-bit floats.
 **Stack:** `float64 float64 -> float64`
 
 ### SUB_F64
+
 Subtract two 64-bit floats.
 
 **Syntax:** `SUB_F64`
@@ -250,6 +280,7 @@ Subtract two 64-bit floats.
 **Stack:** `float64 float64 -> float64`
 
 ### MUL_F64
+
 Multiply two 64-bit floats.
 
 **Syntax:** `MUL_F64`
@@ -257,6 +288,7 @@ Multiply two 64-bit floats.
 **Stack:** `float64 float64 -> float64`
 
 ### DIV_F64
+
 Divide two 64-bit floats.
 
 **Syntax:** `DIV_F64`
@@ -264,6 +296,7 @@ Divide two 64-bit floats.
 **Stack:** `float64 float64 -> float64`
 
 ### ADD_STR
+
 Concatenate two strings.
 
 **Syntax:** `ADD_STR`
@@ -271,6 +304,7 @@ Concatenate two strings.
 **Stack:** `string string -> string`
 
 ### NEG
+
 Negate the top of the stack (unary negation).
 
 **Syntax:** `NEG`
@@ -282,6 +316,7 @@ Negate the top of the stack (unary negation).
 ## Comparison Operations
 
 ### CMP_EQ
+
 Compare two values for equality.
 
 **Syntax:** `CMP_EQ`
@@ -289,6 +324,7 @@ Compare two values for equality.
 **Stack:** `value value -> bool`
 
 ### CMP_NE
+
 Compare two values for inequality.
 
 **Syntax:** `CMP_NE`
@@ -296,6 +332,7 @@ Compare two values for inequality.
 **Stack:** `value value -> bool`
 
 ### CMP_LT
+
 Compare if first value is less than second.
 
 **Syntax:** `CMP_LT`
@@ -303,6 +340,7 @@ Compare if first value is less than second.
 **Stack:** `value value -> bool`
 
 ### CMP_GT
+
 Compare if first value is greater than second.
 
 **Syntax:** `CMP_GT`
@@ -310,6 +348,7 @@ Compare if first value is greater than second.
 **Stack:** `value value -> bool`
 
 ### CMP_LE
+
 Compare if first value is less than or equal to second.
 
 **Syntax:** `CMP_LE`
@@ -317,6 +356,7 @@ Compare if first value is less than or equal to second.
 **Stack:** `value value -> bool`
 
 ### CMP_GE
+
 Compare if first value is greater than or equal to second.
 
 **Syntax:** `CMP_GE`
@@ -328,6 +368,7 @@ Compare if first value is greater than or equal to second.
 ## Logical Operations
 
 ### AND
+
 Logical AND of two boolean values.
 
 **Syntax:** `AND`
@@ -335,6 +376,7 @@ Logical AND of two boolean values.
 **Stack:** `bool bool -> bool`
 
 ### OR
+
 Logical OR of two boolean values.
 
 **Syntax:** `OR`
@@ -342,6 +384,7 @@ Logical OR of two boolean values.
 **Stack:** `bool bool -> bool`
 
 ### NOT
+
 Logical NOT of a boolean value.
 
 **Syntax:** `NOT`
@@ -349,6 +392,7 @@ Logical NOT of a boolean value.
 **Stack:** `bool -> bool`
 
 ### AND_I64
+
 Bitwise AND of two 64-bit integers.
 
 **Syntax:** `AND_I64`
@@ -356,6 +400,7 @@ Bitwise AND of two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### OR_I64
+
 Bitwise OR of two 64-bit integers.
 
 **Syntax:** `OR_I64`
@@ -363,6 +408,7 @@ Bitwise OR of two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### XOR_I64
+
 Bitwise XOR of two 64-bit integers.
 
 **Syntax:** `XOR_I64`
@@ -370,6 +416,7 @@ Bitwise XOR of two 64-bit integers.
 **Stack:** `int64 int64 -> int64`
 
 ### SHL_I64
+
 Shift left (multiply by power of 2).
 
 **Syntax:** `SHL_I64`
@@ -377,6 +424,7 @@ Shift left (multiply by power of 2).
 **Stack:** `int64 int64 -> int64`
 
 ### SHR_I64
+
 Shift right (divide by power of 2).
 
 **Syntax:** `SHR_I64`
@@ -388,6 +436,7 @@ Shift right (divide by power of 2).
 ## Control Flow
 
 ### JUMP
+
 Unconditional jump to a label.
 
 **Syntax:** `JUMP <label>`
@@ -395,6 +444,7 @@ Unconditional jump to a label.
 **Stack:** `->`
 
 ### JUMP_IF_FALSE
+
 Jump to a label if the top of stack is false.
 
 **Syntax:** `JUMP_IF_FALSE <label>`
@@ -402,6 +452,7 @@ Jump to a label if the top of stack is false.
 **Stack:** `bool ->`
 
 ### JUMP_IF_TRUE
+
 Jump to a label if the top of stack is true.
 
 **Syntax:** `JUMP_IF_TRUE <label>`
@@ -409,6 +460,7 @@ Jump to a label if the top of stack is true.
 **Stack:** `bool ->`
 
 ### LABEL
+
 Define a jump target label.
 
 **Syntax:** `LABEL <name>`
@@ -416,6 +468,7 @@ Define a jump target label.
 **Stack:** `->`
 
 ### BREAK
+
 Break from a loop with a specified level.
 
 **Syntax:** `BREAK <level>`
@@ -423,6 +476,7 @@ Break from a loop with a specified level.
 **Stack:** `->`
 
 ### CONTINUE
+
 Continue to the next iteration of a loop with a specified level.
 
 **Syntax:** `CONTINUE <level>`
@@ -430,6 +484,7 @@ Continue to the next iteration of a loop with a specified level.
 **Stack:** `->`
 
 ### HALT
+
 Stop execution of the VM.
 
 **Syntax:** `HALT`
@@ -437,19 +492,23 @@ Stop execution of the VM.
 **Stack:** `->`
 
 ### GOTO_CALL
+
 Jump to a label and save return address for returning with a value.
 
 **Syntax:** `GOTO_CALL <label>`
 
 **Stack:** `-> (saves return address on call stack)`
 
-**Description:** Similar to CALL but for goto statements with return values. Jumps to the specified label and saves the return address so that a RETURN instruction will return to this point with a value on the stack.
+**Description:** Similar to CALL but for goto statements with return values.
+Jumps to the specified label and saves the return address so that
+a RETURN instruction will return to this point with a value on the stack.
 
 ---
 
 ## Function Calls
 
 ### CALL
+
 Call a function.
 
 **Syntax:** `CALL <function_name>`
@@ -457,6 +516,7 @@ Call a function.
 **Stack:** `arg1 arg2 ... -> return_value`
 
 ### RETURN
+
 Return from a function with a value.
 
 **Syntax:** `RETURN`
@@ -464,6 +524,7 @@ Return from a function with a value.
 **Stack:** `value ->`
 
 ### RETURN_VOID
+
 Return from a function without a value.
 
 **Syntax:** `RETURN_VOID`
@@ -475,6 +536,7 @@ Return from a function without a value.
 ## Stack Operations
 
 ### POP
+
 Remove the top value from the stack.
 
 **Syntax:** `POP`
@@ -482,6 +544,7 @@ Remove the top value from the stack.
 **Stack:** `value ->`
 
 ### DUP
+
 Duplicate the top value on the stack.
 
 **Syntax:** `DUP`
@@ -489,6 +552,7 @@ Duplicate the top value on the stack.
 **Stack:** `value -> value value`
 
 ### DUP2
+
 Duplicate the top two values on the stack.
 
 **Syntax:** `DUP2`
@@ -496,6 +560,7 @@ Duplicate the top two values on the stack.
 **Stack:** `a b -> a b a b`
 
 ### SWAP
+
 Swap the top two values on the stack.
 
 **Syntax:** `SWAP`
@@ -503,6 +568,7 @@ Swap the top two values on the stack.
 **Stack:** `a b -> b a`
 
 ### ROT
+
 Rotate the top three stack values.
 
 **Syntax:** `ROT`
@@ -510,6 +576,7 @@ Rotate the top three stack values.
 **Stack:** `a b c -> b c a`
 
 ### OVER
+
 Copy the second item to the top.
 
 **Syntax:** `OVER`
@@ -517,6 +584,7 @@ Copy the second item to the top.
 **Stack:** `a b -> a b a`
 
 ### SELECT
+
 Select between two values based on a condition.
 
 **Syntax:** `SELECT`
@@ -528,6 +596,7 @@ Select between two values based on a condition.
 ## List Operations
 
 ### LIST_NEW
+
 Create a new empty list.
 
 **Syntax:** `LIST_NEW`
@@ -535,6 +604,7 @@ Create a new empty list.
 **Stack:** `-> list`
 
 ### LIST_APPEND
+
 Append a value to a list.
 
 **Syntax:** `LIST_APPEND`
@@ -542,6 +612,7 @@ Append a value to a list.
 **Stack:** `list value -> list`
 
 ### LIST_GET
+
 Get an element from a list at a specified index.
 
 **Syntax:** `LIST_GET`
@@ -549,6 +620,7 @@ Get an element from a list at a specified index.
 **Stack:** `list index -> value`
 
 ### LIST_SET
+
 Set an element in a list at a specified index.
 
 **Syntax:** `LIST_SET`
@@ -556,6 +628,7 @@ Set an element in a list at a specified index.
 **Stack:** `list index value -> list`
 
 ### LIST_LEN
+
 Get the length of a list.
 
 **Syntax:** `LIST_LEN`
@@ -563,6 +636,7 @@ Get the length of a list.
 **Stack:** `list -> int64`
 
 ### LIST_POP
+
 Pop the last element from a list.
 
 **Syntax:** `LIST_POP`
@@ -574,6 +648,7 @@ Pop the last element from a list.
 ## Set Operations
 
 ### SET_NEW
+
 Create a new empty set.
 
 **Syntax:** `SET_NEW`
@@ -583,6 +658,7 @@ Create a new empty set.
 **Description:** Creates a new empty set. Sets are unordered collections of unique elements.
 
 ### SET_ADD
+
 Add a value to a set.
 
 **Syntax:** `SET_ADD`
@@ -592,6 +668,7 @@ Add a value to a set.
 **Description:** Adds a value to the set if it doesn't already exist. If the value already exists, the set is unchanged.
 
 ### SET_REMOVE
+
 Remove a value from a set.
 
 **Syntax:** `SET_REMOVE`
@@ -601,6 +678,7 @@ Remove a value from a set.
 **Description:** Removes a value from the set if it exists. If the value doesn't exist, the set is unchanged.
 
 ### SET_CONTAINS
+
 Check if a set contains a value.
 
 **Syntax:** `SET_CONTAINS`
@@ -610,6 +688,7 @@ Check if a set contains a value.
 **Description:** Returns `true` if the value exists in the set, `false` otherwise.
 
 ### SET_LEN
+
 Get the number of elements in a set.
 
 **Syntax:** `SET_LEN`
@@ -619,6 +698,7 @@ Get the number of elements in a set.
 **Description:** Returns the number of unique elements in the set.
 
 ### CONTAINS
+
 Generic membership check for containers.
 
 **Syntax:** `CONTAINS`
@@ -626,6 +706,7 @@ Generic membership check for containers.
 **Stack:** `container value -> bool`
 
 **Description:** Checks if a value exists in a container. Supports:
+
 - **Sets**: Returns `true` if the value exists in the set
 - **Dicts (Structs)**: Returns `true` if the string key exists as a field name
 - **Lists**: Returns `true` if the value exists in the list (uses value equality)
@@ -638,6 +719,7 @@ This instruction is used by the `in` and `not in` operators. For `not in`, the r
 ## Struct Operations
 
 ### STRUCT_NEW
+
 Create a new struct instance.
 
 **Syntax:** `STRUCT_NEW <struct_id>`
@@ -645,6 +727,7 @@ Create a new struct instance.
 **Stack:** `-> struct`
 
 ### STRUCT_GET
+
 Get a field value from a struct.
 
 **Syntax:** `STRUCT_GET <field_index>`
@@ -652,6 +735,7 @@ Get a field value from a struct.
 **Stack:** `struct -> value`
 
 ### STRUCT_SET
+
 Set a field value in a struct.
 
 **Syntax:** `STRUCT_SET <field_index>`
@@ -663,6 +747,7 @@ Set a field value in a struct.
 ## Type Conversions
 
 ### TO_INT
+
 Convert the top of stack to an integer.
 
 **Syntax:** `TO_INT`
@@ -670,6 +755,7 @@ Convert the top of stack to an integer.
 **Stack:** `value -> int64`
 
 ### TO_FLOAT
+
 Convert the top of stack to a float.
 
 **Syntax:** `TO_FLOAT`
@@ -677,6 +763,7 @@ Convert the top of stack to a float.
 **Stack:** `value -> float64`
 
 ### TO_BOOL
+
 Convert the top of stack to a boolean.
 
 **Syntax:** `TO_BOOL`
@@ -684,6 +771,7 @@ Convert the top of stack to a boolean.
 **Stack:** `value -> bool`
 
 ### TO_STR
+
 Convert the top of stack to a string (alias for BUILTIN_STR).
 
 **Syntax:** `TO_STR`
@@ -691,6 +779,7 @@ Convert the top of stack to a string (alias for BUILTIN_STR).
 **Stack:** `value -> string`
 
 ### ENCODE
+
 Encode a string to bytes using the specified encoding.
 
 **Syntax:** `ENCODE`
@@ -700,6 +789,7 @@ Encode a string to bytes using the specified encoding.
 **Description:** Converts a string to bytes. Currently only UTF-8 encoding is supported (the encoding parameter is accepted but ignored).
 
 ### DECODE
+
 Decode bytes to a string using the specified encoding.
 
 **Syntax:** `DECODE`
@@ -713,6 +803,7 @@ Decode bytes to a string using the specified encoding.
 ## String Operations
 
 ### STR_UPPER
+
 Convert a string to uppercase.
 
 **Syntax:** `STR_UPPER`
@@ -720,6 +811,7 @@ Convert a string to uppercase.
 **Stack:** `string -> string`
 
 ### STR_LOWER
+
 Convert a string to lowercase.
 
 **Syntax:** `STR_LOWER`
@@ -727,6 +819,7 @@ Convert a string to lowercase.
 **Stack:** `string -> string`
 
 ### STR_STRIP
+
 Strip whitespace from both ends of a string.
 
 **Syntax:** `STR_STRIP`
@@ -734,6 +827,7 @@ Strip whitespace from both ends of a string.
 **Stack:** `string -> string`
 
 ### STR_SPLIT
+
 Split a string by a separator.
 
 **Syntax:** `STR_SPLIT`
@@ -741,6 +835,7 @@ Split a string by a separator.
 **Stack:** `string separator -> list`
 
 ### STR_JOIN
+
 Join a list of strings with a separator.
 
 **Syntax:** `STR_JOIN`
@@ -748,6 +843,7 @@ Join a list of strings with a separator.
 **Stack:** `separator list -> string`
 
 ### STR_REPLACE
+
 Replace a substring with another string.
 
 **Syntax:** `STR_REPLACE`
@@ -759,6 +855,7 @@ Replace a substring with another string.
 ## Math Functions
 
 ### ABS
+
 Compute the absolute value.
 
 **Syntax:** `ABS`
@@ -766,6 +863,7 @@ Compute the absolute value.
 **Stack:** `number -> number`
 
 ### POW
+
 Raise a number to a power.
 
 **Syntax:** `POW`
@@ -773,6 +871,7 @@ Raise a number to a power.
 **Stack:** `base exponent -> result`
 
 ### MIN
+
 Get the minimum of two values.
 
 **Syntax:** `MIN`
@@ -780,6 +879,7 @@ Get the minimum of two values.
 **Stack:** `value value -> value`
 
 ### MAX
+
 Get the maximum of two values.
 
 **Syntax:** `MAX`
@@ -787,6 +887,7 @@ Get the maximum of two values.
 **Stack:** `value value -> value`
 
 ### FLOOR
+
 Compute the floor of a number.
 
 **Syntax:** `FLOOR`
@@ -794,6 +895,7 @@ Compute the floor of a number.
 **Stack:** `number -> number`
 
 ### CEIL
+
 Compute the ceiling of a number.
 
 **Syntax:** `CEIL`
@@ -801,6 +903,7 @@ Compute the ceiling of a number.
 **Stack:** `number -> number`
 
 ### SIN
+
 Compute the sine of a number.
 
 **Syntax:** `SIN`
@@ -808,6 +911,7 @@ Compute the sine of a number.
 **Stack:** `float64 -> float64`
 
 ### COS
+
 Compute the cosine of a number.
 
 **Syntax:** `COS`
@@ -815,6 +919,7 @@ Compute the cosine of a number.
 **Stack:** `float64 -> float64`
 
 ### TAN
+
 Compute the tangent of a number.
 
 **Syntax:** `TAN`
@@ -826,6 +931,7 @@ Compute the tangent of a number.
 ## File I/O Operations
 
 ### FILE_OPEN
+
 Open a file.
 
 **Syntax:** `FILE_OPEN`
@@ -833,6 +939,7 @@ Open a file.
 **Stack:** `path mode -> fd`
 
 ### FILE_READ
+
 Read from a file.
 
 **Syntax:** `FILE_READ`
@@ -840,6 +947,7 @@ Read from a file.
 **Stack:** `fd size -> string`
 
 ### FILE_WRITE
+
 Write to a file.
 
 **Syntax:** `FILE_WRITE`
@@ -847,6 +955,7 @@ Write to a file.
 **Stack:** `fd data -> bytes_written`
 
 ### FILE_CLOSE
+
 Close a file.
 
 **Syntax:** `FILE_CLOSE`
@@ -854,6 +963,7 @@ Close a file.
 **Stack:** `fd ->`
 
 ### FILE_EXISTS
+
 Check if a file or directory exists.
 
 **Syntax:** `FILE_EXISTS`
@@ -861,6 +971,7 @@ Check if a file or directory exists.
 **Stack:** `path -> bool`
 
 ### FILE_ISFILE
+
 Check if a path is a file.
 
 **Syntax:** `FILE_ISFILE`
@@ -868,6 +979,7 @@ Check if a path is a file.
 **Stack:** `path -> bool`
 
 ### FILE_ISDIR
+
 Check if a path is a directory.
 
 **Syntax:** `FILE_ISDIR`
@@ -875,6 +987,7 @@ Check if a path is a directory.
 **Stack:** `path -> bool`
 
 ### FILE_LISTDIR
+
 List the contents of a directory.
 
 **Syntax:** `FILE_LISTDIR`
@@ -882,6 +995,7 @@ List the contents of a directory.
 **Stack:** `path -> list`
 
 ### FILE_MKDIR
+
 Create a directory.
 
 **Syntax:** `FILE_MKDIR`
@@ -889,6 +1003,7 @@ Create a directory.
 **Stack:** `path ->`
 
 ### FILE_MAKEDIRS
+
 Create a directory and all parent directories.
 
 **Syntax:** `FILE_MAKEDIRS`
@@ -896,6 +1011,7 @@ Create a directory and all parent directories.
 **Stack:** `path ->`
 
 ### FILE_REMOVE
+
 Remove a file.
 
 **Syntax:** `FILE_REMOVE`
@@ -903,6 +1019,7 @@ Remove a file.
 **Stack:** `path ->`
 
 ### FILE_RMDIR
+
 Remove a directory.
 
 **Syntax:** `FILE_RMDIR`
@@ -910,6 +1027,7 @@ Remove a directory.
 **Stack:** `path ->`
 
 ### FILE_RENAME
+
 Rename or move a file.
 
 **Syntax:** `FILE_RENAME`
@@ -917,6 +1035,7 @@ Rename or move a file.
 **Stack:** `old_path new_path ->`
 
 ### FILE_GETSIZE
+
 Get the size of a file.
 
 **Syntax:** `FILE_GETSIZE`
@@ -924,6 +1043,7 @@ Get the size of a file.
 **Stack:** `path -> int64`
 
 ### FILE_GETCWD
+
 Get the current working directory.
 
 **Syntax:** `FILE_GETCWD`
@@ -931,6 +1051,7 @@ Get the current working directory.
 **Stack:** `-> string`
 
 ### FILE_CHDIR
+
 Change the current working directory.
 
 **Syntax:** `FILE_CHDIR`
@@ -938,6 +1059,7 @@ Change the current working directory.
 **Stack:** `path ->`
 
 ### FILE_ABSPATH
+
 Get the absolute path of a file.
 
 **Syntax:** `FILE_ABSPATH`
@@ -945,6 +1067,7 @@ Get the absolute path of a file.
 **Stack:** `path -> string`
 
 ### FILE_BASENAME
+
 Get the basename of a path.
 
 **Syntax:** `FILE_BASENAME`
@@ -952,6 +1075,7 @@ Get the basename of a path.
 **Stack:** `path -> string`
 
 ### FILE_DIRNAME
+
 Get the directory name of a path.
 
 **Syntax:** `FILE_DIRNAME`
@@ -959,6 +1083,7 @@ Get the directory name of a path.
 **Stack:** `path -> string`
 
 ### FILE_JOIN
+
 Join multiple path components.
 
 **Syntax:** `FILE_JOIN`
@@ -970,29 +1095,34 @@ Join multiple path components.
 ## Process Management
 
 ### FORK
+
 Fork the current process, creating a child process.
 
 **Syntax:** `FORK`
 
 **Stack:** `-> pid`
 
-**Returns:** 
+**Returns:**
+
 - `0` in the child process
 - Child's process ID in the parent process
 - `-1` on error
 
 ### JOIN
+
 Wait for a child process to finish and get its exit status.
 
 **Syntax:** `JOIN`
 
 **Stack:** `pid -> exit_status`
 
-**Returns:** 
+**Returns:**
+
 - Exit status (0-255) if child exited normally
 - `-1` on error or abnormal termination
 
 ### SLEEP
+
 Sleep for a specified number of seconds.
 
 **Syntax:** `SLEEP`
@@ -1000,9 +1130,11 @@ Sleep for a specified number of seconds.
 **Stack:** `seconds -> void`
 
 **Parameters:**
+
 - `seconds`: Number of seconds to sleep (int or float, supports sub-second precision)
 
 ### EXIT
+
 Exit the program with a specific exit code.
 
 **Syntax:** `EXIT`
@@ -1010,6 +1142,7 @@ Exit the program with a specific exit code.
 **Stack:** `code -> void` (never returns)
 
 **Parameters:**
+
 - `code`: Exit code (int, 0 means success, non-zero indicates error)
 
 **Note:** This terminates the program immediately.
@@ -1019,6 +1152,7 @@ Exit the program with a specific exit code.
 ## Socket Operations
 
 ### SOCKET_CREATE
+
 Create a new socket.
 
 **Syntax:** `SOCKET_CREATE`
@@ -1026,6 +1160,7 @@ Create a new socket.
 **Stack:** `family type -> sock_id`
 
 ### SOCKET_CONNECT
+
 Connect a socket to a remote address.
 
 **Syntax:** `SOCKET_CONNECT`
@@ -1033,6 +1168,7 @@ Connect a socket to a remote address.
 **Stack:** `sock_id host port ->`
 
 ### SOCKET_BIND
+
 Bind a socket to a local address.
 
 **Syntax:** `SOCKET_BIND`
@@ -1040,6 +1176,7 @@ Bind a socket to a local address.
 **Stack:** `sock_id host port ->`
 
 ### SOCKET_LISTEN
+
 Listen for connections on a socket.
 
 **Syntax:** `SOCKET_LISTEN`
@@ -1047,6 +1184,7 @@ Listen for connections on a socket.
 **Stack:** `sock_id backlog ->`
 
 ### SOCKET_ACCEPT
+
 Accept a connection on a listening socket.
 
 **Syntax:** `SOCKET_ACCEPT`
@@ -1054,6 +1192,7 @@ Accept a connection on a listening socket.
 **Stack:** `sock_id -> client_sock_id`
 
 ### SOCKET_SEND
+
 Send data on a socket.
 
 **Syntax:** `SOCKET_SEND`
@@ -1061,6 +1200,7 @@ Send data on a socket.
 **Stack:** `sock_id data -> bytes_sent`
 
 ### SOCKET_RECV
+
 Receive data from a socket.
 
 **Syntax:** `SOCKET_RECV`
@@ -1068,6 +1208,7 @@ Receive data from a socket.
 **Stack:** `sock_id size -> string`
 
 ### SOCKET_CLOSE
+
 Close a socket.
 
 **Syntax:** `SOCKET_CLOSE`
@@ -1075,6 +1216,7 @@ Close a socket.
 **Stack:** `sock_id ->`
 
 ### SOCKET_SETSOCKOPT
+
 Set a socket option.
 
 **Syntax:** `SOCKET_SETSOCKOPT`
@@ -1086,6 +1228,7 @@ Set a socket option.
 ## Python Interop
 
 ### PY_IMPORT
+
 Import a Python module.
 
 **Syntax:** `PY_IMPORT`
@@ -1093,6 +1236,7 @@ Import a Python module.
 **Stack:** `module_name -> module_object`
 
 ### PY_CALL
+
 Call a Python function.
 
 **Syntax:** `PY_CALL`
@@ -1100,6 +1244,7 @@ Call a Python function.
 **Stack:** `module_name func_name arg1 ... argN num_args -> result`
 
 ### PY_GETATTR
+
 Get an attribute from a Python object.
 
 **Syntax:** `PY_GETATTR`
@@ -1107,6 +1252,7 @@ Get an attribute from a Python object.
 **Stack:** `obj attr_name -> value`
 
 ### PY_SETATTR
+
 Set an attribute on a Python object.
 
 **Syntax:** `PY_SETATTR`
@@ -1114,6 +1260,7 @@ Set an attribute on a Python object.
 **Stack:** `obj attr_name value ->`
 
 ### PY_CALL_METHOD
+
 Call a method on a Python object.
 
 **Syntax:** `PY_CALL_METHOD`
@@ -1125,6 +1272,7 @@ Call a method on a Python object.
 ## Exception Handling
 
 ### TRY_BEGIN
+
 Begin an exception handler block.
 
 **Syntax:** `TRY_BEGIN <exception_type> <handler_label>`
@@ -1132,6 +1280,7 @@ Begin an exception handler block.
 **Stack:** `->`
 
 ### TRY_END
+
 End an exception handler block.
 
 **Syntax:** `TRY_END`
@@ -1139,6 +1288,7 @@ End an exception handler block.
 **Stack:** `->`
 
 ### RAISE
+
 Raise an exception.
 
 **Syntax:** `RAISE`
@@ -1150,6 +1300,7 @@ Raise an exception.
 ## Built-in Functions
 
 ### BUILTIN_PRINT
+
 Print a value without a newline.
 
 **Syntax:** `BUILTIN_PRINT`
@@ -1157,6 +1308,7 @@ Print a value without a newline.
 **Stack:** `value ->`
 
 ### BUILTIN_PRINTLN
+
 Print a value with a newline.
 
 **Syntax:** `BUILTIN_PRINTLN`
@@ -1164,6 +1316,7 @@ Print a value with a newline.
 **Stack:** `value ->`
 
 ### BUILTIN_STR
+
 Convert a value to a string.
 
 **Syntax:** `BUILTIN_STR`
@@ -1171,6 +1324,7 @@ Convert a value to a string.
 **Stack:** `value -> string`
 
 ### BUILTIN_LEN
+
 Get the length of a string or list.
 
 **Syntax:** `BUILTIN_LEN`
@@ -1178,6 +1332,7 @@ Get the length of a string or list.
 **Stack:** `value -> int64`
 
 ### BUILTIN_SQRT
+
 Compute the square root.
 
 **Syntax:** `BUILTIN_SQRT`
@@ -1185,6 +1340,7 @@ Compute the square root.
 **Stack:** `float64 -> float64`
 
 ### BUILTIN_ROUND
+
 Round a number to the nearest integer.
 
 **Syntax:** `BUILTIN_ROUND`
@@ -1192,6 +1348,7 @@ Round a number to the nearest integer.
 **Stack:** `float64 -> int64`
 
 ### BUILTIN_FLOOR
+
 Compute the floor of a number (alias for FLOOR).
 
 **Syntax:** `BUILTIN_FLOOR`
@@ -1199,6 +1356,7 @@ Compute the floor of a number (alias for FLOOR).
 **Stack:** `float64 -> int64`
 
 ### BUILTIN_CEIL
+
 Compute the ceiling of a number (alias for CEIL).
 
 **Syntax:** `BUILTIN_CEIL`
@@ -1206,6 +1364,7 @@ Compute the ceiling of a number (alias for CEIL).
 **Stack:** `float64 -> int64`
 
 ### BUILTIN_PI
+
 Push the value of π onto the stack.
 
 **Syntax:** `BUILTIN_PI`
@@ -1213,6 +1372,7 @@ Push the value of π onto the stack.
 **Stack:** `-> float64`
 
 ### ASSERT
+
 Assert that a condition is true.
 
 **Syntax:** `ASSERT`
@@ -1226,6 +1386,7 @@ Assert that a condition is true.
 These instructions are optimized versions that combine multiple operations for better performance.
 
 ### INC_LOCAL
+
 Increment a local variable in-place.
 
 **Syntax:** `INC_LOCAL <var_index>`
@@ -1233,6 +1394,7 @@ Increment a local variable in-place.
 **Stack:** `->`
 
 ### DEC_LOCAL
+
 Decrement a local variable in-place.
 
 **Syntax:** `DEC_LOCAL <var_index>`
@@ -1240,6 +1402,7 @@ Decrement a local variable in-place.
 **Stack:** `->`
 
 ### ADD_CONST_I64
+
 Add a constant to the top of the stack.
 
 **Syntax:** `ADD_CONST_I64 <constant>`
@@ -1247,6 +1410,7 @@ Add a constant to the top of the stack.
 **Stack:** `int64 -> int64`
 
 ### SUB_CONST_I64
+
 Subtract a constant from the top of the stack.
 
 **Syntax:** `SUB_CONST_I64 <constant>`
@@ -1254,6 +1418,7 @@ Subtract a constant from the top of the stack.
 **Stack:** `int64 -> int64`
 
 ### MUL_CONST_I64
+
 Multiply the top of the stack by a constant.
 
 **Syntax:** `MUL_CONST_I64 <constant>`
@@ -1261,6 +1426,7 @@ Multiply the top of the stack by a constant.
 **Stack:** `int64 -> int64`
 
 ### DIV_CONST_I64
+
 Divide the top of the stack by a constant.
 
 **Syntax:** `DIV_CONST_I64 <constant>`
@@ -1268,6 +1434,7 @@ Divide the top of the stack by a constant.
 **Stack:** `int64 -> int64`
 
 ### MOD_CONST_I64
+
 Compute modulo of the top of the stack by a constant.
 
 **Syntax:** `MOD_CONST_I64 <constant>`
@@ -1275,6 +1442,7 @@ Compute modulo of the top of the stack by a constant.
 **Stack:** `int64 -> int64`
 
 ### AND_CONST
+
 Logical AND with a constant boolean.
 
 **Syntax:** `AND_CONST <constant>`
@@ -1282,6 +1450,7 @@ Logical AND with a constant boolean.
 **Stack:** `bool -> bool`
 
 ### OR_CONST
+
 Logical OR with a constant boolean.
 
 **Syntax:** `OR_CONST <constant>`
@@ -1289,6 +1458,7 @@ Logical OR with a constant boolean.
 **Stack:** `bool -> bool`
 
 ### AND_CONST_I64
+
 Bitwise AND with a constant.
 
 **Syntax:** `AND_CONST_I64 <constant>`
@@ -1296,6 +1466,7 @@ Bitwise AND with a constant.
 **Stack:** `int64 -> int64`
 
 ### OR_CONST_I64
+
 Bitwise OR with a constant.
 
 **Syntax:** `OR_CONST_I64 <constant>`
@@ -1303,6 +1474,7 @@ Bitwise OR with a constant.
 **Stack:** `int64 -> int64`
 
 ### XOR_CONST_I64
+
 Bitwise XOR with a constant.
 
 **Syntax:** `XOR_CONST_I64 <constant>`
@@ -1310,6 +1482,7 @@ Bitwise XOR with a constant.
 **Stack:** `int64 -> int64`
 
 ### LOAD2_ADD_I64
+
 Fused load two variables and add them (combines LOAD, LOAD, ADD_I64).
 
 **Syntax:** `LOAD2_ADD_I64 <var1> <var2>`
@@ -1317,6 +1490,7 @@ Fused load two variables and add them (combines LOAD, LOAD, ADD_I64).
 **Stack:** `-> int64`
 
 ### LOAD2_SUB_I64
+
 Fused load two variables and subtract them (combines LOAD, LOAD, SUB_I64).
 
 **Syntax:** `LOAD2_SUB_I64 <var1> <var2>`
@@ -1324,6 +1498,7 @@ Fused load two variables and subtract them (combines LOAD, LOAD, SUB_I64).
 **Stack:** `-> int64`
 
 ### LOAD2_MUL_I64
+
 Fused load two variables and multiply them (combines LOAD, LOAD, MUL_I64).
 
 **Syntax:** `LOAD2_MUL_I64 <var1> <var2>`
@@ -1331,6 +1506,7 @@ Fused load two variables and multiply them (combines LOAD, LOAD, MUL_I64).
 **Stack:** `-> int64`
 
 ### LOAD2_MOD_I64
+
 Fused load two variables and compute modulo (combines LOAD, LOAD, MOD_I64).
 
 **Syntax:** `LOAD2_MOD_I64 <var1> <var2>`
@@ -1338,6 +1514,7 @@ Fused load two variables and compute modulo (combines LOAD, LOAD, MOD_I64).
 **Stack:** `-> int64`
 
 ### LOAD2_MUL_F64
+
 Fused load two variables and multiply them as floats (combines LOAD, LOAD, MUL_F64).
 
 **Syntax:** `LOAD2_MUL_F64 <var1> <var2>`
@@ -1345,6 +1522,7 @@ Fused load two variables and multiply them as floats (combines LOAD, LOAD, MUL_F
 **Stack:** `-> float64`
 
 ### LOAD2_CMP_LT
+
 Fused load two variables and compare less than (combines LOAD, LOAD, CMP_LT).
 
 **Syntax:** `LOAD2_CMP_LT <var1> <var2>`
@@ -1352,6 +1530,7 @@ Fused load two variables and compare less than (combines LOAD, LOAD, CMP_LT).
 **Stack:** `-> bool`
 
 ### LOAD2_CMP_GT
+
 Fused load two variables and compare greater than (combines LOAD, LOAD, CMP_GT).
 
 **Syntax:** `LOAD2_CMP_GT <var1> <var2>`
@@ -1359,6 +1538,7 @@ Fused load two variables and compare greater than (combines LOAD, LOAD, CMP_GT).
 **Stack:** `-> bool`
 
 ### LOAD2_CMP_LE
+
 Fused load two variables and compare less than or equal (combines LOAD, LOAD, CMP_LE).
 
 **Syntax:** `LOAD2_CMP_LE <var1> <var2>`
@@ -1366,6 +1546,7 @@ Fused load two variables and compare less than or equal (combines LOAD, LOAD, CM
 **Stack:** `-> bool`
 
 ### LOAD2_CMP_GE
+
 Fused load two variables and compare greater than or equal (combines LOAD, LOAD, CMP_GE).
 
 **Syntax:** `LOAD2_CMP_GE <var1> <var2>`
@@ -1373,6 +1554,7 @@ Fused load two variables and compare greater than or equal (combines LOAD, LOAD,
 **Stack:** `-> bool`
 
 ### LOAD2_CMP_EQ
+
 Fused load two variables and compare equality (combines LOAD, LOAD, CMP_EQ).
 
 **Syntax:** `LOAD2_CMP_EQ <var1> <var2>`
@@ -1380,6 +1562,7 @@ Fused load two variables and compare equality (combines LOAD, LOAD, CMP_EQ).
 **Stack:** `-> bool`
 
 ### LOAD2_CMP_NE
+
 Fused load two variables and compare inequality (combines LOAD, LOAD, CMP_NE).
 
 **Syntax:** `LOAD2_CMP_NE <var1> <var2>`
@@ -1393,36 +1576,43 @@ Fused load two variables and compare inequality (combines LOAD, LOAD, CMP_NE).
 These are not executable instructions but are used during bytecode parsing to define program structure.
 
 ### .version
+
 Specify the bytecode version.
 
 **Syntax:** `.version <version_number>`
 
 ### .struct
+
 Define a struct type.
 
 **Syntax:** `.struct <name> <field1> <field2> ...`
 
 ### .func
+
 Begin a function definition.
 
 **Syntax:** `.func <name>`
 
 ### .arg
+
 Declare a function argument.
 
 **Syntax:** `.arg <name>`
 
 ### .local
+
 Declare a local variable.
 
 **Syntax:** `.local <name>`
 
 ### .end
+
 End a function definition.
 
 **Syntax:** `.end`
 
 ### .entry
+
 Specify the entry point function.
 
 **Syntax:** `.entry <function_name>`
