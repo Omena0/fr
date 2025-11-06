@@ -192,8 +192,10 @@ class X86Compiler:
             elif opcode == 'LABEL':
                 label = args[0].rstrip(':')
                 # Pre-register the label with function scoping
+                # Use function-scoped key to avoid collisions between functions
+                key = f"{current_func}:{label}" if current_func else label
                 asm_label = f".L{current_func}_{label}" if current_func else f".L{label}"
-                self.label_map[label] = asm_label
+                self.label_map[key] = asm_label
 
         self.emit("", 0)
 
@@ -214,71 +216,83 @@ class X86Compiler:
             filename_label = self.get_string_label(self.source_file)
             source_label = self.get_string_label(source_content)
 
-            # Find main: in output and inject after "sub rsp, 256"
+            # Find main: in output and inject after "sub rsp, <size>"
             main_found = False
             for idx, line in enumerate(self.output):
                 if line.strip() == "main:":
                     main_found = True
-                elif main_found and "sub rsp, 256" in line:
+                elif main_found and "sub rsp," in line:
+                    # Extract the stack frame size from the line
+                    import re
+                    if stack_size_match := re.search(r'sub rsp, (\d+)', line):
+                        stack_size = int(stack_size_match.group(1))
+                        qword_count = stack_size // 8  # Number of qwords to zero
 
-                    # Generate label
-                    label_num = self.label_counter
-                    self.label_counter += 1
+                        # Generate label
+                        label_num = self.label_counter
+                        self.label_counter += 1
 
-                    # Insert runtime init and source info setup after this line
-                    init_code = [
-                        "    # Zero out stack frame",
-                        "    push rdi",
-                        "    push rcx",
-                        "    push rax",
-                        "    lea rdi, [rsp + 24]  # point to start of our stack frame",
-                        "    mov rcx, 32  # 256 bytes / 8 = 32 qwords",
-                        "    xor rax, rax",
-                        "    rep stosq  # zero out [rdi] for rcx qwords",
-                        "    pop rax",
-                        "    pop rcx",
-                        "    pop rdi",
-                        "    # Initialize runtime and source info"
-                        "    push rax  # Save rax and check alignment",
-                        "    mov rax, rsp",
-                        "    add rax, 8  # Account for the push",
-                        "    test rax, 0xF",
-                        "    pop rax",
-                        # Generate runtime_init call
-                        f"    jz .Lruntime_init_aligned_{label_num}",
-                        "    sub rsp, 8",
-                        "    call runtime_init",
-                        "    add rsp, 8",
-                        f"    jmp .Lruntime_init_done_{label_num}",
-                        f".Lruntime_init_aligned_{label_num}: ",
-                        "    call runtime_init",
-                        f".Lruntime_init_done_{label_num}: ",
-                        f"    lea rdi, [{filename_label}]  # filename",
-                        f"    lea rsi, [{source_label}]  # source",
-                        "    push rax  # Save rax and check alignment",
-                        "    mov rax, rsp",
-                        "    add rax, 8  # Account for the push",
-                        "    test rax, 0xF",
-                        "    pop rax",
-                    ]
+                        # Insert runtime init and source info setup after this line
+                        # Note: We only zero the stack if needed (stack_size > 0)
+                        init_code = []
 
-                    # Generate runtime_set_source_info call
-                    label_num = self.label_counter
-                    self.label_counter += 1
+                        if stack_size > 0:
+                            init_code.extend([
+                                "    # Zero out stack frame",
+                                "    push rdi",
+                                "    push rcx",
+                                "    push rax",
+                                "    lea rdi, [rsp + 24]  # point to start of our stack frame",
+                                f"    mov rcx, {qword_count}  # {stack_size} bytes / 8 = {qword_count} qwords",
+                                "    xor rax, rax",
+                                "    rep stosq  # zero out [rdi] for rcx qwords",
+                                "    pop rax",
+                                "    pop rcx",
+                                "    pop rdi",
+                            ])
 
-                    init_code.extend([
-                        f"    jz .Lruntime_set_source_info_aligned_{label_num}",
-                        "    sub rsp, 8",
-                        "    call runtime_set_source_info",
-                        "    add rsp, 8",
-                        f"    jmp .Lruntime_set_source_info_done_{label_num}",
-                        f".Lruntime_set_source_info_aligned_{label_num}: ",
-                        "    call runtime_set_source_info",
-                        f".Lruntime_set_source_info_done_{label_num}: ",
-                    ])
+                        init_code.extend([
+                            "    # Initialize runtime and source info"
+                            "    push rax  # Save rax and check alignment",
+                            "    mov rax, rsp",
+                            "    add rax, 8  # Account for the push",
+                            "    test rax, 0xF",
+                            "    pop rax",
+                            # Generate runtime_init call
+                            f"    jz .Lruntime_init_aligned_{label_num}",
+                            "    sub rsp, 8",
+                            "    call runtime_init",
+                            "    add rsp, 8",
+                            f"    jmp .Lruntime_init_done_{label_num}",
+                            f".Lruntime_init_aligned_{label_num}: ",
+                            "    call runtime_init",
+                            f".Lruntime_init_done_{label_num}: ",
+                            f"    lea rdi, [{filename_label}]  # filename",
+                            f"    lea rsi, [{source_label}]  # source",
+                            "    push rax  # Save rax and check alignment",
+                            "    mov rax, rsp",
+                            "    add rax, 8  # Account for the push",
+                            "    test rax, 0xF",
+                            "    pop rax",
+                        ])
 
-                    # Insert after current line
-                    self.output = self.output[:idx+1] + init_code + self.output[idx+1:]
+                        # Generate runtime_set_source_info call
+                        label_num = self.label_counter
+                        self.label_counter += 1
+
+                        init_code.extend([
+                            f"    jz .Lruntime_set_source_info_aligned_{label_num}",
+                            "    sub rsp, 8",
+                            "    call runtime_set_source_info",
+                            "    add rsp, 8",
+                            f"    jmp .Lruntime_set_source_info_done_{label_num}",
+                            f".Lruntime_set_source_info_aligned_{label_num}: ",
+                            "    call runtime_set_source_info",
+                            f".Lruntime_set_source_info_done_{label_num}: ",
+                        ])
+
+                        # Insert after current line
+                        self.output = self.output[:idx+1] + init_code + self.output[idx+1:]
                     break
 
         # Emit data section
@@ -299,7 +313,7 @@ class X86Compiler:
         self.emit("struct_counter:", 0)
         self.emit("    .quad 0  # Counter for dynamic struct allocation", 0)
         self.emit("struct_data:", 0)
-        self.emit("    .space 1048576  # Space for struct instances (4096 instances * 256 bytes each)", 0)
+        self.emit("    .space 67108864  # Space for struct instances (262144 instances * 256 bytes each = 64MB)", 0)
 
         result = '\n'.join(self.output) + '\n'
 
@@ -307,7 +321,51 @@ class X86Compiler:
         if self.optimize:
             result = optimize_assembly(result)
 
+            # After optimization, fix the stack zeroing code to match the optimized frame size
+            # The optimizer may have reduced the stack frame size, but the zeroing code
+            # was generated before optimization with the original size
+            if self.has_main:
+                result = self._fix_stack_zeroing_after_optimization(result)
+
         return result
+
+    def _fix_stack_zeroing_after_optimization(self, assembly: str) -> str:
+        """Fix stack zeroing code after optimization changed the frame size
+
+        The optimizer may reduce stack frame size, but the zeroing code was generated
+        before optimization. This method updates the zeroing code to match the optimized size.
+        """
+        import re
+        lines = assembly.split('\n')
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+
+            # Look for the mov rcx instruction that sets the qword count for zeroing
+            if 'mov rcx,' in line and 'qwords' in line:
+                # Search backwards to find the corresponding sub rsp instruction
+                stack_size = None
+                for j in range(i - 1, max(0, i - 20), -1):
+                    if match := re.search(r'sub rsp, (\d+)', lines[j]):
+                        stack_size = int(match.group(1))
+                        break
+
+                if stack_size is not None:
+                    # Update the qword count to match the actual stack size
+                    qword_count = stack_size // 8
+                    # Preserve indentation
+                    indent = line[:len(line) - len(line.lstrip())]
+                    fixed_line = f"{indent}mov rcx, {qword_count}  # {stack_size} bytes / 8 = {qword_count} qwords"
+                    result.append(fixed_line)
+                    i += 1
+                    continue
+
+            result.append(line)
+            i += 1
+
+        return '\n'.join(result)
 
     def _compile_instructions(self, instructions: List[Tuple[str, List[str]]]):
         """Compile a list of instructions"""
@@ -335,6 +393,9 @@ class X86Compiler:
     def _compile_func(self, args: List[str]):
         """Start a function definition (.func name type arg_count)"""
         func_name = args[0]
+        # args[1] is return type, args[2] is arg_count (if present)
+        total_args = int(args[2]) if len(args) > 2 else 0
+        
         self.internal_functions.add(func_name)  # Track as internal Fr function
         self.current_function = {
             'name': func_name,
@@ -342,6 +403,7 @@ class X86Compiler:
             'max_stack': 0,
             'local_count': 0,
             'arg_count': 0,
+            'total_args': total_args,  # Store total arg count for .arg processing
             'skip_label_emitted': False  # Track if skip label was emitted
         }
         self.local_types = {}  # Reset local types for new function
@@ -380,7 +442,7 @@ class X86Compiler:
             self.emit("mov rsp, rbp")
             self.emit("pop rbp")
             self.emit("ret")
-        
+
         # Function epilogue is emitted by RETURN or above implicit return
         self.current_function = None
 
@@ -395,9 +457,11 @@ class X86Compiler:
         if self.current_function:
             func_name = self.current_function['name']
             asm_label = f".L{func_name}_{label}"
+            key = f"{func_name}:{label}"
         else:
             asm_label = f".L{label}"
-        self.label_map[label] = asm_label
+            key = label
+        self.label_map[key] = asm_label
 
         # Only emit jump to skip labels for GOTO_CALL targets
         # Loop/control flow labels should not be skipped
@@ -456,29 +520,27 @@ class X86Compiler:
 
     def _compile_arg(self, args: List[str]):
         """Handle .arg - function argument declaration"""
-        # System V ABI calling convention (used on Linux/macOS):
-        # First 6 integer/pointer arguments: rdi, rsi, rdx, rcx, r8, r9
-        # Additional arguments on stack (in reverse order)
-        # Arguments are stored in local variable slots starting from slot 0
+        # For Fr internal functions: arguments are on the stack in reverse order
+        # When calling f(a, b), we push a then b, so b is on top
+        # After call+prologue: b at [rbp+16], a at [rbp+24]
+        # But .arg processes them in order: arg 0 (a), arg 1 (b)
+        # So arg_idx 0 should read from [rbp + 16 + (total_args - 1 - 0) * 8]
+        #                            = [rbp + 16 + (total_args - 1) * 8]
+        # And arg_idx 1 should read from [rbp + 16 + (total_args - 1 - 1) * 8]
+        #                              = [rbp + 16 + (total_args - 2) * 8]
+        
         if self.current_function:
             arg_idx = self.current_function['arg_count']
+            total_args = self.current_function.get('total_args', 0)
             self.current_function['arg_count'] += 1
-            # Also increment local_count since args occupy local slots
             self.current_function['local_count'] += 1
 
-            # Map argument index to register or stack location
-            arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
-            if arg_idx < len(arg_regs):
-                # Argument is in a register - store it to local slot
-                offset = (arg_idx + 1) * 8
-                self.emit(f"mov [rbp - {offset}], {arg_regs[arg_idx]}")
-            else:
-                # Argument is on stack (above rbp)
-                # Stack args start at [rbp + 16] (after return addr and saved rbp)
-                stack_offset = 16 + (arg_idx - 6) * 8
-                local_offset = (arg_idx + 1) * 8
-                self.emit(f"mov rax, [rbp + {stack_offset}]")
-                self.emit(f"mov [rbp - {local_offset}], rax")
+            # Calculate stack offset in reverse order
+            # Last arg (rightmost) is at [rbp+16], first arg at [rbp + 16 + (N-1)*8]
+            stack_offset = 16 + (total_args - 1 - arg_idx) * 8
+            local_offset = (arg_idx + 1) * 8
+            self.emit(f"mov rax, [rbp + {stack_offset}]")
+            self.emit(f"mov [rbp - {local_offset}], rax")
 
     def _compile_entry(self, args: List[str]):
         """Handle .entry directive - set program entry point"""
@@ -895,15 +957,19 @@ class X86Compiler:
     def _compile_jump(self, args: List[str]):
         """Unconditional jump"""
         label = args[0]
-        # Look up the label in the map (it may be function-scoped)
-        asm_label = self.label_map.get(label, f".L{label}")
+        # Look up the label with function scoping
+        func_name = self.current_function['name'] if self.current_function else None
+        key = f"{func_name}:{label}" if func_name else label
+        asm_label = self.label_map.get(key, f".L{label}")
         self.emit(f"jmp {asm_label}")
 
     def _compile_jump_if_false(self, args: List[str]):
         """Jump if top of stack is false"""
         label = args[0]
-        # Look up the label in the map (it may be function-scoped)
-        asm_label = self.label_map.get(label, f".L{label}")
+        # Look up the label with function scoping
+        func_name = self.current_function['name'] if self.current_function else None
+        key = f"{func_name}:{label}" if func_name else label
+        asm_label = self.label_map.get(key, f".L{label}")
         self.emit("pop rax")
         self.emit("test rax, rax")
         self.emit(f"jz {asm_label}")
@@ -911,8 +977,10 @@ class X86Compiler:
     def _compile_jump_if_true(self, args: List[str]):
         """Jump if top of stack is true"""
         label = args[0]
-        # Look up the label in the map (it may be function-scoped)
-        asm_label = self.label_map.get(label, f".L{label}")
+        # Look up the label with function scoping
+        func_name = self.current_function['name'] if self.current_function else None
+        key = f"{func_name}:{label}" if func_name else label
+        asm_label = self.label_map.get(key, f".L{label}")
         self.emit("pop rax")
         self.emit("test rax, rax")
         self.emit(f"jnz {asm_label}")
@@ -925,24 +993,31 @@ class X86Compiler:
             # Extract instance_id (unsigned shift)
             self.emit("shr rax, 16")
             # Clamp to valid range
-            self.emit("and rax, 0xFFF  # Ensure instance_id < 4096")
+            self.emit("and rax, 0x3FFF  # Ensure instance_id < 16384")
             # Calculate base address in struct_data
-            self.emit("mov rcx, 256")
-            self.emit("imul rax, rcx")
-            self.emit("lea rdx, [rip + struct_data]")
+            self.emit("mov rbx, 256")
+            self.emit("imul rax, rbx")
+            # Use r10 to hold struct_data address (avoid target_reg)
+            self.emit("lea r10, [rip + struct_data]")
             # Pack 4 bytes: R, G, B, A into target register
+            # Clear target first
             self.emit(f"xor {target_reg}, {target_reg}  # Clear target")
-            self.emit("mov cl, byte ptr [rdx + rax + 0]  # R")
-            self.emit(f"or {target_reg}, rcx")
-            self.emit("mov cl, byte ptr [rdx + rax + 8]  # G")
-            self.emit("shl rcx, 8")
-            self.emit(f"or {target_reg}, rcx")
-            self.emit("mov cl, byte ptr [rdx + rax + 16]  # B")
-            self.emit("shl rcx, 16")
-            self.emit(f"or {target_reg}, rcx")
-            self.emit("mov cl, byte ptr [rdx + rax + 24]  # A")
-            self.emit("shl rcx, 24")
-            self.emit(f"or {target_reg}, rcx")
+            # Use rbx as temporary for field values
+            self.emit("xor rbx, rbx  # Clear rbx")
+            self.emit("mov bl, byte ptr [r10 + rax + 0]  # R")
+            self.emit(f"or {target_reg}, rbx")
+            self.emit("xor rbx, rbx  # Clear rbx")
+            self.emit("mov bl, byte ptr [r10 + rax + 8]  # G")
+            self.emit("shl rbx, 8")
+            self.emit(f"or {target_reg}, rbx")
+            self.emit("xor rbx, rbx  # Clear rbx")
+            self.emit("mov bl, byte ptr [r10 + rax + 16]  # B")
+            self.emit("shl rbx, 16")
+            self.emit(f"or {target_reg}, rbx")
+            self.emit("xor rbx, rbx  # Clear rbx")
+            self.emit("mov bl, byte ptr [r10 + rax + 24]  # A")
+            self.emit("shl rbx, 24")
+            self.emit(f"or {target_reg}, rbx")
         else:
             # For other structs, just pass the reference as-is for now
             self.emit(f"pop {target_reg}")
@@ -953,32 +1028,76 @@ class X86Compiler:
         arg_count = int(args[1]) if len(args) > 1 else 0
         type_sig = args[2] if len(args) > 2 else ''
 
-        # Parse type signature to identify struct arguments
+        # Parse type signature to identify struct and float arguments
         struct_args = set()
+        float_args = set()
         if type_sig and '|' in type_sig:
             arg_types = type_sig.split('|')[0]
             for idx, ch in enumerate(arg_types):
                 if ch == 's':
                     struct_args.add(idx)
+                elif ch == 'f':
+                    float_args.add(idx)
 
-        self.emit_comment(f"CALL {func_name}: struct_args={struct_args}, stack_types={self.stack_types[-min(arg_count,len(self.stack_types)):]}")
+        self.emit_comment(f"CALL {func_name}: struct_args={struct_args}, float_args={float_args}, stack_types={self.stack_types[-min(arg_count,len(self.stack_types)):]}")
 
-        # System V ABI: first 6 args in rdi, rsi, rdx, rcx, r8, r9
-        arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+        # Check if this is an external C function
+        is_external = func_name not in self.internal_functions
 
-        # Pop arguments from stack into registers (in reverse order since stack)
-        # Arguments were pushed left-to-right, so we pop them right-to-left
-        for i in range(min(arg_count, len(arg_regs))):
-            # Pop in reverse order: last arg first
-            reg_idx = arg_count - 1 - i
-            if reg_idx < len(arg_regs):
-                # Check if this argument is a struct that needs packing
-                if reg_idx in struct_args and self.stack_types and self.stack_types[-1].startswith('struct:'):
-                    struct_id = int(self.stack_types[-1].split(':')[1])
-                    self.emit_comment(f"Packing struct {struct_id} for arg {reg_idx}")
-                    self._pack_struct_for_c(struct_id, arg_regs[reg_idx])
+        if is_external:
+            # System V ABI: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9
+            # first 8 float args in xmm0-xmm7
+            arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+            float_regs = ['xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6', 'xmm7']
+            
+            # Count how many integer and float args come before each position
+            # This determines which register to use
+            int_reg_for_arg = {}
+            float_reg_for_arg = {}
+            int_count = 0
+            float_count = 0
+            
+            for arg_idx in range(arg_count):
+                if arg_idx in float_args:
+                    float_reg_for_arg[arg_idx] = float_count
+                    float_count += 1
                 else:
-                    self.emit(f"pop {arg_regs[reg_idx]}")
+                    int_reg_for_arg[arg_idx] = int_count
+                    int_count += 1
+
+            # Pop arguments from stack into registers (in reverse order since stack)
+            # Arguments were pushed left-to-right, so we pop them right-to-left
+            for i in range(arg_count):
+                # Pop in reverse order: last arg first
+                reg_idx = arg_count - 1 - i
+                
+                # Check if this argument is a float
+                if reg_idx in float_args:
+                    float_pos = float_reg_for_arg[reg_idx]
+                    if float_pos < len(float_regs):
+                        # Pop into xmm register
+                        self.emit_comment(f"Float arg {reg_idx} -> {float_regs[float_pos]}")
+                        self.emit(f"pop rax  # Load value")
+                        # Convert int to single-precision float (32-bit)
+                        self.emit(f"cvtsi2ss {float_regs[float_pos]}, rax  # Convert int64 to float")
+                # Check if this argument is a struct that needs packing
+                elif reg_idx in struct_args and self.stack_types and self.stack_types[-1].startswith('struct:'):
+                    int_pos = int_reg_for_arg[reg_idx]
+                    if int_pos < len(arg_regs):
+                        struct_id = int(self.stack_types[-1].split(':')[1])
+                        self.emit_comment(f"Packing struct {struct_id} for arg {reg_idx}")
+                        self._pack_struct_for_c(struct_id, arg_regs[int_pos])
+                else:
+                    # Regular integer argument
+                    int_pos = int_reg_for_arg[reg_idx]
+                    if int_pos < len(arg_regs):
+                        self.emit(f"pop {arg_regs[int_pos]}")
+                
+                if self.stack_types:
+                    self.stack_types.pop()
+        else:
+            # Internal Fr function - arguments stay on stack, but we still need to track stack_types
+            for i in range(arg_count):
                 if self.stack_types:
                     self.stack_types.pop()
 
@@ -986,9 +1105,6 @@ class X86Compiler:
         # TODO: handle > 6 arguments properly
 
         # Ensure stack is 16-byte aligned before external calls
-        # Only align for external C functions, not internal Fr functions
-        is_external = func_name not in self.internal_functions
-
         if is_external:
             # The x86-64 ABI requires rsp & 0xF == 0 before call
             self.emit("# Stack alignment for external call")
@@ -1009,8 +1125,15 @@ class X86Compiler:
 
         # Calling convention: result is in rax
         # Check if function returns void
-        if not type_sig or not type_sig.endswith('|v'):
-            # Regular return value
+        if type_sig and not type_sig.endswith('|v'):
+            # Check return type - bool returns are in al (low 8 bits) and need zero-extension
+            if '|' in type_sig:
+                return_type = type_sig.split('|')[1]
+                if return_type == 'b':  # bool return type
+                    self.emit("movzx rax, al  # Zero-extend bool (al) to rax")
+            self.emit("push rax")
+        elif not type_sig:
+            # No type signature - assume non-void return
             self.emit("push rax")
 
     def _compile_return(self, args: List[str]):
@@ -1064,8 +1187,10 @@ class X86Compiler:
     def _compile_goto_call(self, args: List[str]):
         """Jump to label and save return address (like CALL but for goto with return)"""
         label = args[0].rstrip(':')
-        # Map bytecode label to asm label
-        asm_label = self.label_map.get(label, f".L{label}")
+        # Map bytecode label to asm label with function scoping
+        func_name = self.current_function['name'] if self.current_function else None
+        key = f"{func_name}:{label}" if func_name else label
+        asm_label = self.label_map.get(key, f".L{label}")
         # Similar to CALL but doesn't set up a new frame
         self.emit(f"call {asm_label}")
         self.emit("push rax")
@@ -1095,16 +1220,21 @@ class X86Compiler:
         # Pop the switch value
         self.emit("pop rax")
 
+        # Get function name for label scoping
+        func_name = self.current_function['name'] if self.current_function else None
+
         # Generate a jump table
         # Check if value is out of range
         self.emit(f"cmp rax, {min_value}")
         if default_label:
-            asm_default = self.label_map.get(default_label, f".L{default_label}")
+            key = f"{func_name}:{default_label}" if func_name else default_label
+            asm_default = self.label_map.get(key, f".L{default_label}")
             self.emit(f"jl {asm_default}")
 
         self.emit(f"cmp rax, {max_value}")
         if default_label:
-            asm_default = self.label_map.get(default_label, f".L{default_label}")
+            key = f"{func_name}:{default_label}" if func_name else default_label
+            asm_default = self.label_map.get(key, f".L{default_label}")
             self.emit(f"jg {asm_default}")
 
         # Compute offset into jump table: rax = rax - min_value
@@ -1113,13 +1243,15 @@ class X86Compiler:
 
         # Generate jump table
         for i, label in enumerate(case_labels):
-            asm_label = self.label_map.get(label, f".L{label}")
+            key = f"{func_name}:{label}" if func_name else label
+            asm_label = self.label_map.get(key, f".L{label}")
             # First case: value should be 0
             self.emit(f"cmp rax, {i}")
             self.emit(f"je {asm_label}")
         # Default case
         if default_label:
-            asm_default = self.label_map.get(default_label, f".L{default_label}")
+            key = f"{func_name}:{default_label}" if func_name else default_label
+            asm_default = self.label_map.get(key, f".L{default_label}")
             self.emit(f"jmp {asm_default}")
 
     def _compile_cmp_lt_const(self, args: List[str]):
@@ -1259,6 +1391,22 @@ class X86Compiler:
                 self.emit(f"mov [rbp - {offset}], rax")
                 # Track that this local is an i64
                 self.local_types[slot] = 'i64'
+
+    def _compile_store_const_bool(self, args: List[str]):
+        """Store boolean constants directly to slots (STORE_CONST_BOOL slot1 val1 slot2 val2 ...)"""
+        # Args come in pairs: slot, value
+        for i in range(0, len(args), 2):
+            if i + 1 < len(args):
+                slot = int(args[i])
+                value_str = args[i + 1]
+                offset = (slot + 1) * 8
+
+                # Convert string to boolean (1 or 0)
+                value = 1 if value_str.lower() in ('1', 'true') else 0
+
+                self.emit(f"mov qword ptr [rbp - {offset}], {value}  # Immediate store")
+                # Track that this local is a bool
+                self.local_types[slot] = 'bool'
 
     def _compile_store_const_f64(self, args: List[str]):
         """Store float constants directly to slots (STORE_CONST_F64 slot1 val1 slot2 val2 ...)"""
@@ -2727,6 +2875,14 @@ class X86Compiler:
             'field_types': field_types
         }
 
+    def _compile_struct_type(self, args: List[str]):
+        """Handle struct type mapping directive (.struct_type struct_name struct_id)"""
+        # This directive maps a struct type name to its ID
+        # It's used for resolving struct field types in nested structs
+        # For now, we just record it but don't need to emit anything
+        # The mapping is already handled by the compiler via the struct_defs dict
+        pass
+
     def _compile_struct_to_c(self, struct_id: int):
         """Convert internal struct format to C-compatible layout"""
         struct_def = self.structs.get(struct_id, {'field_count': 0, 'field_types': []})
@@ -2775,12 +2931,14 @@ class X86Compiler:
         self.emit("mov rbx, [rax]  # rbx = current counter")
         self.emit("mov rcx, rbx")
         self.emit("inc rcx")
-        # Wrap around at 4096 to stay within allocated struct_data
-        self.emit("cmp rcx, 4096")
+        # Wrap around at 262144 to stay within allocated struct_data
+        self.emit("cmp rcx, 262144")
         label_num = self.label_counter
         self.label_counter += 1
-        self.emit(f"jb .Lstruct_no_wrap_{label_num}  # Jump if below 4096")
-        self.emit("xor rcx, rcx  # rcx >= 4096, wrap to 0")
+        self.emit(f"jb .Lstruct_no_wrap_{label_num}  # Jump if below 262144")
+        # When wrapping, start from a safe offset to avoid overwriting persistent structs
+        # Reserve instances 0-1023 for persistent/static structs (colors, etc)
+        self.emit("mov rcx, 1024  # Wrap to 1024 to preserve early instances")
         self.emit(f".Lstruct_no_wrap_{label_num}:")
         self.emit("mov [rax], rcx  # store counter")
 
@@ -2811,7 +2969,7 @@ class X86Compiler:
 
         # Pop the struct reference
         self.emit("pop rax  # struct reference")
-        
+
         # Pop struct type from stack and extract struct_id from it
         struct_id_from_stack = None
         if self.stack_types:
@@ -2825,13 +2983,13 @@ class X86Compiler:
         self.emit("shr rbx, 16  # rbx = instance_id")
         self.emit("mov rcx, rax")
         self.emit("and rcx, 0xFFFF  # rcx = struct_id")
-        
-        # Clamp instance_id to valid range (0-4095) to prevent out-of-bounds access
-        self.emit("cmp rbx, 4096")
+
+        # Clamp instance_id to valid range (0-262143) to prevent out-of-bounds access
+        self.emit("cmp rbx, 262144")
         label_num = self.label_counter
         self.label_counter += 1
         self.emit(f"jb .Linstance_ok_{label_num}")
-        self.emit("and rbx, 0xFFF  # Wrap to 0-4095")
+        self.emit("and rbx, 0x3FFFF  # Wrap to 0-262143")
         self.emit(f".Linstance_ok_{label_num}:")
 
         # Calculate address: base + (instance_id * 256) + (field_idx * 8)
@@ -3097,8 +3255,10 @@ class X86Compiler:
         exc_type = args[0].strip('"')
         handler_label = args[1]
 
-        # Get the assembly label for the handler
-        asm_label = self.label_map.get(handler_label, f".L{handler_label}")
+        # Get the assembly label for the handler with function scoping
+        func_name = self.current_function['name'] if self.current_function else None
+        key = f"{func_name}:{handler_label}" if func_name else handler_label
+        asm_label = self.label_map.get(key, f".L{handler_label}")
 
         # Store the exception type string in data section
         exc_type_label = self.get_string_label(exc_type)
@@ -3153,7 +3313,6 @@ class X86Compiler:
         # This function never returns if a handler is found
         # If we get here, the program has exited
 
-
 def compile(bytecode: str, optimize: bool = False) -> Tuple[str, set]:
     """
     Main entry point for x86_64 compilation.
@@ -3168,7 +3327,6 @@ def compile(bytecode: str, optimize: bool = False) -> Tuple[str, set]:
     compiler = X86Compiler(optimize=optimize)
     assembly = compiler.compile(bytecode)
     return assembly, compiler.runtime_dependencies
-
 
 if __name__ == "__main__":
     # Test with simple bytecode

@@ -45,15 +45,18 @@ Paddle updatePaddle(Paddle p, int upKey, int downKey) {
 Ball updateBall(Ball b) {
     int newX = int(b.x + b.velX)
     int newY = int(b.y + b.velY)
+    int newVelY = b.velY
 
     if (newY < b.radius) {
         newY = b.radius
+        newVelY = 0 - newVelY
     }
     if (newY > 600 - b.radius) {
         newY = 600 - b.radius
+        newVelY = 0 - newVelY
     }
 
-    return Ball(newX, newY, b.radius, b.velX, b.velY)
+    return Ball(newX, newY, b.radius, b.velX, newVelY)
 }
 
 Ball checkLeftPaddleCollision(Ball b, Paddle p) {
@@ -109,7 +112,7 @@ void main() {
         DrawRectangle(leftPaddle.x, leftPaddle.y, leftPaddle.width, leftPaddle.height, paddleColor)
         DrawRectangle(rightPaddle.x, rightPaddle.y, rightPaddle.width, rightPaddle.height, paddleColor)
 
-        DrawCircle(ball.x, ball.y, ball.radius, Color(255, 255, 255, 255))
+        DrawCircle(ball.x, ball.y, ball.radius, ballColor)
 
         DrawText("Pong Game", 450, 20, 40, textColor)
         DrawText(f"Left: {leftScore}", 100, 50, 30, textColor)

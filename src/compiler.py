@@ -962,9 +962,11 @@ class BytecodeCompiler:
                                 type_sig += "i"
 
                         # Add return type indicator at the end (separated by |)
-                        # Format: "i" for int, "f" for float, "v" for void
+                        # Format: "i" for int, "f" for float, "b" for bool, "v" for void
                         if 'float' in return_type or 'double' in return_type:
                             type_sig += "|f"
+                        elif return_type == 'bool':
+                            type_sig += "|b"
                         elif return_type != 'void':
                             type_sig += "|i"
                         else:

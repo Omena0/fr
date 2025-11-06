@@ -1552,6 +1552,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
 
         // No more handlers - will fall through to error printing
         // Keep original message with [ExceptionType] for accurate error reporting
+        message = display_message;
     }
 
     // No handler found or handler doesn't match - print error and exit
@@ -2496,6 +2497,12 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
         {
             // .line <line_number> - for error reporting
             // We can store this in debug info if needed, but for now just skip it
+            continue;
+        }
+        else if (strcmp(token, ".struct_type") == 0)
+        {
+            // .struct_type <name> <id> - Type information for structs
+            // Skip this directive as it's for static analysis/debugging
             continue;
         }
         else if (strcmp(token, "LABEL") == 0)

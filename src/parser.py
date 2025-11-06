@@ -4,6 +4,8 @@ from typing import Any, cast
 import ast
 import sys
 import threading
+import os
+import re
 
 AstType = list[dict[str, Any]]
 VarType = dict[str, dict[str, Any]]
@@ -25,6 +27,176 @@ vars:VarType = {}
 # Save the initial builtin function NAMES to restore on each parse
 # This prevents user-defined functions from contaminating subsequent parses
 builtin_func_names = set(funcs.keys())
+
+# Track imported files to prevent circular imports
+_imported_files: set[str] = set()
+
+def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    with open(c_file, 'r') as f:
+        content = f.read()
+
+    # Remove comments
+    content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)  # Single-line comments
+    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)  # Multi-line comments
+
+    # Parse typedef struct definitions
+    # Matches: typedef struct [optional_tag] { fields... } TypeName;
+    struct_pattern = re.compile(
+        r'typedef\s+struct\s+(?:\w+\s*)?\{([^}]+)\}\s*(\w+)\s*;',
+        re.MULTILINE | re.DOTALL
+    )
+
+    structs = {}
+
+    for match in struct_pattern.finditer(content):
+        fields_str = match.group(1).strip()
+        struct_name = match.group(2).strip()
+
+        fields = []
+        for line in fields_str.split(';'):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Example lines:
+            #   float m0, m4, m8;
+            #   unsigned char r, g, b, a;
+            #   Matrix transform;
+            tokens = line.split()
+            if not tokens:
+                continue
+
+            # Extract the type part (everything up to the first identifier or pointer)
+            field_type_parts = []
+            type_keywords = {
+                'void', 'int', 'float', 'double', 'char', 'bool',
+                'unsigned', 'signed', 'long', 'short', 'struct',
+                'const', 'volatile', 'restrict', 'static',
+            }
+            for token in tokens:
+                # Stop at first non-type-keyword identifier
+                if re.match(r'[*\w]+,?', token) and token not in type_keywords:
+                    break
+                field_type_parts.append(token)
+
+            if not field_type_parts:
+                field_type_parts.append(tokens[0])
+
+            # Determine base type (handles things like "unsigned char" or "const float*")
+            field_type = ' '.join(field_type_parts).strip()
+
+            # Extract all names (handles comma-separated variables)
+            name_part = line[len(field_type):].strip()
+            name_part = name_part.rstrip(';')
+            # Remove the type prefix from name_part
+            # Split by commas, and remove array brackets
+            for name in re.split(r',\s*', name_part):
+                name = name.strip()
+                if not name:
+                    continue
+                name = name.split('[')[0].strip()
+                # Skip if it looks like a duplicate type fragment
+                if re.match(r'^[A-Za-z_]\w*$', name):
+                    fields.append({'name': name, 'type': field_type})
+
+        if fields:  # Only add if we found fields
+            structs[struct_name] = {
+                'type': 'c_struct_def',
+                'fields': fields,
+                'is_c_struct': True
+            }
+
+    # Also parse regular struct definitions (not typedef)
+    # Matches: struct Name { fields... };
+    struct_pattern2 = re.compile(
+        r'struct\s+(\w+)\s*\{([^}]+)\}\s*;',
+        re.MULTILINE | re.DOTALL
+    )
+
+    for match in struct_pattern2.finditer(content):
+        struct_name = match.group(1).strip()
+        fields_str = match.group(2).strip()
+
+        # Skip if we already have this struct from typedef
+        if struct_name in structs:
+            continue
+
+        # Parse fields (same as above)
+        fields = []
+        for line in fields_str.split(';'):
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                field_type, field_name = parts
+                field_name = field_name.split('[')[0].strip()
+                fields.append({
+                    'name': field_name,
+                    'type': field_type.strip()
+                })
+
+        if fields:
+            structs[struct_name] = {
+                'type': 'c_struct_def',
+                'fields': fields,
+                'is_c_struct': True
+            }
+
+    # Pattern to match function declarations/definitions
+    # Matches: return_type function_name(param_type param_name, ...)
+    func_pattern = re.compile(
+        r'\b(void|int|float|double|char|long|short|unsigned\s+\w+|\w+\s*\*|\w+)\s+'  # return type (including custom types)
+        r'(\w+)\s*'  # function name
+        r'\(([^)]*)\)',  # parameters
+        re.MULTILINE
+    )
+
+    functions = {}
+
+    for match in func_pattern.finditer(content):
+        return_type = match.group(1).strip()
+        func_name = match.group(2).strip()
+        params_str = match.group(3).strip()
+
+        # Skip if it looks like a macro or declaration (ends with semicolon in next few chars)
+        rest = content[match.end():match.end()+10]
+        if ';' in rest.split('{')[0]:
+            # This is just a declaration, but we still want it
+            pass
+
+        # Parse parameters
+        params = []
+        if params_str and params_str != 'void':
+            for param in params_str.split(','):
+                param = param.strip()
+                if not param:
+                    continue
+
+                # Parse "type name" or just "type"
+                parts = param.rsplit(None, 1)  # Split from right to get last word as name
+                if len(parts) == 2:
+                    param_type, param_name = parts
+                elif len(parts) == 1:
+                    param_type = parts[0]
+                    param_name = f'arg{len(params)}'
+                else:
+                    continue
+
+                params.append({
+                    'name': param_name.strip('*'),  # Remove pointer markers from name
+                    'type': param_type.strip()
+                })
+
+        functions[func_name] = {
+            'type': 'c_function',
+            'return_type': return_type,
+            'params': params,
+            'param_count': len(params)
+        }
+
+    return functions, structs
 
 class SkipNode: ...
 
@@ -186,8 +358,10 @@ def _has_operators_outside_context(text: str) -> bool:
                 paren_depth += 1
             elif c == ')':
                 paren_depth -= 1
-            elif paren_depth == 0 and c in {'+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|'}:
-                return True
+            elif paren_depth == 0:
+                # Check for operators (including '.' for field/method access)
+                if c in {'+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '.'}:
+                    return True
 
     return False
 
@@ -427,7 +601,7 @@ def parse_expr(text: str):
 
     # Save and restore parse-time mode
     old_runtime = runtime_module.runtime # type: ignore
-    runtime_module.runtime = False       # type: ignore
+    runtime_module.runtime = False # type: ignore
 
     try:
         # Handle goto expressions: "goto label"
@@ -518,6 +692,44 @@ def parse_expr(text: str):
             return result
 
         expr_dict = _ast_to_dict(expr)
+
+        def _validate_function_calls(node):
+            """Recursively validate all function calls in the expression tree."""
+            if not isinstance(node, dict):
+                return node
+
+            # Validate this node if it's a function call
+            if 'func' in node and 'args' in node:
+                func_ref = node['func']
+                func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+
+                if func_name and func_name in funcs:
+                    func_info = funcs[func_name]
+
+                    # Validate argument count for C functions
+                    if func_info.get('type') == 'c_function':
+                        expected = func_info.get('param_count', 0)
+                        actual = len(node.get('args', []))
+                        if actual != expected:
+                            params = func_info.get('params', [])
+                            param_names = ', '.join(f"{p['type']} {p['name']}" for p in params) if params else 'void'
+                            raise SyntaxError(
+                                f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
+                                f"({param_names}), got {actual}"
+                            )
+
+            # Recursively validate nested structures
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    _validate_function_calls(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        _validate_function_calls(item)
+
+            return node
+
+        # Validate all function calls
+        expr_dict = _validate_function_calls(expr_dict)
 
         def _replace_const_calls(node):
             """Recursively replace const function calls with their evaluated values."""
@@ -635,7 +847,7 @@ def parse_expr(text: str):
 
         return expr_dict
     finally:
-        runtime_module.runtime = old_runtime # type: ignore
+        runtime_module.runtime = old_runtime
 
 def parse_scope(stream: InputStream, level: int = 0) -> AstType:
     """Parse a code block enclosed in braces { }."""
@@ -652,6 +864,7 @@ def parse_scope(stream: InputStream, level: int = 0) -> AstType:
     return ast
 
 def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str, str|Any] | type[SkipNode]:
+    # sourcery skip: default-mutable-arg
     global current_func
     current_func = name
 
@@ -905,6 +1118,10 @@ def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
 
 def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
     """Check if a function call can be evaluated at parse time."""
+    # C functions cannot be evaluated at parse time
+    if func.get('type') == 'c_function':
+        return False
+
     func_mods = func.get('mods', [])
     is_const = isinstance(func_mods, list) and 'const' in func_mods
 
@@ -942,7 +1159,7 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
         return func_callable(*func_args)
 
     # Evaluate user-defined const function
-    from runtime import run_scope # type: ignore
+    from runtime import run_scope
     import runtime
 
     # Set up function arguments in vars
@@ -956,8 +1173,8 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
                 }
 
     # Execute function body
-    runtime.vars = vars     # type: ignore
-    runtime.runtime = False # type: ignore
+    runtime.vars = vars
+    runtime.runtime = False
 
     func_body = func.get('func')
     if not isinstance(func_body, list):
@@ -967,16 +1184,26 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
 
 def parse_func_call(stream: InputStream, name: str) -> dict:
     """Parse a function call and optionally evaluate it at compile time."""
-    # Save line before parsing
     call_line = stream.line
 
     if name not in funcs:
-        raise SyntaxError(stream.format_error(f'Function "{name}" is not defined.'))
+        raise SyntaxError(stream.format_error(f'Function "{name}" is not defined."'))
 
-    # Parse arguments
+    # Parse arguments (raw text)
     args = parse_args(stream, check_comma=False)
-    arg_values = [arg_name for arg_name, _ in args]
-    arg_values = list(map(parse_literal, arg_values))
+    arg_values = []
+
+    for arg_text, _ in args:
+        arg_text = arg_text.strip()
+        if not arg_text:
+            continue
+        try:
+            # First, try parsing as a full expression (handles nested calls like Color(...))
+            arg_node = parse_expr(arg_text)
+        except Exception:
+            # Fallback to simple literal
+            arg_node = parse_literal(arg_text)
+        arg_values.append(arg_node)
 
     func = funcs[name]
 
@@ -985,22 +1212,24 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
 
     # Try to evaluate at parse time if possible
     if _can_eval_at_parse_time(func, arg_values):
-        value = _eval_func_at_parse_time(name, func, arg_values)
-        # For void functions that return None, still create a CALL node for runtime execution
-        if value is None and func.get('return_type') == 'void':
-            node = make_node(stream,
-                type="call",
-                name=name,
-                args=arg_values,
-                return_type="void"
-            )
-        else:
-            node = make_node(stream,
-                type=get_type(value),
-                value=value
-            )
-        node['line'] = call_line
-        return node
+        try:
+            value = _eval_func_at_parse_time(name, func, arg_values)
+            if value is None and func.get('return_type') == 'void':
+                node = make_node(stream,
+                    type="call",
+                    name=name,
+                    args=arg_values,
+                    return_type="void"
+                )
+            else:
+                node = make_node(stream,
+                    type=get_type(value),
+                    value=value
+                )
+            node['line'] = call_line
+            return node
+        except Exception:
+            pass
 
     # Return runtime function call node
     node = make_node(stream,
@@ -1126,9 +1355,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
     if level == 0:
         # Save line after stripping, before consuming anything
         decl_line = stream.line
+
         # Check for "from <module> py_import <name>" statement
-        if stream.peek_word() == 'from':
-            stream.consume('from')
+        if stream.consume("from"):
             stream.strip()
 
             # Get module name
@@ -1162,8 +1391,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             return node
 
         # Check for "py_import <module>" or "py_import <module> as <alias>" statement
-        if stream.peek_word() == 'py_import':
-            stream.consume('py_import')
+        elif stream.consume("py_import"):
             stream.strip()
 
             # Get module name
@@ -1186,8 +1414,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             return node
 
         # Check for struct definition first
-        if stream.peek_word() == 'struct':
-            stream.consume('struct')
+        elif stream.consume("struct"):
             stream.strip()
 
             # Get struct name
@@ -1240,50 +1467,248 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             node['line'] = decl_line
             return node
 
+        elif stream.consume("import"):
+            # import filename
+            stream.strip()
+            filename = stream.consume_word()
+
+            # Try to resolve file path - priority order:
+            # 1. Relative to the importing file's directory
+            # 2. Relative to current working directory
+            file_path = None
+
+            # First, try relative to the importing file
+            if stream.file_path:
+                base_dir = os.path.dirname(stream.file_path)
+                candidate = os.path.join(base_dir, filename)
+                # Only add .fr extension if not already present
+                if not candidate.endswith('.fr'):
+                    candidate += '.fr'
+                if os.path.exists(candidate):
+                    file_path = os.path.abspath(candidate)
+
+            # If not found, try relative to current working directory
+            if file_path is None:
+                candidate = os.path.join(os.getcwd(), filename)
+                # Only add .fr extension if not already present
+                if not candidate.endswith('.fr'):
+                    candidate += '.fr'
+                if os.path.exists(candidate):
+                    file_path = os.path.abspath(candidate)
+
+            # If still not found, raise error
+            if file_path is None:
+                raise SyntaxError(stream.format_error(f'Import file not found: {filename}'))
+
+            # Check for circular imports
+            if file_path in _imported_files:
+                raise SyntaxError(stream.format_error(f'Circular import detected: {filename}'))
+
+            # Mark as imported before parsing to prevent circular imports
+            _imported_files.add(file_path)
+
+            try:
+                # Read and parse the imported file
+                with open(file_path, 'r') as f:
+                    import_content = f.read()
+
+                # Parse the imported file (this will recursively handle any imports in it)
+                imported_ast = parse(import_content, level=0, file=file_path)
+
+                # Return a special node that contains the imported AST
+                node = make_node(stream,
+                    type='import',
+                    file=filename,
+                    ast=imported_ast
+                )
+                node['line'] = decl_line
+                return node
+            finally:
+                # Remove from imported files set after parsing completes
+                # This allows the same file to be imported in different branches
+                _imported_files.discard(file_path)
+
+        # c_import library_name.c
+        elif stream.consume("c_import"):
+            stream.strip()
+            c_file = stream.consume_word()
+
+            # Resolve C file path - same priority as fr imports
+            file_path = None
+
+            # First, try relative to the importing file
+            if stream.file_path:
+                # Handle both absolute and relative source file paths
+                if os.path.isabs(stream.file_path):
+                    base_dir = os.path.dirname(stream.file_path)
+                else:
+                    # Convert relative path to absolute
+                    abs_source_path = os.path.abspath(stream.file_path)
+                    base_dir = os.path.dirname(abs_source_path)
+
+                candidate = os.path.join(base_dir, c_file)
+                if os.path.exists(candidate):
+                    file_path = os.path.abspath(candidate)
+
+            # If not found, try relative to current working directory
+            if file_path is None:
+                candidate = os.path.join(os.getcwd(), c_file)
+                if os.path.exists(candidate):
+                    file_path = os.path.abspath(candidate)
+
+            # If still not found, raise error
+            if file_path is None:
+                raise SyntaxError(stream.format_error(f'C import file not found: {c_file}'))
+
+            # Parse C file to extract function signatures and struct definitions
+            c_functions, c_structs = _parse_c_signatures(file_path)
+
+            # Sanitize malformed C struct field lists (like "m0, m4, m8")
+            for struct_name, struct_info in c_structs.items():
+                clean_fields = []
+                for field in struct_info.get("fields", []):
+                    names = field.get("name", "")
+                    ftype = field.get("type", "")
+                    # Split on commas or spaces
+                    parts = [p.strip() for p in re.split(r"[, ]+", names) if p.strip()]
+                    for p in parts:
+                        clean_fields.append({"name": p, "type": ftype})
+                struct_info["fields"] = clean_fields
+
+            # Register C functions in the global funcs registry
+            for func_name, func_info in c_functions.items():
+                if func_name not in funcs:
+                    funcs[func_name] = func_info
+
+            # Register C structs in types and vars registries
+            for struct_name, struct_info in c_structs.items():
+                # Register as a type
+                if struct_name not in types:
+                    types.append(struct_name)
+
+                # Store struct definition
+                if struct_name not in vars:
+                    vars[struct_name] = struct_info
+
+                # Also register as a callable (struct constructor)
+                if struct_name not in funcs:
+                    funcs[struct_name] = {
+                        'type': 'c_struct_constructor',
+                        'return_type': struct_name,
+                        'params': struct_info['fields'],
+                        'param_count': len(struct_info['fields'])
+                    }
+
+            node = make_node(stream,
+                type='c_import',
+                file=file_path,  # Store the full resolved path
+                functions=c_functions,  # Store parsed function signatures
+                structs=c_structs  # Store parsed struct definitions
+            )
+            node['line'] = decl_line
+            return node
+
+        # c_link library_name (e.g., c_link -lraylib)
+        elif stream.consume("c_link"):
+            stream.strip()
+            # Consume the rest of the line as the link flag
+            link_flag = ""
+            while stream.text and stream.peek(1) not in '\n\r':
+                link_flag += stream.seek(1)
+            link_flag = link_flag.strip()
+
+            if not link_flag:
+                raise SyntaxError(stream.format_error('Expected library name after c_link'))
+
+            # Resolve file paths in link flags to absolute paths
+            # This handles cases like "./lib/libraylib.a" followed by -l flags
+            # Parse the link_flag into individual tokens and resolve paths
+            tokens = link_flag.split()
+            resolved_tokens = []
+
+            for token in tokens:
+                # Check if it looks like a file path (contains / and doesn't start with -)
+                if '/' in token and not token.startswith('-'):
+                    resolved_path = token
+
+                    # Try to resolve relative to the importing file first
+                    if stream.file_path:
+                        # Get absolute path of the source file
+                        if not os.path.isabs(stream.file_path):
+                            source_abs_path = os.path.abspath(stream.file_path)
+                        else:
+                            source_abs_path = stream.file_path
+
+                        base_dir = os.path.dirname(source_abs_path)
+                        candidate = os.path.join(base_dir, token)
+                        if os.path.exists(candidate):
+                            resolved_path = os.path.abspath(candidate)
+
+                    # If not found and still relative, try relative to cwd
+                    if not os.path.isabs(resolved_path) and not os.path.exists(resolved_path):
+                        candidate = os.path.join(os.getcwd(), token)
+                        if os.path.exists(candidate):
+                            resolved_path = os.path.abspath(candidate)
+
+                    resolved_tokens.append(resolved_path)
+                else:
+                    # Keep flags and library names as-is
+                    resolved_tokens.append(token)
+
+            resolved_flag = ' '.join(resolved_tokens)
+
+            node = make_node(stream,
+                type='c_link',
+                library=resolved_flag
+            )
+            node['line'] = decl_line
+            return node
+
         # Check for #bytecode block at top level
         if stream.peek(1) == '#':
             stream.consume('#')
             directive = stream.consume_word()
 
-            if directive != 'bytecode':
-                raise SyntaxError(stream.format_error(f'Unknown directive at top level: #{directive}'))
+            if directive == 'bytecode':
+                # #bytecode { ... }
+                stream.strip()
+                if not stream.consume('{'):
+                    raise SyntaxError(stream.format_error('Expected "{" after #bytecode'))
 
-            # #bytecode { ... }
-            stream.strip()
-            if not stream.consume('{'):
-                raise SyntaxError(stream.format_error('Expected "{" after #bytecode'))
-
-            # Consume everything until matching }
-            bytecode_lines = []
-            depth = 1
-            current_line = ""
-            while depth > 0 and stream.text:
-                ch = stream.seek(1)
-                if ch == '{':
-                    depth += 1
-                    current_line += ch
-                elif ch == '}':
-                    depth -= 1
-                    if depth > 0:
+                # Consume everything until matching }
+                bytecode_lines = []
+                depth = 1
+                current_line = ""
+                while depth > 0 and stream.text:
+                    ch = stream.seek(1)
+                    if ch == '{':
+                        depth += 1
                         current_line += ch
-                    elif current_line.strip():
-                        bytecode_lines.append(current_line.strip())
-                elif ch == '\n':
-                    if current_line.strip():
-                        bytecode_lines.append(current_line.strip())
-                    current_line = ""
-                else:
-                    current_line += ch
+                    elif ch == '}':
+                        depth -= 1
+                        if depth > 0:
+                            current_line += ch
+                        elif current_line.strip():
+                            bytecode_lines.append(current_line.strip())
+                    elif ch == '\n':
+                        if current_line.strip():
+                            bytecode_lines.append(current_line.strip())
+                        current_line = ""
+                    else:
+                        current_line += ch
 
-            if depth != 0:
-                raise SyntaxError(stream.format_error('Unclosed #bytecode block'))
+                if depth != 0:
+                    raise SyntaxError(stream.format_error('Unclosed #bytecode block'))
 
-            node = make_node(stream,
-                type='bytecode_block',
-                bytecode=bytecode_lines
-            )
-            node['line'] = decl_line
-            return node
+                node = make_node(stream,
+                    type='bytecode_block',
+                    bytecode=bytecode_lines
+                )
+                node['line'] = decl_line
+                return node
+
+            else:
+                raise SyntaxError(stream.format_error(f'Unknown directive at top level: #{directive}'))
 
         # Get type and name
         type = stream.consume_word()
@@ -1398,7 +1823,6 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         # Ignore if empty (comment or blank line) - consume_word() already advanced the stream
         if not word.strip():
-            #import sys; print(f'DEBUG: Skipping empty line at {stmt_line}, remaining: {repr(stream.text[:50])}', file=sys.stderr)
             return None
 
         # Field assignment: obj.field = value (word is "obj.field")
@@ -1418,10 +1842,96 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 node['line'] = stmt_line
                 return node
 
-        # Func call
-        if word in funcs and stream.peek_char(1) == '(':
-            return parse_func_call(stream, word)
+        # Func call - check for function call syntax (allows C imports and undefined functions to be caught at compile time)
+        # But skip method calls (those with '.' in the name) - they're handled separately below
+        if stream.peek_char(1) == '(' and word not in ['if', 'while', 'for', 'switch', 'try', 'struct'] and '.' not in word:
+            # This looks like a function call
+            if word in funcs:
+                func_info = funcs[word]
 
+                # Parse the call
+                result = parse_func_call(stream, word)
+
+                # Validate argument count for C functions
+                if func_info.get('type') == 'c_function':
+                    expected = func_info.get('param_count', 0)
+                    actual = len(result.get('args', []))
+                    if actual != expected:
+                        param_names = ', '.join(p['type'] + ' ' + p['name'] for p in func_info.get('params', []))
+                        raise SyntaxError(stream.format_error(
+                            f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
+                            f"({param_names or 'void'}), got {actual}"
+                        ))
+
+                return result
+            else:
+                # Parse as generic function call (could be user-defined or C-imported)
+                stream.consume('(')
+                stream.strip()
+
+                args = []
+                current_arg = ''
+                depth = 0
+
+                while stream.text:
+                    ch = stream.text[0]
+
+                    if ch == '(':
+                        depth += 1
+                        current_arg += ch
+                    elif ch == ')':
+                        if depth == 0:
+                            # End of argument list
+                            if current_arg.strip():
+                                args.append(parse_expr(current_arg.strip()))
+                            stream._advance(1)
+                            break
+                        depth -= 1
+                        current_arg += ch
+                    elif ch == ',' and depth == 0:
+                        args.append(parse_expr(current_arg.strip()))
+                        current_arg = ''
+                    else:
+                        current_arg += ch
+
+                    stream._advance(1)
+
+                node = make_node(
+                    stream,
+                    type='call',
+                    name=word,
+                    args=args
+                )
+                node['line'] = stmt_line
+                return node
+
+
+
+        # Debug what comes after word
+        next_char = stream.text[0] if stream.text else 'EOF'
+
+        # Handle method calls: obj.method() where word is just "obj"
+        if stream.peek_char(1) == '.':
+            # This could be obj.method() or obj.field = value
+            # Consume the rest to check
+            remaining = stream.consume_until('\n').strip()
+
+            # Check if this is a method call by looking for '('
+            if '(' in remaining:
+                # Method call: obj.method(args)
+                full_expr = word + remaining
+                parsed = parse_expr(full_expr)
+                if isinstance(parsed, dict) and 'func' in parsed:
+                    return parsed
+                raise SyntaxError(stream.format_error(f'Invalid method call'))
+            else:
+                # Restore the stream - this is something else
+                # Put back the remaining text
+                stream.text = remaining + '\n' + stream.text
+                stream.char = 0
+                stream.line = stmt_line
+
+        # Handle expression statements like obj.attr.method() where word contains '.'
         elif '.' in word and stream.peek_char(1) == '(':
             # This is a method call on an object - parse the full expression
             full_expr = word + stream.consume_until('\n').strip()
@@ -1968,12 +2478,13 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
 
 def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
-    global loop_depth, vars, types
+    global loop_depth, vars, types, _imported_files
 
     # Reset global state for top-level parse
     if level == 0:
         loop_depth = 0
         vars = {}
+        _imported_files.clear()  # Reset import tracking for each top-level parse
 
     if not isinstance(text, InputStream):
         # Remove comments but preserve line numbers by replacing comment content with spaces
@@ -1998,6 +2509,10 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
 
     try:
         ast:AstType = []
+
+        # Add source file metadata as first node (for compiler)
+        if level == 0 and file:
+            ast.append({'type': 'metadata', 'source_file': file})
 
         while stream.text:
             # Strip whitespace before checking for scope end
