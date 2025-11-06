@@ -6,19 +6,16 @@ Focuses on reducing instruction count, eliminating redundant operations, and imp
 code efficiency for GCC -Ofast compilation.
 """
 
-from typing import List, Dict, Tuple, Optional
+from typing import List
 import re
 
 
 class AssemblyOptimizer:
     """Optimizes x86_64 assembly instruction sequences"""
 
-    def __init__(self, enable_simd: bool = True, enable_fma: bool = True, enable_bmi: bool = True):
+    def __init__(self):
         self.labels_used: set = set()  # Track which labels are actually jumped to
         self.label_counter: int = 0
-        self.enable_simd = enable_simd  # Enable SIMD/vectorization (SSE4.2+/AVX)
-        self.enable_fma = enable_fma    # Enable FMA3 (Fused Multiply-Add)
-        self.enable_bmi = enable_bmi    # Enable BMI/BMI2 (Bit Manipulation Instructions)
 
     def optimize(self, assembly: str) -> str:
         """Apply all optimization passes to assembly code"""
@@ -79,15 +76,13 @@ class AssemblyOptimizer:
         lines = self.use_cmov(lines)
 
         # Pass 19: Use FMA (Fused Multiply-Add) for a*b+c patterns
-        if self.enable_fma:
-            lines = self.use_fma(lines)
+        lines = self.use_fma(lines)
 
         # Pass 20: Add alignment hints for loops and functions
         lines = self.add_alignment_hints(lines)
 
         # Pass 21: Use bit manipulation instructions (BMI/BMI2)
-        if self.enable_bmi:
-            lines = self.use_bmi_instructions(lines)
+        lines = self.use_bmi_instructions(lines)
 
         # Pass 22: Optimize loop patterns (unrolling for small fixed loops)
         lines = self.optimize_loops(lines)
@@ -187,9 +182,6 @@ class AssemblyOptimizer:
 
         # Pass 50: Hoist constant loads out of loops
         lines = self.hoist_constant_loads_from_loops(lines)
-
-        # Pass 51: Ultra-optimize fibonacci pattern - keep everything in registers
-        lines = self.optimize_fibonacci_registers(lines)
 
         return '\n'.join(lines)
 
@@ -1978,15 +1970,16 @@ class AssemblyOptimizer:
                 if mem_match := re.match(r'mov rax, (\[.+\])', line):
                     mem_loc = mem_match[1]
 
-                    # Only skip the load if the last emitted non-comment instruction
-                    # is the same mov rax, [mem_loc]. This ensures rax still holds
-                    # the expected value and we won't skip when rax has been used/modified.
-                    last_non_comment = None
-                    for prev in reversed(result):
-                        if isinstance(prev, str) and prev.strip() and not prev.strip().startswith('#'):
-                            last_non_comment = prev.strip()
-                            break
-
+                    last_non_comment = next(
+                        (
+                            prev.strip()
+                            for prev in reversed(result)
+                            if isinstance(prev, str)
+                            and prev.strip()
+                            and not prev.strip().startswith('#')
+                        ),
+                        None,
+                    )
                     if last_non_comment == f"mov rax, {mem_loc}":
                         indent = self._get_indent(lines[i])
                         result.append(f"{indent}# Redundant load skipped: mov rax, {mem_loc}")
@@ -2534,191 +2527,7 @@ class AssemblyOptimizer:
 
         return result
 
-    def optimize_fibonacci_registers(self, lines: List[str]) -> List[str]:
-        # sourcery skip: merge-list-appends-into-extend
-        """Ultra-optimize fibonacci loop: keep a,b,c,i in registers, eliminate all memory ops"""
-        result = []
-        i = 0
-
-        while i < len(lines):
-            line = lines[i].strip()
-
-            # Detect fibonacci loop pattern - look for the loop label
-            # Match both old format (.Lfor_start2) and new function-scoped format (.Lfibonacci_for_start2)
-            if (line.startswith('.L') and 'for_start' in line and line.endswith(':')):
-                # Look ahead to detect the specific fibonacci pattern
-                # Pattern: LOAD2_CMP_LT 4 0, LOAD2_ADD_I64 1 2, MOD, FUSED_STORE_LOAD, INC_LOCAL 4
-                loop_start = i
-                loop_end = i + 1
-                
-                # Find loop end
-                while loop_end < len(lines) and not ('for_end' in lines[loop_end] and lines[loop_end].strip().endswith(':')):
-                    loop_end += 1
-                
-                # Check if this is fibonacci pattern (has MOD_CONST_I64 1000000)
-                is_fibonacci = False
-                for j in range(loop_start, min(loop_end, loop_start + 100)):
-                    if 'MOD_CONST_I64 1000000' in lines[j]:
-                        is_fibonacci = True
-                        break
-                
-                if is_fibonacci and loop_end - loop_start < 100:
-                    # Emit ultra-optimized fibonacci with maximum ILP
-                    indent = self._get_indent(lines[loop_start])
-                    
-                    # Extract the loop label suffix to make unique labels
-                    # Handle both .Lfor_start2 and .Lfibonacci_for_start2 formats
-                    loop_label = lines[loop_start].strip().rstrip(':')
-                    if 'for_start' in loop_label:
-                        # Extract everything after 'for_start'
-                        label_suffix = loop_label.split('for_start')[1]
-                    else:
-                        label_suffix = ''
-                    
-                    result.append(lines[loop_start])  # Keep loop label
-                    
-                    # Micro-optimizations:
-                    # 1. 12x unrolling for maximum ILP
-                    # 2. Branchless modulo using cmovl
-                    # 3. 64-byte cache-line alignment for i-cache
-                    result.append(f"{indent}# Ultra-optimized fibonacci (12x unroll, max ILP)")
-                    result.append(f"{indent}mov r8, [rbp - 8]   # n (loop limit)")
-                    result.append(f"{indent}mov r9, [rbp - 16]  # a")
-                    result.append(f"{indent}mov r10, [rbp - 24] # b")
-                    result.append(f"{indent}mov r11, [rbp - 40] # i (counter)")
-                    result.append(f"{indent}mov r12, 1000000    # modulo constant")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}# Check if we can do 12x unrolling")
-                    result.append(f"{indent}mov r13, r8")
-                    result.append(f"{indent}sub r13, 11")
-                    result.append(f"{indent}cmp r11, r13")
-                    result.append(f"{indent}jge .Lfib_scalar_loop{label_suffix}")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}.align 64  # Align loop to cache line")
-                    result.append(f"{indent}.Lfib_unrolled_loop{label_suffix}:")
-                    result.append(f"{indent}cmp r11, r13")
-                    result.append(f"{indent}jge .Lfib_scalar_loop{label_suffix}")
-                    result.append(f"{indent}")
-                    # 12x unroll for balance between code size and performance
-                    # Pattern: lea (add), save, sub, cmovl (branchless)
-                    result.append(f"{indent}# 12x unroll with branchless modulo")
-                    
-                    # Iterations 1-6
-                    result.append(f"{indent}lea rax, [r9 + r10]")
-                    result.append(f"{indent}mov r14, rax")
-                    result.append(f"{indent}sub rax, r12")
-                    result.append(f"{indent}cmovl rax, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rbx, [r10 + rax]")
-                    result.append(f"{indent}mov r14, rbx")
-                    result.append(f"{indent}sub rbx, r12")
-                    result.append(f"{indent}cmovl rbx, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rcx, [rax + rbx]")
-                    result.append(f"{indent}mov r14, rcx")
-                    result.append(f"{indent}sub rcx, r12")
-                    result.append(f"{indent}cmovl rcx, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rdx, [rbx + rcx]")
-                    result.append(f"{indent}mov r14, rdx")
-                    result.append(f"{indent}sub rdx, r12")
-                    result.append(f"{indent}cmovl rdx, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rsi, [rcx + rdx]")
-                    result.append(f"{indent}mov r14, rsi")
-                    result.append(f"{indent}sub rsi, r12")
-                    result.append(f"{indent}cmovl rsi, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rdi, [rdx + rsi]")
-                    result.append(f"{indent}mov r14, rdi")
-                    result.append(f"{indent}sub rdi, r12")
-                    result.append(f"{indent}cmovl rdi, r14")
-                    result.append(f"{indent}")
-                    
-                    # Iterations 7-12
-                    result.append(f"{indent}lea r15, [rsi + rdi]")
-                    result.append(f"{indent}mov r14, r15")
-                    result.append(f"{indent}sub r15, r12")
-                    result.append(f"{indent}cmovl r15, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rax, [rdi + r15]")
-                    result.append(f"{indent}mov r14, rax")
-                    result.append(f"{indent}sub rax, r12")
-                    result.append(f"{indent}cmovl rax, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rbx, [r15 + rax]")
-                    result.append(f"{indent}mov r14, rbx")
-                    result.append(f"{indent}sub rbx, r12")
-                    result.append(f"{indent}cmovl rbx, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea rcx, [rax + rbx]")
-                    result.append(f"{indent}mov r14, rcx")
-                    result.append(f"{indent}sub rcx, r12")
-                    result.append(f"{indent}cmovl rcx, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea r9, [rbx + rcx]")
-                    result.append(f"{indent}mov r14, r9")
-                    result.append(f"{indent}sub r9, r12")
-                    result.append(f"{indent}cmovl r9, r14")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}lea r10, [rcx + r9]")
-                    result.append(f"{indent}mov r14, r10")
-                    result.append(f"{indent}sub r10, r12")
-                    result.append(f"{indent}cmovl r10, r14")
-                    
-                    result.append(f"{indent}")
-                    result.append(f"{indent}add r11, 12")
-                    result.append(f"{indent}jmp .Lfib_unrolled_loop{label_suffix}")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}# Scalar loop with 4x unrolling for remainder")
-                    result.append(f"{indent}.Lfib_scalar_loop{label_suffix}:")
-                    result.append(f"{indent}mov r13, r8")
-                    result.append(f"{indent}sub r13, 3")
-                    result.append(f"{indent}cmp r11, r13")
-                    result.append(f"{indent}jge .Lfib_final_loop{label_suffix}")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}.Lfib_scalar_4x{label_suffix}:")
-                    # 4x unrolled scalar loop
-                    for i in range(4):
-                        result.append(f"{indent}lea rax, [r9 + r10]")
-                        result.append(f"{indent}mov rdx, rax")
-                        result.append(f"{indent}sub rax, r12")
-                        result.append(f"{indent}cmovl rax, rdx")
-                        result.append(f"{indent}mov r9, r10")
-                        result.append(f"{indent}mov r10, rax")
-                    result.append(f"{indent}add r11, 4")
-                    result.append(f"{indent}cmp r11, r13")
-                    result.append(f"{indent}jl .Lfib_scalar_4x{label_suffix}")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}.Lfib_final_loop{label_suffix}:")
-                    result.append(f"{indent}cmp r11, r8")
-                    result.append(f"{indent}jge .Lfib_opt_done{label_suffix}")
-                    result.append(f"{indent}lea rax, [r9 + r10]")
-                    result.append(f"{indent}mov rdx, rax")
-                    result.append(f"{indent}sub rax, r12")
-                    result.append(f"{indent}cmovl rax, rdx")
-                    result.append(f"{indent}mov r9, r10")
-                    result.append(f"{indent}mov r10, rax")
-                    result.append(f"{indent}inc r11")
-                    result.append(f"{indent}jmp .Lfib_final_loop{label_suffix}")
-                    result.append(f"{indent}")
-                    result.append(f"{indent}.Lfib_opt_done{label_suffix}:")
-                    result.append(f"{indent}# Store results back")
-                    result.append(f"{indent}mov [rbp - 16], r9  # a")
-                    result.append(f"{indent}mov [rbp - 24], r10 # b")
-                    result.append(f"{indent}mov [rbp - 40], r11 # i")
-                    
-                    # Skip to loop end
-                    i = loop_end
-                    continue
-
-            result.append(lines[i])
-            i += 1
-
-        return result
-
-
-def optimize_assembly(assembly: str, enable_simd: bool = True, enable_fma: bool = True, enable_bmi: bool = True) -> str:
+def optimize_assembly(assembly: str) -> str:
     """Main entry point for assembly optimization"""
-    optimizer = AssemblyOptimizer(enable_simd=enable_simd, enable_fma=enable_fma, enable_bmi=enable_bmi)
+    optimizer = AssemblyOptimizer()
     return optimizer.optimize(assembly)
