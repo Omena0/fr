@@ -9,6 +9,7 @@ code efficiency for GCC -Ofast compilation.
 from typing import List
 import re
 
+DISABLE_OPTIMIZATIONS = True
 
 class AssemblyOptimizer:
     """Optimizes x86_64 assembly instruction sequences"""
@@ -19,7 +20,11 @@ class AssemblyOptimizer:
 
     def optimize(self, assembly: str) -> str:
         """Apply all optimization passes to assembly code"""
+        if DISABLE_OPTIMIZATIONS:
+            return assembly
+
         lines = assembly.split('\n')
+
 
         # Pass 1: Track label usage (needed for later passes)
         self._track_label_usage(lines)
@@ -113,7 +118,7 @@ class AssemblyOptimizer:
         lines = self.optimize_modulo_by_constant(lines)
 
         # Pass 31: Reduce stack frame size based on actual usage
-        lines = self.optimize_stack_frame_size(lines)
+        #lines = self.optimize_stack_frame_size(lines)
 
         # Pass 32: Optimize global_vars allocation
         lines = self.optimize_global_vars_size(lines)

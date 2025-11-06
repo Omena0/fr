@@ -165,7 +165,7 @@ def _wait(pid: int) -> int:
     try:
         _, status = _os.waitpid(pid, 0)
         return _os.WEXITSTATUS(status)
-    except (OSError, ChildProcessError):
+    except OSError:
         return -1
 
 def _sleep(seconds: float) -> None:
@@ -315,9 +315,9 @@ def _py_call(module_name: str, func_name: str, *args):
     """Call a Python function from an imported module"""
     # Resolve alias if needed (runtime mode only)
     import runtime as runtime_module
-    if runtime_module.runtime and hasattr(runtime_module, 'py_imports'):
-        if module_name in runtime_module.py_imports:
-            import_info = runtime_module.py_imports[module_name]
+    if runtime_module.runtime and hasattr(runtime_module, 'py_imports'): #type: ignore
+        if module_name in runtime_module.py_imports:                     #type: ignore
+            import_info = runtime_module.py_imports[module_name]         #type: ignore
             if import_info.get('type') == 'name':
                 import_name = import_info['name']
                 func_name = import_name
