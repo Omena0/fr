@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
 ![AI Code](https://img.shields.io/badge/AI_code-59%25-red?logo=Github%20copilot)
 
-Simple bytecode compiled C-style scripting language.
+Simple bytecode compiled C-style compiled language.
 
 ## Installation
 
@@ -17,11 +17,10 @@ pip install frscript
 
 ## Features:
 - **Command line launcher** (`fr`)
+- **Compiled language** - Fast by design
 - **File and Socket I/O** - Low-level file operations and sockets.
 - **Multiprocessing**. - Easy threading with fork() and wait().
-- **Python integration** - You can use any Python libraries with Frscript.
 - **Aggressive optimization** - Bytecode-level optimizations. Faster than python.
-- **Stack-based VM** - Fast and memory efficient.
 - **Readable bytecode** - Optimize hot code manually
 
 ## What's New
