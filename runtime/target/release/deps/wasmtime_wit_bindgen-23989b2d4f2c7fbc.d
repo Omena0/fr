@@ -1,0 +1,10 @@
+/home/omena0/Github/frscript/runtime/target/release/deps/wasmtime_wit_bindgen-23989b2d4f2c7fbc.d: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/rust.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/source.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/types.rs
+
+/home/omena0/Github/frscript/runtime/target/release/deps/libwasmtime_wit_bindgen-23989b2d4f2c7fbc.rlib: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/rust.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/source.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/types.rs
+
+/home/omena0/Github/frscript/runtime/target/release/deps/libwasmtime_wit_bindgen-23989b2d4f2c7fbc.rmeta: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/rust.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/source.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/types.rs
+
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/lib.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/rust.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/source.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasmtime-wit-bindgen-26.0.1/src/types.rs:

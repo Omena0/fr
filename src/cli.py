@@ -58,13 +58,36 @@ def has_untyped_functions(ast):
                     return True
     return False
 
+
+def has_c_imports(ast):
+    return any(isinstance(node, dict) and node.get('type') == 'c_import' for node in ast)
+
+
+def load_ast_from_file(filepath):
+    file_type = detect_file_type(filepath)
+    if file_type == 'source':
+        with open(filepath) as f:
+            source = f.read()
+        return parse(source, file=filepath)
+    if file_type == 'json':
+        with open(filepath) as f:
+            return json.load(f)
+    if file_type == 'binary_ast':
+        with open(filepath, 'rb') as f:
+            return decode_binary(f.read())
+    raise ValueError('Input must be source (.fr), JSON AST, or binary AST file for wasm compilation')
+
 def detect_file_type(filepath):
-    """Detect if file is binary AST, bytecode, or JSON"""
+    """Detect if file is binary AST, bytecode, WASM, or JSON"""
     with open(filepath, 'rb') as f:
         header = f.read(8)
 
     if header[:4] == b'L2AS':
         return 'binary_ast'
+    
+    # Check for WASM magic number (0x00 0x61 0x73 0x6d)
+    if header[:4] == b'\x00asm':
+        return 'wasm'
 
     try:
         with open(filepath, 'r') as f:
@@ -101,13 +124,26 @@ def run_cmd(cmd, args):
         sys.exit(1)
 
     # Filter out flags to get program arguments
-    program_args = [arg for arg in args if arg not in ['-c', '--compile', '-py', '--python', '-O', '-O0', '--optimize', '--debug']]
+    excluded_flags = {'-c', '--compile', '-py', '--python', '-O', '-O0', '--optimize', '--debug'}
+    program_args = [arg for arg in args if arg not in excluded_flags]
 
     import tempfile
     import json
 
     # Detect file type and load/parse as needed
     file_type = detect_file_type(cmd)
+
+    # Handle WASM files specially - run with Rust runtime
+    if file_type == 'wasm':
+        runner_path = Path(__file__).parent.parent / 'runtime' / 'target' / 'release' / 'fr-wasm'
+        if not runner_path.exists():
+            print("Error: WASM runner not found. Build it with:", file=sys.stderr)
+            print("  cd runtime && cargo build --release", file=sys.stderr)
+            sys.exit(1)
+        
+        # Run the WASM file with program arguments
+        result = subprocess.run([str(runner_path), cmd] + program_args)
+        sys.exit(result.returncode)
 
     # Variables that will be populated based on file type
     ast = None
@@ -162,10 +198,8 @@ def run_cmd(cmd, args):
                 sys.exit(1)
 
             if force_py_backend or debug_mode:
-                # Determine if we can use C backend
-                has_c_imports = any(node.get('type') == 'c_import' for node in ast) if isinstance(ast, list) else False
-
                 # User forced Python backend
+                has_c_imports = any(node.get('type') == 'c_import' for node in ast) if isinstance(ast, list) else False
                 if has_c_imports:
                     print("Error: C imports require compilation, cannot use Python backend", file=sys.stderr)
                     sys.exit(1)
@@ -534,18 +568,133 @@ def native_cmd(args):
         traceback.print_exc()
         sys.exit(1)
 
+def wasm_cmd(args):
+    if len(args) < 1:
+        print("Usage: fr wasm <file.fr|ast.json|ast.bin> [-d] [-o output.wasm] [-r|--run]")
+        sys.exit(1)
+
+    input_file = args[0]
+    output_path = Path('out.wasm')
+    run_after = '-r' in args or '--run' in args
+    if '-o' in args:
+        idx = args.index('-o')
+        if idx + 1 >= len(args):
+            print("Error: -o requires a path", file=sys.stderr)
+            sys.exit(1)
+        output_path = Path(args[idx + 1])
+
+    try:
+        ast = load_ast_from_file(input_file)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if has_c_imports(ast):
+        print("Error: Wasm backend does not support C imports", file=sys.stderr)
+        sys.exit(1)
+
+    if has_untyped_functions(ast):
+        print("Error: Wasm backend requires typed functions", file=sys.stderr)
+        sys.exit(1)
+
+    # Compile AST to bytecode first
+    try:
+        bytecode, line_map = compile_ast_to_bytecode(ast)
+        if '-d' in args:
+            with open('out.bc', 'w') as f:
+                f.write(bytecode)
+
+    except Exception as e:
+        print(f"Compilation error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Compile bytecode to WebAssembly
+    try:
+        from wasm_compiler import compile_to_wasm
+        wat_code, metadata = compile_to_wasm(bytecode)
+    except Exception as e:
+        print(f"WebAssembly compilation error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Write WAT file
+    wat_path = output_path.with_suffix('.wat')
+    with open(wat_path, 'w') as f:
+        f.write(wat_code)
+    print(f"Generated WAT: {wat_path}")
+
+    # Write metadata file
+    metadata_path = output_path.with_suffix('.wasm.json')
+    metadata['source_file'] = input_file
+    metadata['line_map'] = line_map
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Generated metadata: {metadata_path}")
+
+    # Try to compile WAT to WASM using wat2wasm if available
+    try:
+        result = subprocess.run(
+            ['wat2wasm', str(wat_path), '-o', str(output_path)],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print(f"Compiled to WebAssembly: {output_path}")
+            metadata['wasm_binary'] = True
+            # Update metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+        else:
+            if result.stderr:
+                print(f"Error: {result.stderr}")
+            else:
+                print("Warning: wat2wasm failed. Install WABT to generate .wasm binary.")
+                print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
+
+            metadata['wasm_binary'] = False
+    except FileNotFoundError:
+        print("Note: wat2wasm not found. Install WABT to generate .wasm binary.")
+        print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
+        metadata['wasm_binary'] = False
+        # Update metadata
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+    # Clean up intermediate files if -d not specified
+    if '-d' not in args:
+        if wat_path.exists():
+            os.remove(wat_path)
+            os.remove(metadata_path)
+
+    # Run the WASM file if -r/--run specified
+    if run_after and metadata.get('wasm_binary'):
+        runner_path = Path(__file__).parent.parent / 'runtime' / 'target' / 'release' / 'fr-wasm'
+        if runner_path.exists():
+            print(f"\nRunning {output_path}:")
+            print("-" * 40)
+            result = subprocess.run([str(runner_path), str(output_path)])
+            sys.exit(result.returncode)
+        else:
+            print("\nError: WASM runner not found. Build it with:")
+            print("  cd runtime && cargo build --release")
+            sys.exit(1)
+
 def main():
     """Main CLI entry point"""
     if len(sys.argv) < 2:
         print("Fr - Fast bytecode-compiled language")
         print()
         print("Usage:")
-        print("  fr <file.fr> [-c] [-py|--python]")
+        print("  fr <.fr|.bc|.bin|.wasm> [-c] [-py|--python]")
         print("                                    -c: Force C runtime")
         print("                                   -py: Force Python runtime")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file> [-o out.bc] - Compile to bytecode")
         print("  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary")
+        print("  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] - Compile typed module to Wasm")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -557,6 +706,8 @@ def main():
         compile_cmd(args)
     elif cmd == 'native':
         native_cmd(args)
+    elif cmd == 'wasm':
+        wasm_cmd(args)
     elif cmd == 'encode':
         encode_cmd(args)
     elif cmd == 'decode':

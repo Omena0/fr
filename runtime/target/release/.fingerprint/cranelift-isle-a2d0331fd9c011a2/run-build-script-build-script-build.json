@@ -1,0 +1,1 @@
+{"rustc":10821499597519415711,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[6115838462932701228,"build_script_build",false,1738973705213559634]],"local":[{"RerunIfChanged":{"output":"release/build/cranelift-isle-a2d0331fd9c011a2/output","paths":["build.rs","isle_examples"]}}],"rustflags":[],"config":0,"compile_kind":0}

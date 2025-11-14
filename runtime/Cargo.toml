@@ -1,0 +1,11 @@
+[package]
+name = "fr-wasm-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fr-wasm"
+path = "wasm_runner.rs"
+
+[dependencies]
+wasmtime = "26.0"

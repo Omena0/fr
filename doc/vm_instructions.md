@@ -65,7 +65,7 @@ Push a boolean constant onto the stack.
 
 Push multiple int64 constants onto the stack.
 
-**Syntax:** `CONST_I64_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_I64_MULTI <val1> <val2> ...`
 
 **Stack:** `-> int64 int64 ...`
 
@@ -73,7 +73,7 @@ Push multiple int64 constants onto the stack.
 
 Push multiple float64 constants onto the stack.
 
-**Syntax:** `CONST_F64_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_F64_MULTI <val1> <val2> ...`
 
 **Stack:** `-> float64 float64 ...`
 
@@ -81,7 +81,7 @@ Push multiple float64 constants onto the stack.
 
 Push multiple string constants onto the stack.
 
-**Syntax:** `CONST_STR_MULTI <count> <str1> <str2> ...`
+**Syntax:** `CONST_STR_MULTI <str1> <str2> ...`
 
 **Stack:** `-> string string ...`
 
@@ -89,7 +89,7 @@ Push multiple string constants onto the stack.
 
 Push multiple boolean constants onto the stack.
 
-**Syntax:** `CONST_BOOL_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_BOOL_MULTI <val1> <val2> ...`
 
 **Stack:** `-> bool bool ...`
 
@@ -143,7 +143,7 @@ Pop a value from the stack and store it in a global variable.
 
 Store integer constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_I64 <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_I64 <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -151,7 +151,7 @@ Store integer constants directly to variable slots without using the stack.
 
 Store float constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_F64 <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_F64 <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -159,7 +159,7 @@ Store float constants directly to variable slots without using the stack.
 
 Store boolean constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_BOOL <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_BOOL <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -167,7 +167,7 @@ Store boolean constants directly to variable slots without using the stack.
 
 Store string constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_STR <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_STR <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -199,7 +199,7 @@ Alias one local variable to another (pointer alias, not a copy).
 
 Load multiple variables onto the stack at once.
 
-**Syntax:** `LOAD_MULTI <count> <var1> <var2> ...`
+**Syntax:** `LOAD_MULTI <var1> <var2> ...`
 
 **Stack:** `-> value1 value2 ...`
 
@@ -207,7 +207,7 @@ Load multiple variables onto the stack at once.
 
 Interleaved load/store operations.
 
-**Syntax:** `FUSED_LOAD_STORE <count> <src1> <dst1> <src2> <dst2> ...`
+**Syntax:** `FUSED_LOAD_STORE <src1> <dst1> <src2> <dst2> ...`
 
 **Stack:** `->`
 
@@ -215,7 +215,7 @@ Interleaved load/store operations.
 
 Interleaved store/load operations.
 
-**Syntax:** `FUSED_STORE_LOAD <count> <dst1> <src1> <dst2> <src2> ...`
+**Syntax:** `FUSED_STORE_LOAD <dst1> <src1> <dst2> <src2> ...`
 
 **Stack:** `->`
 

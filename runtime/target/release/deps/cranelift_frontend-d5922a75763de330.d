@@ -1,0 +1,14 @@
+/home/omena0/Github/frscript/runtime/target/release/deps/cranelift_frontend-d5922a75763de330.d: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend/safepoints.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/ssa.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/switch.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/variable.rs
+
+/home/omena0/Github/frscript/runtime/target/release/deps/libcranelift_frontend-d5922a75763de330.rlib: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend/safepoints.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/ssa.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/switch.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/variable.rs
+
+/home/omena0/Github/frscript/runtime/target/release/deps/libcranelift_frontend-d5922a75763de330.rmeta: /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/lib.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend/safepoints.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/ssa.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/switch.rs /home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/variable.rs
+
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/lib.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/frontend/safepoints.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/ssa.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/switch.rs:
+/home/omena0/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-frontend-0.113.1/src/variable.rs:
+
+# env-dep:CARGO_PKG_VERSION=0.113.1

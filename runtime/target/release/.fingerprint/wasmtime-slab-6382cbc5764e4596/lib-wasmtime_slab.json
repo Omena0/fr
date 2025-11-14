@@ -1,0 +1,1 @@
+{"rustc":10821499597519415711,"features":"[]","declared_features":"[]","target":15117923418851484450,"profile":15667538880884542001,"path":799173864291111775,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/wasmtime-slab-6382cbc5764e4596/dep-lib-wasmtime_slab","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}

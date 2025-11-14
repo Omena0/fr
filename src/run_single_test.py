@@ -6,6 +6,7 @@ Test content is read from stdin.
 """
 import sys
 import os
+import shutil
 import tempfile
 import subprocess
 from io import StringIO
@@ -140,6 +141,7 @@ def main():
     skip_py = '--skip-py' in original_argv
     skip_c = '--skip-c' in original_argv
     skip_native = '--skip-native' in original_argv
+    skip_wasm = '--skip-wasm' in original_argv
 
     # Test content is read from stdin
     content = sys.stdin.read()
@@ -532,6 +534,36 @@ def main():
         native_error = "SKIPPED"
         native_error = "SKIPPED"
 
+    # Run Wasm emission command (unless skipped)
+    wasm_error = None
+    wasm_output = None
+    if skip_wasm:
+        wasm_error = "SKIPPED"
+    else:
+        wasm_dir = tempfile.mkdtemp(prefix='fr-wasm-')
+        wasm_dest = Path(wasm_dir) / 'output.wasm'
+        wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', test_path, '-o', str(wasm_dest)]
+        try:
+            result = subprocess.run(
+                wasm_command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(repo_root)
+            )
+            output_text = result.stdout.strip() if result.stdout else ''
+            if result.returncode != 0:
+                stderr_text = result.stderr.strip() if result.stderr else output_text
+                wasm_error = extract_error_message(stderr_text)
+            else:
+                wasm_output = output_text
+        except subprocess.TimeoutExpired:
+            wasm_error = "Timeout"
+        except Exception as exc:
+            wasm_error = str(exc)
+        finally:
+            shutil.rmtree(wasm_dir, ignore_errors=True)
+
     # Output results
     if py_error and py_error != "SKIPPED":
         print(f"PY_ERROR:{py_error}")
@@ -582,6 +614,15 @@ def main():
     else:
         # No output and no error
         print("NATIVE_OUTPUT:")
+
+    # Wasm command output (compile-only, no expectation match)
+    if wasm_error == "SKIPPED":
+        pass
+    elif wasm_error:
+        print(f"WASM_ERROR:{wasm_error}")
+    else:
+        escaped_wasm = wasm_output.replace('\\', '\\\\').replace('\n', '\\n') if wasm_output is not None else ''
+        print(f"WASM_OUTPUT:{escaped_wasm}")
 
     escaped_expect = expect.replace('\\', '\\\\').replace('\n', '\\n')
     print(f"EXPECT:{escaped_expect}")

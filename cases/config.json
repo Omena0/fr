@@ -29,5 +29,16 @@
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
+    },
+    "wasm": {
+        "enabled": true,
+        "timeout": 10,
+        "ignore": [
+            "syntax_errors",
+            "runtime",
+            "python_interop"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
     }
 }

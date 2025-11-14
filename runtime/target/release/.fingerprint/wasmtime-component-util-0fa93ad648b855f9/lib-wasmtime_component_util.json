@@ -1,0 +1,1 @@
+{"rustc":10821499597519415711,"features":"[]","declared_features":"[]","target":15409008901136653718,"profile":2040997289075261528,"path":3965331151483107520,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/wasmtime-component-util-0fa93ad648b855f9/dep-lib-wasmtime_component_util","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}
