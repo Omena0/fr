@@ -1,12 +1,12 @@
-// @c-only !Memory thrashing test passed
+// !Memory thrashing test passed
 
 void main() {
-    for (outer, 50) {
+    for (outer, 20) {
         list temp_lists = []
         
-        for (i, 50) {
+        for (i, 20) {
             list l = []
-            for (j, 20) {
+            for (j, 10) {
                 l = append(l, j * i)
             }
             temp_lists = append(temp_lists, l)

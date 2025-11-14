@@ -1,4 +1,4 @@
-// @c-only !Modulo edge cases test passed
+// !Modulo edge cases test passed
 
 void main() {
     int a = -10 % 3

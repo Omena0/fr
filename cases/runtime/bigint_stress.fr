@@ -1,4 +1,4 @@
-// @c-only !Bigint stress test passed
+// !Bigint stress test passed
 
 void main() {
     int x = 2 ** 100

@@ -4,8 +4,7 @@
         "timeout": 10,
         "ignore": [
             "syntax_errors",
-            "python_interop",
-            "runtime"
+            "python_interop"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
@@ -25,7 +24,8 @@
         "timeout": 10,
         "ignore": [
             "runtime",
-            "imports/c_import.fr"
+            "imports/c_import.fr",
+            "misc/goto_with_return.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

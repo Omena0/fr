@@ -358,7 +358,7 @@ def main():
     print()
 
     # Run tests in parallel
-    max_workers = 12
+    max_workers = 18
     results = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:

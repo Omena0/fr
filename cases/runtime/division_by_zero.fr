@@ -1,4 +1,4 @@
-// @c-only !Division by zero handled
+// !Division by zero handled
 
 void main() {
     float x = 10.0

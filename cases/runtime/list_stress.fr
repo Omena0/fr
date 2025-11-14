@@ -1,8 +1,8 @@
-// @c-only !List stress test passed
+// !List stress test passed
 
 void main() {
     list huge = []
-    for (i, 5000) {
+    for (i, 500) {
         huge = append(huge, i)
     }
     

@@ -838,11 +838,14 @@ class BytecodeCompiler:
                             elif var_name in self.py_imports:
                                 is_module = True
 
-                        elif isinstance(value_node, dict) and ('func' in value_node or value_node.get('type') == 'call'):
-                            # The value is itself a method/function call that might return a pyobject
-                            # For example: hashlib.md5(password).hexdigest()
-                            # We need to compile the inner call first, then call the method on the result
-                            is_pyobject = True  # Assume it returns a pyobject
+                        elif isinstance(value_node, dict):
+                            func_node = value_node.get('func')
+                            func_name = None
+                            if isinstance(func_node, dict):
+                                func_name = func_node.get('id') or func_node.get('attr')
+                            if func_name in ('py_call', 'py_call_method', 'py_getattr', 'py_setattr'):
+                                # The inner call produces a python object
+                                is_pyobject = True
 
                         if is_module:
                             # Module function call: ui.Window() where ui is an imported module
@@ -2282,7 +2285,14 @@ class BytecodeCompiler:
         for node in ast:
             if node.get('type') == 'function':
                 results.append("")
-                results.append(f"# {node['return']} {node['name']}({', '.join([' '.join(arg) for arg in node['args']])}) {{")
+                arg_strings = []
+                for arg in node.get('args', []):
+                    if isinstance(arg, (list, tuple)):
+                        parts = [str(part) for part in arg if part is not None]
+                        arg_strings.append(' '.join(parts))
+                    else:
+                        arg_strings.append(str(arg))
+                results.append(f"# {node['return']} {node['name']}({', '.join(arg_strings)}) {{")
                 func_name = node.get('name', '')
 
                 # Pass global variables to main function
