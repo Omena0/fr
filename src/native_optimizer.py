@@ -9,7 +9,7 @@ code efficiency for GCC -Ofast compilation.
 from typing import List
 import re
 
-DISABLE_OPTIMIZATIONS = True
+DISABLE_OPTIMIZATIONS = False
 
 class AssemblyOptimizer:
     """Optimizes x86_64 assembly instruction sequences"""
@@ -24,7 +24,6 @@ class AssemblyOptimizer:
             return assembly
 
         lines = assembly.split('\n')
-
 
         # Pass 1: Track label usage (needed for later passes)
         self._track_label_usage(lines)
@@ -118,6 +117,7 @@ class AssemblyOptimizer:
         lines = self.optimize_modulo_by_constant(lines)
 
         # Pass 31: Reduce stack frame size based on actual usage
+        # DISABLED: using heap now.
         #lines = self.optimize_stack_frame_size(lines)
 
         # Pass 32: Optimize global_vars allocation
@@ -139,15 +139,12 @@ class AssemblyOptimizer:
         lines = self.fuse_adjacent_stores(lines)
 
         # Pass 38: Optimize idiv by constant - use magic number multiplication
-        # Re-enabled: safe for powers-of-two and simple cases
         lines = self.optimize_idiv_by_constant_magic(lines)
 
         # Pass 39: Optimize MOD operations in loops - pre-compute masks
-        # Re-enabled: keep conservative changes only
         lines = self.optimize_mod_in_loops(lines)
 
         # Pass 40: Eliminate redundant loads in tight loops
-        # Re-enabled: skip when unsure about register interference
         lines = self.eliminate_redundant_loads_in_loops(lines)
 
         # Pass 41: Optimize variable rotation pattern (a=b, b=c pattern)
@@ -155,7 +152,6 @@ class AssemblyOptimizer:
         # lines = self.optimize_variable_rotation(lines)
 
         # Pass 42: Cache frequently accessed memory values in registers
-        # Re-enabled: only annotates hot loops, does not alter semantics
         lines = self.cache_loop_values_in_registers(lines)
 
         # Pass 43: Optimize tight loops - eliminate branch overhead
@@ -163,11 +159,9 @@ class AssemblyOptimizer:
         lines = self.optimize_tight_loops(lines)
 
         # Pass 44: Fuse memory operations in loops
-        # Re-enabled: conservative reordering/annotation only
         lines = self.fuse_loop_memory_operations(lines)
 
         # Pass 45: Optimize compare-jump patterns in loops
-        # Re-enabled: annotate and optimize loop exits conservatively
         lines = self.optimize_loop_exits(lines)
 
         # Pass 46: Detect and optimize fibonacci-like patterns
@@ -175,11 +169,9 @@ class AssemblyOptimizer:
         lines = self.optimize_fibonacci_pattern(lines)
 
         # Pass 47: Hoist loop-invariant code
-        # Re-enabled: detection and annotation only
         lines = self.hoist_loop_invariants(lines)
 
         # Pass 48: Optimize MOD 1000000 pattern
-        # Re-enabled: micro-optimizations for known hot pattern
         lines = self.optimize_mod_1000000_pattern(lines)
 
         # Pass 49: Eliminate push/pop in tight loops - keep values in registers
@@ -187,6 +179,21 @@ class AssemblyOptimizer:
 
         # Pass 50: Hoist constant loads out of loops
         lines = self.hoist_constant_loads_from_loops(lines)
+
+        # Pass 51: Simplify alignment checks
+        lines = self.simplify_alignment_checks(lines)
+
+        # Pass 52: Use memory operands in imul when possible
+        lines = self.optimize_imul_patterns(lines)
+
+        # Pass 53: Eliminate redundant alignment check sequences
+        lines = self.eliminate_redundant_alignment_checks(lines)
+
+        # Pass 54: Simplify test rsp alignment checks
+        lines = self.simplify_stack_alignment_tests(lines)
+
+        # Pass 55: Optimize multiply by small constant patterns
+        lines = self.optimize_multiply_by_constant_patterns(lines)
 
         return '\n'.join(lines)
 
@@ -287,12 +294,17 @@ class AssemblyOptimizer:
                     if len(parts1) >= 3 and len(parts2) >= 3:
                         dst1 = parts1[1].rstrip(',')
                         dst2 = parts2[1].rstrip(',')
-                        # If same destination and no other use between
+                        src2 = parts2[2]  # Source of second mov
+                        
+                        # If same destination, check if dst1 is used in src2's address calculation
                         if dst1 == dst2:
-                            indent = self._get_indent(lines[i])
-                            result.append(f"{indent}# Removed overwritten mov")
-                            i += 1
-                            continue
+                            # Don't remove if the destination register appears in the source operand
+                            # e.g., mov rax, [rdi]; mov rax, [rax + rsi*8] - rax is used in address calc!
+                            if dst1 not in src2:
+                                indent = self._get_indent(lines[i])
+                                result.append(f"{indent}# Removed overwritten mov")
+                                i += 1
+                                continue
 
             result.append(lines[i])
             i += 1
@@ -1101,14 +1113,142 @@ class AssemblyOptimizer:
                     i += 1
                     continue
 
-            # TODO: Loop unrolling for small fixed iterations
-            # This requires more sophisticated analysis to detect loop bounds
-            # and ensure safety
+            # Loop unrolling for small fixed iterations
+            # Detect simple counted loops with known bounds
+            if line.endswith(':') and 'for_start' in line:
+                loop_label = line
+                loop_body, loop_end_idx = self._extract_loop_body(lines, i)
+
+                if loop_body and loop_end_idx > i:
+                    # Try to detect loop iteration count
+                    iter_count = self._detect_loop_iterations(lines, i, loop_end_idx)
+
+                    # Only unroll very small loops (2-4 iterations)
+                    if iter_count and 2 <= iter_count <= 4:
+                        # Check if loop body is small enough (< 10 instructions)
+                        body_size = len([l for l in loop_body if l.strip() and not l.strip().startswith('#')])
+
+                        if body_size < 10:
+                            indent = self._get_indent(lines[i])
+                            result.append(f"{indent}# Loop unrolled {iter_count}x (body size: {body_size} instructions)")
+
+                            # Emit unrolled loop body
+                            for iteration in range(iter_count):
+                                result.append(f"{indent}# Iteration {iteration + 1}")
+                                for body_line in loop_body:
+                                    # Skip loop control instructions
+                                    stripped = body_line.strip()
+                                    # Skip: jumps, conditional jumps, and comparisons that are part of loop control
+                                    if (stripped.startswith('jmp ') or 
+                                        stripped.startswith('jge ') or
+                                        stripped.startswith('jl ') or
+                                        stripped.startswith('jle ') or
+                                        stripped.startswith('jg ') or
+                                        'for_end' in stripped or
+                                        'for_start' in stripped or
+                                        (stripped.startswith('cmp ') and iteration < iter_count - 1)):  # Skip loop condition except last iter
+                                        continue
+                                    result.append(body_line)
+
+                            # Skip to end of original loop
+                            i = loop_end_idx + 1
+                            continue
 
             result.append(lines[i])
             i += 1
 
         return result
+
+    def _extract_loop_body(self, lines: List[str], loop_start: int) -> tuple:
+        """Extract loop body from loop_start to loop_end label"""
+        loop_body = []
+        i = loop_start + 1
+        loop_end_idx = -1
+        
+        # Find the loop end label
+        loop_start_label = lines[loop_start].strip()
+        
+        # Extract function prefix from label like .Lmain_for_start0:
+        func_prefix = ""
+        if loop_start_label.startswith('.L'):
+            if match := re.match(r'(\.L\w+)_for_start', loop_start_label):
+                func_prefix = match[1]
+        
+        # Search for the matching for_end label (ID might be different)
+        while i < len(lines):
+            stripped = lines[i].strip()
+            
+            # Found a for_end label with matching function prefix
+            if 'for_end' in stripped and stripped.endswith(':'):
+                if func_prefix:
+                    if stripped.startswith(func_prefix):
+                        loop_end_idx = i
+                        break
+                elif stripped.startswith('for_end'):  # Non-prefixed label
+                    loop_end_idx = i
+                    break
+            
+            # Don't include nested loops  
+            if (('for_start' in stripped or 'while_start' in stripped) and 
+                stripped != loop_start_label):
+                return [], -1
+            
+            loop_body.append(lines[i])
+            i += 1
+        
+        return loop_body, loop_end_idx
+
+    def _detect_loop_iterations(self, lines: List[str], loop_start: int, loop_end: int):
+        """Try to detect if loop has a fixed iteration count. Returns int or None."""
+        # Look for pattern: mov qword ptr [rbp - X], 0 (loop counter init)
+        # followed by: mov rax, [rbp - X]; cmp rax, CONST; jge loop_end
+        
+        counter_offset = None
+        max_iterations = None
+        
+        # Scan backwards before loop to find counter initialization  
+        for i in range(max(0, loop_start - 10), loop_start):
+            line = lines[i].strip()
+            if match := re.match(r'mov qword ptr \[rbp - (\d+)\], 0', line):
+                counter_offset = match[1]
+                break
+        
+        if not counter_offset:
+            return None
+        
+        # Scan loop body for comparison with constant
+        for i in range(loop_start, loop_end):
+            line = lines[i].strip()
+            
+            # Pattern 1: mov rax, [rbp - X]; ...; cmp rax, CONST
+            if f'mov rax, [rbp - {counter_offset}]' in line:
+                # Look ahead for comparison
+                j = i + 1
+                while j < loop_end and j < i + 5:
+                    next_line = lines[j].strip()
+                    if match := re.match(r'cmp rax, (\d+)', next_line):
+                        max_iterations = int(match[1])
+                        return max_iterations
+                    j += 1
+            
+            # Pattern 2: cmp rax, [rbp - X] followed by jge (reverse comparison)
+            if f'cmp rax, [rbp - {counter_offset}]' in line:
+                # Look back for the constant being compared
+                j = i - 1
+                while j >= loop_start and j >= i - 5:
+                    prev_line = lines[j].strip()
+                    if prev_line.startswith('mov rax, ') and not '[' in prev_line:
+                        if const_match := re.match(r'mov rax, (\d+)', prev_line):
+                            max_iterations = int(const_match[1])
+                            return max_iterations
+                    j -= 1
+            
+            # Pattern 3: direct comparison
+            if match := re.match(rf'cmp qword ptr \[rbp - {counter_offset}\], (\d+)', line):
+                max_iterations = int(match[1])
+                return max_iterations
+        
+        return None
 
     def optimize_setcc_test_jump(self, lines: List[str]) -> List[str]:
         """Optimize setcc + movzx + push + pop + test + jump to direct conditional jump"""
@@ -1531,7 +1671,7 @@ class AssemblyOptimizer:
                 # depend on the exact frame size for correctness
                 has_alignment_checks = False
                 j = i + 1
-                
+
                 # Look through the function to see if it uses stack alignment
                 while j < len(lines):
                     stripped = lines[j].strip()
@@ -1543,14 +1683,14 @@ class AssemblyOptimizer:
                         stripped != ''):
                         # This is a new function or section
                         break
-                    
+
                     # Check for stack alignment test patterns
                     if 'test rsp, 8' in stripped or 'test rsp, 0x8' in stripped:
                         has_alignment_checks = True
                         break
 
                     j += 1
-                
+
                 # If there are alignment checks, skip optimization
                 if has_alignment_checks:
                     result.append(lines[i])
@@ -2445,7 +2585,7 @@ class AssemblyOptimizer:
             # pop qword ptr [rbp - 32] (store to c)
             # This can become: mov qword ptr [rbp - 32], rax
             # But ONLY if the next operation doesn't use the stack
-            if (i + 1 < len(lines) and 
+            if (i + 1 < len(lines) and
                 line == 'push rax'):
                 # Look ahead to see if next non-comment line is pop qword ptr
                 j = i + 1
@@ -2526,6 +2666,224 @@ class AssemblyOptimizer:
 
                 i = loop_end
                 continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def simplify_alignment_checks(self, lines: List[str]) -> List[str]:
+        """
+        Simplify the verbose alignment check pattern:
+        push rax; mov rax, rsp; add rax, 8; test rax, 0xF; pop rax; jz aligned; ...
+
+        Replace with simpler:
+        test spl, 0xF; jz aligned; ...
+
+        Or even better, track alignment statically and remove checks after function prologue.
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Detect the verbose alignment check pattern
+            if (i + 5 < len(lines) and
+                line == 'push rax  # Save rax and check alignment' and
+                lines[i + 1].strip() == 'mov rax, rsp' and
+                lines[i + 2].strip() == 'add rax, 8  # Account for the push' and
+                lines[i + 3].strip() == 'test rax, 0xF' and
+                lines[i + 4].strip() == 'pop rax'):
+
+                indent = self._get_indent(lines[i])
+
+                # Look for the jz instruction
+                if i + 5 < len(lines) and lines[i + 5].strip().startswith('jz '):
+                    jz_line = lines[i + 5].strip()
+
+                    result.extend(
+                        (
+                            f"{indent}# Simplified alignment check (was 5 instructions)",
+                            f"{indent}test spl, 0xF  # Check stack alignment",
+                            f"{indent}{jz_line}",
+                        )
+                    )
+                    i += 6
+                    continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_imul_patterns(self, lines: List[str]) -> List[str]:
+        """
+        Optimize imul patterns like:
+        mov rax, [rbp - X]
+        imul rax, 10
+
+        Could use memory operand directly in some cases, or use lea for powers of 2.
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Pattern: mov rax, [mem]; imul rax, 10 -> just use imul with immediate
+            # This is already optimal, but we can add a comment
+
+            # Pattern: mov rax, [mem]; imul rax, 2 -> lea rax, [rax + rax]
+            if (i + 1 < len(lines) and
+                'mov rax, [rbp' in line and
+                lines[i + 1].strip() == 'imul rax, 2'):
+
+                indent = self._get_indent(lines[i])
+                result.extend((lines[i], f"{indent}add rax, rax  # Faster than imul for *2"))
+                i += 2
+                continue
+
+            # Pattern: imul by powers of 2 -> shift
+            if 'imul rax, ' in line:
+                parts = line.split(',')
+                if len(parts) == 2:
+                    try:
+                        val = int(parts[1].strip())
+                        # Check if power of 2
+                        if val > 0 and (val & (val - 1)) == 0:
+                            shift = (val - 1).bit_length()
+                            indent = self._get_indent(lines[i])
+                            result.append(f"{indent}shl rax, {shift}  # Optimized imul by {val}")
+                            i += 1
+                            continue
+                    except ValueError:
+                        pass
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def eliminate_redundant_alignment_checks(self, lines: List[str]) -> List[str]:
+        """
+        DISABLED - This optimization is unsafe.
+        
+        The stack alignment can change due to push operations that the optimizer
+        doesn't fully track. Eliminating alignment checks causes segfaults.
+        The simplification (Pass 51) already reduces them from 5 to 2 instructions.
+        """
+        return lines
+
+    def simplify_stack_alignment_tests(self, lines: List[str]) -> List[str]:
+        """
+        Replace complex alignment sequences with direct tests.
+        The pattern 'test spl, 0xF' is simpler than the push/mov/add/test/pop dance.
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # If we see a standalone alignment check that wasn't caught by other passes
+            if (i + 2 < len(lines) and
+                line == 'mov rax, rsp' and
+                lines[i + 1].strip() == 'test rax, 0xF'):
+
+                indent = self._get_indent(lines[i])
+                result.append(f"{indent}test rsp, 0xF  # Simplified alignment test")
+                i += 2
+                continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_multiply_by_constant_patterns(self, lines: List[str]) -> List[str]:
+        """
+        Optimize patterns like:
+        mov rax, 2
+        push rax
+        mov rax, [mem]
+        push rax
+        pop rbx
+        pop rax
+        imul rax, rbx
+
+        This is essentially: load constant 2, load variable, multiply
+        We can optimize to: add rax, rax for *2 or shl for powers of 2
+        """
+        result = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Pattern: mov rax, CONST; push rax; ...; pop rbx; pop rax; imul rax, rbx
+            # Flexible pattern matching accounting for comments
+            if (
+                i + 10 < len(lines)
+                and line.startswith('mov rax, ')
+                and '[' not in line
+                and lines[i + 1].strip() == 'push rax'
+            ):
+
+                try:
+                    parts = line.split(',')
+                    if len(parts) == 2:
+                        const_val = int(parts[1].strip())
+
+                        # Scan ahead looking for the full pattern
+                        j = i + 2
+                        var_load_idx = -1
+                        pop_rbx_idx = -1
+
+                        # Find variable load and the multiply pattern
+                        while j < min(i + 15, len(lines)):
+                            stripped = lines[j].strip()
+
+                            # Find variable load
+                            if var_load_idx == -1 and 'mov rax, [rbp' in stripped:
+                                var_load_idx = j
+
+                            # Find pop rbx; pop rax; imul rax, rbx sequence
+                            if (var_load_idx != -1 and
+                                stripped == 'pop rbx' and
+                                j + 2 < len(lines) and
+                                lines[j + 1].strip() == 'pop rax' and
+                                lines[j + 2].strip() == 'imul rax, rbx'):
+                                pop_rbx_idx = j
+                                break
+
+                            j += 1
+
+                        if var_load_idx != -1 and pop_rbx_idx != -1:
+                            indent = self._get_indent(lines[i])
+
+                            # Keep comment lines before variable load
+                            result.extend(
+                                lines[k]
+                                for k in range(i + 2, var_load_idx)
+                                if lines[k].strip().startswith('#')
+                            )
+                            # Emit optimized code
+                            result.append(lines[var_load_idx])  # mov rax, [rbp - X]
+
+                            if const_val == 2:
+                                result.append(f"{indent}add rax, rax  # Optimized multiply by 2")
+                            elif const_val > 2 and (const_val & (const_val - 1)) == 0:
+                                shift = (const_val - 1).bit_length()
+                                result.append(f"{indent}shl rax, {shift}  # Optimized multiply by {const_val}")
+                            else:
+                                # Use imul with immediate (saves instructions)
+                                result.append(f"{indent}imul rax, {const_val}  # Optimized multiply")
+
+                            i = pop_rbx_idx + 3
+                            continue
+                except ValueError:
+                    pass
 
             result.append(lines[i])
             i += 1

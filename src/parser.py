@@ -31,6 +31,9 @@ builtin_func_names = set(funcs.keys())
 # Track imported files to prevent circular imports
 _imported_files: set[str] = set()
 
+# Track if #pragma no_eval is active - disables constant evaluation at parse time
+disable_eval: bool = False
+
 def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     with open(c_file, 'r') as f:
         content = f.read()
@@ -367,6 +370,9 @@ def _has_operators_outside_context(text: str) -> bool:
 
 def parse_literal(text: str) -> dict[str, str|Any] | Any:
     """Parse a literal value (string, number, bool, list, set) or return text if it's a variable/expression."""
+    if not isinstance(text, str):
+        return text
+    
     text = text.strip()
 
     # Set literal: {1, 2, 3} - must check before list to distinguish from dict
@@ -811,6 +817,10 @@ def parse_expr(text: str):
 
         # Try to evaluate constant expressions at parse time
         try:
+            # Skip evaluation if #pragma no_eval is active
+            if disable_eval:
+                return expr_dict
+            
             # Don't evaluate if it contains variable references (unless it's a set/list literal)
             is_set_or_list_literal = expr_dict.get('type') in ('set', 'list')
             if not is_set_or_list_literal and _contains_variable_refs(expr_dict):
@@ -1351,6 +1361,16 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
     global loop_depth
     stream.strip()
 
+    # Handle pragma directives (they're already processed in parse(), just skip them here)
+    if stream.peek(1) == '#' and stream.text.lstrip().startswith('#pragma'):
+        # Consume the entire pragma line
+        while stream.text and stream.text[0] not in '\n':
+            stream.consume(stream.text[0])
+        # Skip the newline too
+        if stream.text and stream.text[0] == '\n':
+            stream.consume('\n')
+        return SkipNode
+
     # Either a variable or a function def
     if level == 0:
         # Save line after stripping, before consuming anything
@@ -1435,13 +1455,21 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     stream.consume('}')
                     break
 
-                # Parse field type and name
+                # Parse field type (may be multi-word like "unsigned char")
                 field_type = stream.consume_word()
+                stream.strip()
+                
+                # Check if this is a multi-word type (unsigned/signed modifier)
+                if field_type in ('unsigned', 'signed'):
+                    # Read the next word as part of the type
+                    next_word = stream.consume_word()
+                    field_type = f"{field_type} {next_word}"
+                    stream.strip()
+                
                 if field_type not in types and field_type not in vars:
                     # It might be another struct type - that's ok
                     pass
 
-                stream.strip()
                 field_name = stream.consume_word()
 
                 fields.append({
@@ -1569,8 +1597,8 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 for field in struct_info.get("fields", []):
                     names = field.get("name", "")
                     ftype = field.get("type", "")
-                    # Split on commas or spaces
-                    parts = [p.strip() for p in re.split(r"[, ]+", names) if p.strip()]
+                    # Split on commas only (not spaces - field names don't have spaces)
+                    parts = [p.strip() for p in re.split(r",\s*", names) if p.strip()]
                     for p in parts:
                         clean_fields.append({"name": p, "type": ftype})
                 struct_info["fields"] = clean_fields
@@ -2478,17 +2506,28 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
 
 def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
-    global loop_depth, vars, types, _imported_files
+    global loop_depth, vars, types, _imported_files, disable_eval
 
     # Reset global state for top-level parse
     if level == 0:
         loop_depth = 0
         vars = {}
         _imported_files.clear()  # Reset import tracking for each top-level parse
+        disable_eval = False  # Reset pragma state for each top-level parse
 
     if not isinstance(text, InputStream):
-        # Remove comments but preserve line numbers by replacing comment content with spaces
+        # Check for #pragma directives before removing comments
         lines = text.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('#pragma'):
+                if stripped == '#pragma no_eval':
+                    disable_eval = True
+            elif stripped and not stripped.startswith('#'):
+                # Stop after first non-pragma, non-empty line
+                break
+        
+        # Remove comments but preserve line numbers by replacing comment content with spaces
         processed_lines = []
         for line in lines:
             comment_start = line.find('//')

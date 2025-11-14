@@ -1,3 +1,4 @@
+#pragma no_eval
 
 int fibonacci(int n) {
     if (n <= 1) {

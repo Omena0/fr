@@ -1,4 +1,7 @@
 
 void main() {
-    println("Hello, World!")
+    #bytecode {
+        CONST_STR "Hello, World!"
+        BUILTIN_PRINTLN
+    }
 }

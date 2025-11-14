@@ -308,10 +308,19 @@ class X86Compiler:
         # Emit BSS section for global variables
         self.emit("", 0)
         self.emit(".section .bss", 0)
+        self.emit(".globl global_vars", 0)
         self.emit("global_vars:", 0)
         self.emit("    .space 2048  # Space for 256 global variables (8 bytes each)", 0)
+        self.emit(".globl struct_heap_ptr", 0)
+        self.emit("struct_heap_ptr:", 0)
+        self.emit("    .quad 0  # Current heap position (bump allocator)", 0)
+        self.emit(".globl struct_heap_base", 0)
+        self.emit("struct_heap_base:", 0)
+        self.emit("    .quad 0  # Base pointer to heap (allocated at runtime)", 0)
         self.emit("struct_counter:", 0)
         self.emit("    .quad 0  # Counter for dynamic struct allocation", 0)
+        self.emit("list_append_scratch:", 0)
+        self.emit("    .quad 0  # Temporary storage for list pointer during list_append", 0)
         self.emit("struct_data:", 0)
         self.emit("    .space 67108864  # Space for struct instances (262144 instances * 256 bytes each = 64MB)", 0)
 
@@ -395,7 +404,7 @@ class X86Compiler:
         func_name = args[0]
         # args[1] is return type, args[2] is arg_count (if present)
         total_args = int(args[2]) if len(args) > 2 else 0
-        
+
         self.internal_functions.add(func_name)  # Track as internal Fr function
         self.current_function = {
             'name': func_name,
@@ -467,8 +476,10 @@ class X86Compiler:
         # Loop/control flow labels should not be skipped
         # These include: for_, forin_, loop_, while_, if_, else_, end, switch_, case_, except, etc.
         is_control_flow_label = any(x in label for x in [
-            'for_', 'forin_', 'loop_', 'while_', 'if_', 'else_', 'end',
-            'switch_', 'case_', 'break_', 'continue_', 'except', 'try_'
+            'for_', 'for', 'forin_', 'forin', 'loop_', 'loop', 'while_', 'while',
+            'if_', 'if', 'else_', 'else', 'end',
+            'switch_', 'switch', 'case_', 'case', 'break_', 'break', 'continue_', 'continue',
+            'except', 'try_', 'try'
         ])
 
         if not is_control_flow_label and self.current_function:
@@ -528,7 +539,7 @@ class X86Compiler:
         #                            = [rbp + 16 + (total_args - 1) * 8]
         # And arg_idx 1 should read from [rbp + 16 + (total_args - 1 - 1) * 8]
         #                              = [rbp + 16 + (total_args - 2) * 8]
-        
+
         if self.current_function:
             arg_idx = self.current_function['arg_count']
             total_args = self.current_function.get('total_args', 0)
@@ -722,9 +733,9 @@ class X86Compiler:
         self.stack_types.append('i64')
 
     def _compile_div_i64(self, args: List[str]):
-        """Divide two 64-bit integers"""
-        self.emit("pop rbx")
-        self.emit("pop rax")
+        """Divide two 64-bit integers - returns integer (floor division)"""
+        self.emit("pop rbx  # divisor")
+        self.emit("pop rax  # dividend")
         # Check for division by zero
         self.runtime_dependencies.add('runtime_check_div_zero_i64_at')
         self.emit("push rax  # save dividend")
@@ -732,7 +743,8 @@ class X86Compiler:
         self.emit(f"mov rsi, {self.current_line}  # line number")
         self.emit("call runtime_check_div_zero_i64_at")
         self.emit("pop rax  # restore dividend")
-        self.emit("cqo")  # Sign extend rax into rdx:rax
+        # Perform signed integer division
+        self.emit("cqo  # sign-extend rax into rdx:rax")
         self.emit("idiv rbx")
         self.emit("push rax")
         # Update type stack
@@ -740,6 +752,7 @@ class X86Compiler:
             self.stack_types.pop()  # pop operand 2
             self.stack_types.pop()  # pop operand 1
         self.stack_types.append('i64')
+
 
     def _compile_mod_i64(self, args: List[str]):
         """Modulo of two 64-bit integers"""
@@ -1049,14 +1062,14 @@ class X86Compiler:
             # first 8 float args in xmm0-xmm7
             arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
             float_regs = ['xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6', 'xmm7']
-            
+
             # Count how many integer and float args come before each position
             # This determines which register to use
             int_reg_for_arg = {}
             float_reg_for_arg = {}
             int_count = 0
             float_count = 0
-            
+
             for arg_idx in range(arg_count):
                 if arg_idx in float_args:
                     float_reg_for_arg[arg_idx] = float_count
@@ -1070,7 +1083,7 @@ class X86Compiler:
             for i in range(arg_count):
                 # Pop in reverse order: last arg first
                 reg_idx = arg_count - 1 - i
-                
+
                 # Check if this argument is a float
                 if reg_idx in float_args:
                     float_pos = float_reg_for_arg[reg_idx]
@@ -1092,7 +1105,7 @@ class X86Compiler:
                     int_pos = int_reg_for_arg[reg_idx]
                     if int_pos < len(arg_regs):
                         self.emit(f"pop {arg_regs[int_pos]}")
-                
+
                 if self.stack_types:
                     self.stack_types.pop()
         else:
@@ -1576,15 +1589,15 @@ class X86Compiler:
             self.stack_types.append('i64')
 
     def _compile_mod_const_i64(self, args: List[str]):
-        """Modulo top of stack by constant - optimized to avoid slow idiv"""
+        """Modulo top of stack by constant"""
         value = args[0]
         self.emit("pop rax")
 
-        # For small constants that are powers of 2, use AND (fastest)
         try:
             const_val = int(value)
+
+            # Fast path for powers of 2: use AND (only for non-negative)
             if const_val > 0 and (const_val & (const_val - 1)) == 0:
-                # Power of 2: use bitwise AND
                 mask = const_val - 1
                 self.emit(f"and rax, {mask}  # Fast mod by power-of-2")
                 self.emit("push rax")
@@ -1592,22 +1605,15 @@ class X86Compiler:
                     self.stack_types.pop()
                 self.stack_types.append('i64')
                 return
+
         except ValueError:
             pass
 
-        # For other constants, use optimized conditional subtraction
-        # For fibonacci: values are always < 2*modulo, so at most 1 subtraction needed
-        # Use branchless cmov for even better performance
-        self.label_counter += 1
-
-        # Optimized: subtract modulo, then conditionally restore if we went negative
-        # This is branchless and much faster than a loop
-        self.emit(f"mov rcx, {value}  # Load modulo constant")
-        self.emit("mov rdx, rax  # Save original")
-        self.emit("sub rax, rcx  # Try subtract")
-        self.emit("test rax, rax  # Check if negative")
-        self.emit("cmovl rax, rdx  # Restore if negative (branchless)")
-        self.emit("push rax")
+        # General case: use idiv (handles signed correctly)
+        self.emit(f"mov rbx, {value}  # Load divisor")
+        self.emit("cqo  # Sign-extend rax into rdx:rax")
+        self.emit("idiv rbx")
+        self.emit("push rdx  # Remainder")
 
         # Type stack: i64 % i64 = i64
         if self.stack_types:
@@ -1642,7 +1648,7 @@ class X86Compiler:
                 self.stack_types.pop()
             self.stack_types.append('f64')
         else:
-            # Integer division
+            # Integer division - use idiv (correct for signed)
             self.emit("pop rax")
             self.emit("cqo")  # Sign extend rax into rdx:rax
             self.emit(f"mov rbx, {value}")
@@ -1775,13 +1781,33 @@ class X86Compiler:
         self.emit(f"imul rax, [rbp - {offset2}]")
         self.emit("push rax")
 
+    def _compile_load2_div_i64(self, args: List[str]):
+        """Fused: load var1, load var2, divide (var1 / var2) - integer division"""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        # Load divisor and check for zero
+        self.emit(f"mov rbx, [rbp - {offset2}]  # divisor")
+        self.emit(f"mov rax, [rbp - {offset1}]  # dividend")
+        self.emit("push rax  # save dividend")
+        self.emit("push rbx  # save divisor")
+        self.emit("mov rdi, rbx  # divisor for check")
+        self.emit(f"mov rsi, {self.current_line}  # line number")
+        self.emit_runtime_call("runtime_check_div_zero_i64_at")
+        self.emit("pop rbx  # restore divisor")
+        self.emit("pop rax  # restore dividend")
+        # Perform signed integer division
+        self.emit("cqo  # sign-extend rax into rdx:rax")
+        self.emit("idiv rbx")
+        self.emit("push rax")
+
+
     def _compile_load2_mod_i64(self, args: List[str]):
         """Fused: load var1, load var2, modulo"""
         var1, var2 = int(args[0]), int(args[1])
         offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
         self.emit(f"mov rax, [rbp - {offset1}]")
-        self.emit("xor rdx, rdx")
         self.emit(f"mov rbx, [rbp - {offset2}]")
+        self.emit("cqo  # sign-extend rax into rdx:rax")
         self.emit("idiv rbx")
         self.emit("push rdx")
 
@@ -1794,7 +1820,39 @@ class X86Compiler:
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
 
+    def _compile_load2_div_f64(self, args: List[str]):
+        """Fused: load var1, load var2, divide (var1 / var2) - handles int and float"""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        # Load both operands as integers and convert to float
+        # (Assumes variables are i64 - if they're f64, this will produce wrong results)
+        # TODO: Track variable types from .local declarations
+        self.emit(f"mov rax, [rbp - {offset1}]  # load var1")
+        self.emit(f"mov rbx, [rbp - {offset2}]  # load var2")
+        # Convert both to float
+        self.emit("cvtsi2sd xmm0, rax  # convert dividend to double")
+        self.emit("cvtsi2sd xmm1, rbx  # convert divisor to double")
+        # Check for division by zero
+        # runtime_check_div_zero_f64_at expects: xmm0 = divisor, rdi = line
+        self.runtime_dependencies.add('runtime_check_div_zero_f64_at')
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm0  # save dividend")
+        self.emit("movsd xmm0, xmm1  # move divisor to xmm0 for check")
+        self.emit(f"mov rdi, {self.current_line}  # line number")
+        self.emit("call runtime_check_div_zero_f64_at")
+        self.emit("movsd xmm0, [rsp]  # restore dividend")
+        self.emit("add rsp, 8")
+        self.emit("cvtsi2sd xmm1, rbx  # reload and convert divisor")
+        # Perform division
+        self.emit("divsd xmm0, xmm1")
+        # Store result on stack
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm0")
+        # Update type stack
+        self.stack_types.append('f64')
+
     def _compile_load2_cmp_lt(self, args: List[str]):
+
         """Fused: load var1, load var2, compare <"""
         var1, var2 = int(args[0]), int(args[1])
         offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
@@ -2480,8 +2538,12 @@ class X86Compiler:
         """Append value to list"""
         self.emit("pop rsi")  # value
         self.emit("pop rdi")  # list
+        # Save list pointer to global scratch location (safe from stack corruption)
+        self.emit("mov [rip + list_append_scratch], rdi")
         self.emit_runtime_call("runtime_list_append_int")
-        self.emit("push rdi")  # push list back
+        # Restore list pointer
+        self.emit("mov rax, [rip + list_append_scratch]")
+        self.emit("push rax")  # push list back onto stack
         # Pop value and list from stack_types, push list back
         if len(self.stack_types) >= 2:
             self.stack_types.pop()  # Pop value
@@ -2509,12 +2571,36 @@ class X86Compiler:
                 self.stack_types.append('str')
                 return
 
-        # Default to list indexing
+        # INLINED LIST GET for performance
+        # Fast path: inline bounds checking and access
+        label_num = self.label_counter
+        self.label_counter += 1
+        
+        # Check for non-negative index
+        self.emit("test rsi, rsi")
+        self.emit(f"js .Llist_get_slow_{label_num}  # negative index, use slow path")
+        
+        # Get list length: [rdi + 8]
+        self.emit("mov rcx, [rdi + 8]  # list->length")
+        
+        # Bounds check: index < length
+        self.emit("cmp rsi, rcx")
+        self.emit(f"jge .Llist_get_slow_{label_num}  # out of bounds, use slow path")
+        
+        # Fast path: directly access items[index]
+        self.emit("mov rax, [rdi]  # rax = list->items")
+        self.emit("mov rax, [rax + rsi*8]  # rax = items[index]")
+        self.emit(f"jmp .Llist_get_done_{label_num}")
+        
+        # Slow path: call runtime function
         self.runtime_dependencies.add('runtime_list_get_int_at')
-        # index and list already in rsi and rdi from above pops
+        self.emit(f".Llist_get_slow_{label_num}:")
         self.emit(f"mov rdx, {self.current_line}  # line number")
         self.emit("call runtime_list_get_int_at")
+        
+        self.emit(f".Llist_get_done_{label_num}:")
         self.emit("push rax")
+        
         # Result is based on list contents - typically int64
         if len(self.stack_types) >= 2:
             self.stack_types.pop()  # Remove list
@@ -2527,10 +2613,39 @@ class X86Compiler:
         self.emit("pop r8")   # value (temporarily in r8)
         self.emit("pop rsi")  # index
         self.emit("pop rdi")  # list
+        
+        # INLINED LIST SET for performance
+        # Fast path: inline bounds checking and access
+        label_num = self.label_counter
+        self.label_counter += 1
+        
+        # Check for non-negative index
+        self.emit("test rsi, rsi")
+        self.emit(f"js .Llist_set_slow_{label_num}  # negative index, use slow path")
+        
+        # Get list length: [rdi + 8]
+        self.emit("mov rcx, [rdi + 8]  # list->length")
+        
+        # Bounds check: index < length
+        self.emit("cmp rsi, rcx")
+        self.emit(f"jge .Llist_set_slow_{label_num}  # out of bounds, use slow path")
+        
+        # Fast path: directly set items[index]
+        self.emit("mov rax, [rdi]  # rax = list->items")
+        self.emit("mov [rax + rsi*8], r8  # items[index] = value")
+        self.emit("mov rax, rdi  # return list pointer")
+        self.emit(f"jmp .Llist_set_done_{label_num}")
+        
+        # Slow path: call runtime function
+        self.emit(f".Llist_set_slow_{label_num}:")
+        self.emit("mov [rip + list_append_scratch], rdi")
         self.emit("mov rdx, r8  # value")
         self.emit(f"mov rcx, {self.current_line}  # line number")
         self.emit("call runtime_list_set_int_at")
-        self.emit("push rdi")  # push list back
+        self.emit("mov rax, [rip + list_append_scratch]")
+        
+        self.emit(f".Llist_set_done_{label_num}:")
+        self.emit("push rax")  # push list back
         # Pop value, index, and list from stack_types, push list back
         if len(self.stack_types) >= 3:
             self.stack_types.pop()  # Pop value
@@ -2809,6 +2924,9 @@ class X86Compiler:
         self.emit("pop rsi   # value")
         self.emit("pop rdi   # set")
 
+        # Save set pointer to global scratch location (safe from register clobbering)
+        self.emit("mov [rip + list_append_scratch], rdi")
+
         # Pass element type as third argument (0=int, 1=string)
         if value_type == 'str':
             self.emit("mov rdx, 1  # elem_type: string")
@@ -2816,7 +2934,9 @@ class X86Compiler:
             self.emit("mov rdx, 0  # elem_type: int")
 
         self.emit_runtime_call("runtime_set_add_typed")
-        self.emit("push rdi   # return set")
+        # Restore set pointer
+        self.emit("mov rax, [rip + list_append_scratch]")
+        self.emit("push rax   # return set")
         # Pop both value and set from stack_types, push set back
         if len(self.stack_types) >= 2:
             self.stack_types.pop()  # Pop value
@@ -2827,12 +2947,17 @@ class X86Compiler:
         """Remove value from set"""
         self.emit("pop rsi   # value")
         self.emit("pop rdi   # set")
+        # Save set pointer to global scratch location (safe from register clobbering)
+        self.emit("mov [rip + list_append_scratch], rdi")
         self.emit_runtime_call("runtime_set_remove")
-        self.emit("push rdi   # return set")
+        # Restore set pointer
+        self.emit("mov rax, [rip + list_append_scratch]")
+        self.emit("push rax   # return set")
         # Pop both value and set from stack_types, push set back
         if len(self.stack_types) >= 2:
             self.stack_types.pop()  # Pop value
             self.stack_types.pop()  # Pop set
+        self.stack_types.append('set')
         self.stack_types.append('set')
 
     def _compile_set_contains(self, args: List[str]):

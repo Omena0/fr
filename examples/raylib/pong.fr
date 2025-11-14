@@ -2,36 +2,42 @@ c_import include/raylib.h
 c_link lib/libraylib.a -lGL -lm -lpthread -ldl -lrt -lwayland-client -lwayland-cursor -lwayland-egl -lxkbcommon
 
 struct Paddle {
-    int x
-    int y
+    float x
+    float y
     int width
     int height
-    int speed
+    float speed
 }
 
 struct Ball {
-    int x
-    int y
-    int radius
-    int velX
-    int velY
+    float x
+    float y
+    float radius
+    float velX
+    float velY
 }
 
 Paddle createPaddle(int startX, int startY) {
-    return Paddle(startX, startY, 20, 120, 12)
+    float fx = float(startX)
+    float fy = float(startY)
+    return Paddle(fx, fy, 20, 120, 720.0)
 }
 
 Ball createBall(int startX, int startY) {
-    return Ball(startX, startY, 20, 8, 6)
+    float fx = float(startX)
+    float fy = float(startY)
+    return Ball(fx, fy, 20.0, -300.0, 100.0)
 }
 
 Paddle updatePaddle(Paddle p, int upKey, int downKey) {
-    int newY = p.y
+    float dt = GetFrameTime()
+
+    float newY = p.y
     if (IsKeyDown(upKey)) {
-        newY = p.y - p.speed
+        newY = p.y - p.speed * dt
     }
     if (IsKeyDown(downKey)) {
-        newY = p.y + p.speed
+        newY = p.y + p.speed * dt
     }
     if (newY < 0) {
         newY = 0
@@ -43,17 +49,19 @@ Paddle updatePaddle(Paddle p, int upKey, int downKey) {
 }
 
 Ball updateBall(Ball b) {
-    int newX = int(b.x + b.velX)
-    int newY = int(b.y + b.velY)
-    int newVelY = b.velY
+    float dt = GetFrameTime()
+
+    float newX = b.x + b.velX * dt
+    float newY = b.y + b.velY * dt
+    float newVelY = b.velY
 
     if (newY < b.radius) {
         newY = b.radius
-        newVelY = 0 - newVelY
+        newVelY = 0.0 - newVelY
     }
     if (newY > 600 - b.radius) {
         newY = 600 - b.radius
-        newVelY = 0 - newVelY
+        newVelY = 0.0 - newVelY
     }
 
     return Ball(newX, newY, b.radius, b.velX, newVelY)
@@ -61,14 +69,14 @@ Ball updateBall(Ball b) {
 
 Ball checkLeftPaddleCollision(Ball b, Paddle p) {
     if (b.x - b.radius <= p.x + p.width && b.x >= p.x && b.y >= p.y && b.y <= p.y + p.height) {
-        return Ball(b.x + 12, b.y, b.radius, 0 - b.velX, b.velY)
+        return Ball(b.x + 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)
     }
     return b
 }
 
 Ball checkRightPaddleCollision(Ball b, Paddle p) {
     if (b.x + b.radius >= p.x && b.x <= p.x + p.width && b.y >= p.y && b.y <= p.y + p.height) {
-        return Ball(b.x - 12, b.y, b.radius, 0 - b.velX, b.velY)
+        return Ball(b.x - 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)
     }
     return b
 }
@@ -90,29 +98,29 @@ void main() {
     int rightScore = 0
 
     while (!WindowShouldClose()) {
-        leftPaddle = updatePaddle(leftPaddle, 87, 83)
-        rightPaddle = updatePaddle(rightPaddle, 265, 264)
+        leftPaddle = updatePaddle(leftPaddle, 265, 264)
+        rightPaddle = updatePaddle(rightPaddle, 87, 83)
         ball = updateBall(ball)
 
         ball = checkLeftPaddleCollision(ball, leftPaddle)
         ball = checkRightPaddleCollision(ball, rightPaddle)
 
         if (ball.x < ball.radius+2) {
-            rightScore = rightScore + 1
+            leftScore = leftScore + 1
             ball = createBall(600, 300)
         }
         if (ball.x > 1200 - ball.radius-2) {
-            leftScore = leftScore + 1
+            rightScore = rightScore + 1
             ball = createBall(600, 300)
         }
 
         BeginDrawing()
         ClearBackground(bgColor)
 
-        DrawRectangle(leftPaddle.x, leftPaddle.y, leftPaddle.width, leftPaddle.height, paddleColor)
-        DrawRectangle(rightPaddle.x, rightPaddle.y, rightPaddle.width, rightPaddle.height, paddleColor)
+        DrawRectangle(int(leftPaddle.x), int(leftPaddle.y), leftPaddle.width, leftPaddle.height, paddleColor)
+        DrawRectangle(int(rightPaddle.x), int(rightPaddle.y), rightPaddle.width, rightPaddle.height, paddleColor)
 
-        DrawCircle(ball.x, ball.y, ball.radius, ballColor)
+        DrawCircle(int(ball.x), int(ball.y), ball.radius, ballColor)
 
         DrawText("Pong Game", 450, 20, 40, textColor)
         DrawText(f"Left: {leftScore}", 100, 50, 30, textColor)

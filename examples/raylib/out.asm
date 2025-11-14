@@ -37,8 +37,8 @@
     # .struct 31 2 8 capacity count unsigned int unsigned int
     # .struct 32 3 12 frame type params unsigned int unsigned int int
     # .struct 33 2 8 capacity count unsigned int unsigned int
-    # .struct 34 5 20 x y width height speed int int int int int
-    # .struct 35 5 20 x y radius velX velY int int int int int
+    # .struct 34 5 20 x y width height speed float float int int float
+    # .struct 35 5 20 x y radius velX velY float float float float float
     # .struct_type Vector2 0
     # .struct_type Vector3 1
     # .struct_type Vector4 2
@@ -87,27 +87,57 @@ createPaddle:
     # .arg startY i64
     mov rax, [rbp + 16]
     mov [rbp - 16], rax
-    # .line 21 "return Paddle(startX, startY, 20, 120, 12)"
-    # LOAD 0 1
+    # .local fx f64
+    # .local fy f64
+    # .line 21 "float fx = float(startX)"
+    # LOAD 0
     mov rax, [rbp - 8]
     push rax
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 2
+    pop rax
+    mov [rbp - 24], rax
+    # .line 22 "float fy = float(startY)"
+    # LOAD 1
     mov rax, [rbp - 16]
     push rax
-    # CONST_I64 20 120 12
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 3
+    pop rax
+    mov [rbp - 32], rax
+    # .line 23 "return Paddle(fx, fy, 20, 120, 720.0)"
+    # LOAD 2 3
+    mov rax, [rbp - 24]
+    push rax
+    mov rax, [rbp - 32]
+    push rax
+    # CONST_I64 20 120
     mov rax, 20
     push rax
     mov rax, 120
     push rax
-    mov rax, 12
-    push rax
+    # CONST_F64 720.0
+    movsd xmm0, [.FLOAT0]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # STRUCT_NEW 34
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_0  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_0  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
     .Lstruct_no_wrap_0:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
@@ -151,27 +181,65 @@ createBall:
     # .arg startY i64
     mov rax, [rbp + 16]
     mov [rbp - 16], rax
-    # .line 25 "return Ball(startX, startY, 20, 8, 6)"
-    # LOAD 0 1
+    # .local fx f64
+    # .local fy f64
+    # .line 27 "float fx = float(startX)"
+    # LOAD 0
     mov rax, [rbp - 8]
     push rax
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 2
+    pop rax
+    mov [rbp - 24], rax
+    # .line 28 "float fy = float(startY)"
+    # LOAD 1
     mov rax, [rbp - 16]
     push rax
-    # CONST_I64 20 8 6
-    mov rax, 20
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 3
+    pop rax
+    mov [rbp - 32], rax
+    # .line 29 "return Ball(fx, fy, 20.0, -300.0, 100.0)"
+    # LOAD 2 3
+    mov rax, [rbp - 24]
     push rax
-    mov rax, 8
+    mov rax, [rbp - 32]
     push rax
-    mov rax, 6
-    push rax
+    # CONST_F64 20.0 300.0
+    movsd xmm0, [.FLOAT1]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    movsd xmm0, [.FLOAT2]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # NEG 
+    movsd xmm0, [rsp]
+    mov rax, 0x8000000000000000
+    movq xmm1, rax
+    xorpd xmm0, xmm1
+    movsd [rsp], xmm0
+    # CONST_F64 100.0
+    movsd xmm0, [.FLOAT3]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # STRUCT_NEW 35
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_1  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_1  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
     .Lstruct_no_wrap_1:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
@@ -218,8 +286,27 @@ updatePaddle:
     # .arg downKey i64
     mov rax, [rbp + 16]
     mov [rbp - 24], rax
-    # .local newY i64
-    # .line 29 "int newY = p.y"
+    # .local dt f64
+    # .local newY f64
+    # .line 33 "float dt = GetFrameTime()"
+    # CALL GetFrameTime 0 |f
+    # CALL GetFrameTime: struct_args=set(), float_args=set(), stack_types=['f64', 'f64', 'struct:34', 'f64', 'f64', 'struct:35']
+    # Stack alignment for external call
+    mov r11, rsp
+    and r11, 0xF
+    jz .LGetFrameTime_aligned_2
+    sub rsp, 8  # Align stack
+    call GetFrameTime
+    add rsp, 8  # Restore stack
+    jmp .LGetFrameTime_done_2
+    .LGetFrameTime_aligned_2:
+    call GetFrameTime
+    .LGetFrameTime_done_2:
+    push rax
+    # STORE 3
+    pop rax
+    mov [rbp - 32], rax
+    # .line 35 "float newY = p.y"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -229,21 +316,23 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_2
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_2:
+    cmp rbx, 262144
+    jb .Linstance_ok_3
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_3:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # STORE 3
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 4
     pop rax
-    mov [rbp - 32], rax
-    # .line 30 "if (IsKeyDown(upKey)) {"
+    mov [rbp - 40], rax
+    # .line 36 "if (IsKeyDown(upKey)) {"
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -253,21 +342,21 @@ updatePaddle:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LIsKeyDown_aligned_3
+    jz .LIsKeyDown_aligned_4
     sub rsp, 8  # Align stack
     call IsKeyDown
     add rsp, 8  # Restore stack
-    jmp .LIsKeyDown_done_3
-    .LIsKeyDown_aligned_3:
+    jmp .LIsKeyDown_done_4
+    .LIsKeyDown_aligned_4:
     call IsKeyDown
-    .LIsKeyDown_done_3:
+    .LIsKeyDown_done_4:
     movzx rax, al  # Zero-extend bool (al) to rax
     push rax
     # JUMP_IF_FALSE if_end0
     pop rax
     test rax, rax
     jz .LupdatePaddle_if_end0
-    # .line 31 "newY = p.y - p.speed"
+    # .line 37 "newY = p.y - p.speed * dt"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -277,17 +366,19 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_4
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_4:
+    cmp rbx, 262144
+    jb .Linstance_ok_5
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_5:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -297,28 +388,44 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_5
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_5:
+    cmp rbx, 262144
+    jb .Linstance_ok_6
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_6:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # LOAD 3
+    mov rax, [rbp - 32]
     push rax
-    # SUB_I64 
-    pop rbx
+    # MUL_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 4
     pop rax
-    sub rax, rbx
-    push rax
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
+    mov [rbp - 40], rax
     # LABEL if_end0
 .LupdatePaddle_if_end0:
-    # .line 33 "if (IsKeyDown(downKey)) {"
+    # .line 39 "if (IsKeyDown(downKey)) {"
     # LOAD 2
     mov rax, [rbp - 24]
     push rax
@@ -328,21 +435,21 @@ updatePaddle:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LIsKeyDown_aligned_6
+    jz .LIsKeyDown_aligned_7
     sub rsp, 8  # Align stack
     call IsKeyDown
     add rsp, 8  # Restore stack
-    jmp .LIsKeyDown_done_6
-    .LIsKeyDown_aligned_6:
+    jmp .LIsKeyDown_done_7
+    .LIsKeyDown_aligned_7:
     call IsKeyDown
-    .LIsKeyDown_done_6:
+    .LIsKeyDown_done_7:
     movzx rax, al  # Zero-extend bool (al) to rax
     push rax
     # JUMP_IF_FALSE if_end2
     pop rax
     test rax, rax
     jz .LupdatePaddle_if_end2
-    # .line 34 "newY = p.y + p.speed"
+    # .line 40 "newY = p.y + p.speed * dt"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -352,17 +459,19 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_7
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_7:
+    cmp rbx, 262144
+    jb .Linstance_ok_8
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_8:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -372,30 +481,46 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_8
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_8:
+    cmp rbx, 262144
+    jb .Linstance_ok_9
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_9:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # ADD_I64 
-    pop rbx
-    pop rax
-    add rax, rbx
-    push rax
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
-    # LABEL if_end2
-.LupdatePaddle_if_end2:
-    # .line 36 "if (newY < 0) {"
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
     # LOAD 3
     mov rax, [rbp - 32]
+    push rax
+    # MUL_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # ADD_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 4
+    pop rax
+    mov [rbp - 40], rax
+    # LABEL if_end2
+.LupdatePaddle_if_end2:
+    # .line 42 "if (newY < 0) {"
+    # LOAD 4
+    mov rax, [rbp - 40]
     push rax
     # CMP_LT_CONST 0
     pop rax
@@ -407,15 +532,15 @@ updatePaddle:
     pop rax
     test rax, rax
     jz .LupdatePaddle_if_end4
-    # .line 37 "newY = 0"
-    # STORE_CONST_I64 3 0
-    mov rax, 0
-    mov [rbp - 32], rax
+    # .line 43 "newY = 0"
+    # STORE_CONST_F64 4 0.0
+    movsd xmm0, [.FLOAT4]
+    movsd [rbp - 40], xmm0
     # LABEL if_end4
 .LupdatePaddle_if_end4:
-    # .line 39 "if (newY + p.height > 600) {"
-    # LOAD 3 0
-    mov rax, [rbp - 32]
+    # .line 45 "if (newY + p.height > 600) {"
+    # LOAD 4 0
+    mov rax, [rbp - 40]
     push rax
     mov rax, [rbp - 8]
     push rax
@@ -425,22 +550,27 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_9
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_9:
+    cmp rbx, 262144
+    jb .Linstance_ok_10
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_10:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # ADD_I64 
-    pop rbx
-    pop rax
-    add rax, rbx
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # ADD_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_GT_CONST 600
     pop rax
     cmp rax, 600
@@ -451,7 +581,7 @@ updatePaddle:
     pop rax
     test rax, rax
     jz .LupdatePaddle_if_end6
-    # .line 40 "newY = 600 - p.height"
+    # .line 46 "newY = 600 - p.height"
     # CONST_I64 600
     mov rax, 600
     push rax
@@ -464,28 +594,33 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_10
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_10:
+    cmp rbx, 262144
+    jb .Linstance_ok_11
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_11:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # SUB_I64 
-    pop rbx
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 4
     pop rax
-    sub rax, rbx
-    push rax
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
+    mov [rbp - 40], rax
     # LABEL if_end6
 .LupdatePaddle_if_end6:
-    # .line 42 "return Paddle(p.x, newY, p.width, p.height, p.speed)"
+    # .line 48 "return Paddle(p.x, newY, p.width, p.height, p.speed)"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -495,19 +630,20 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_11
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_11:
+    cmp rbx, 262144
+    jb .Linstance_ok_12
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_12:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # LOAD 3 0
-    mov rax, [rbp - 32]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # LOAD 4 0
+    mov rax, [rbp - 40]
     push rax
     mov rax, [rbp - 8]
     push rax
@@ -517,17 +653,18 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_12
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_12:
+    cmp rbx, 262144
+    jb .Linstance_ok_13
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_13:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -537,17 +674,18 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_13
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_13:
+    cmp rbx, 262144
+    jb .Linstance_ok_14
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_14:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -557,26 +695,27 @@ updatePaddle:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_14
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_14:
+    cmp rbx, 262144
+    jb .Linstance_ok_15
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_15:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # STRUCT_NEW 34
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_15  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_15:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_16  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_16:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -616,10 +755,29 @@ updateBall:
     # .arg b struct:Ball
     mov rax, [rbp + 16]
     mov [rbp - 8], rax
-    # .local newVelY i64
-    # .local newX i64
-    # .local newY i64
-    # .line 46 "int newX = int(b.x + b.velX)"
+    # .local dt f64
+    # .local newVelY f64
+    # .local newX f64
+    # .local newY f64
+    # .line 52 "float dt = GetFrameTime()"
+    # CALL GetFrameTime 0 |f
+    # CALL GetFrameTime: struct_args=set(), float_args=set(), stack_types=['struct:34']
+    # Stack alignment for external call
+    mov r11, rsp
+    and r11, 0xF
+    jz .LGetFrameTime_aligned_17
+    sub rsp, 8  # Align stack
+    call GetFrameTime
+    add rsp, 8  # Restore stack
+    jmp .LGetFrameTime_done_17
+    .LGetFrameTime_aligned_17:
+    call GetFrameTime
+    .LGetFrameTime_done_17:
+    push rax
+    # STORE 1
+    pop rax
+    mov [rbp - 16], rax
+    # .line 54 "float newX = b.x + b.velX * dt"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -629,17 +787,19 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_16
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_16:
+    cmp rbx, 262144
+    jb .Linstance_ok_18
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_18:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -649,10 +809,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_17
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_17:
+    cmp rbx, 262144
+    jb .Linstance_ok_19
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_19:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -660,16 +820,34 @@ updateBall:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # ADD_I64 
-    pop rbx
+    # TO_FLOAT 
     pop rax
-    add rax, rbx
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # LOAD 1
+    mov rax, [rbp - 16]
     push rax
-    # TO_INT 
-    # STORE 2
+    # MUL_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # ADD_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 3
     pop rax
-    mov [rbp - 24], rax
-    # .line 47 "int newY = int(b.y + b.velY)"
+    mov [rbp - 32], rax
+    # .line 55 "float newY = b.y + b.velY * dt"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -679,17 +857,19 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_18
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_18:
+    cmp rbx, 262144
+    jb .Linstance_ok_20
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_20:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -699,27 +879,42 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_19
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_19:
+    cmp rbx, 262144
+    jb .Linstance_ok_21
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_21:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # LOAD 1
+    mov rax, [rbp - 16]
     push rax
-    # ADD_I64 
-    pop rbx
+    # MUL_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mulsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # ADD_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 4
     pop rax
-    add rax, rbx
-    push rax
-    # TO_INT 
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
-    # .line 48 "int newVelY = b.velY"
+    mov [rbp - 40], rax
+    # .line 56 "float newVelY = b.velY"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -729,23 +924,25 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_20
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_20:
+    cmp rbx, 262144
+    jb .Linstance_ok_22
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_22:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # STORE 1
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 2
     pop rax
-    mov [rbp - 16], rax
-    # .line 50 "if (newY < b.radius) {"
-    # LOAD 3 0
-    mov rax, [rbp - 32]
+    mov [rbp - 24], rax
+    # .line 58 "if (newY < b.radius) {"
+    # LOAD 4 0
+    mov rax, [rbp - 40]
     push rax
     mov rax, [rbp - 8]
     push rax
@@ -755,10 +952,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_21
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_21:
+    cmp rbx, 262144
+    jb .Linstance_ok_23
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_23:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -777,7 +974,7 @@ updateBall:
     pop rax
     test rax, rax
     jz .LupdateBall_if_end0
-    # .line 51 "newY = b.radius"
+    # .line 59 "newY = b.radius"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -787,10 +984,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_22
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_22:
+    cmp rbx, 262144
+    jb .Linstance_ok_24
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_24:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -798,29 +995,38 @@ updateBall:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # STORE 3
+    # TO_FLOAT 
     pop rax
-    mov [rbp - 32], rax
-    # .line 52 "newVelY = 0 - newVelY"
-    # CONST_I64 0
-    mov rax, 0
-    push rax
-    # LOAD 1
-    mov rax, [rbp - 16]
-    push rax
-    # SUB_I64 
-    pop rbx
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 4
     pop rax
-    sub rax, rbx
+    mov [rbp - 40], rax
+    # .line 60 "newVelY = 0.0 - newVelY"
+    # CONST_F64 0.0
+    movsd xmm0, [.FLOAT5]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # LOAD 2
+    mov rax, [rbp - 24]
     push rax
-    # STORE 1
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 2
     pop rax
-    mov [rbp - 16], rax
+    mov [rbp - 24], rax
     # LABEL if_end0
 .LupdateBall_if_end0:
-    # .line 54 "if (newY > 600 - b.radius) {"
-    # LOAD 3
-    mov rax, [rbp - 32]
+    # .line 62 "if (newY > 600 - b.radius) {"
+    # LOAD 4
+    mov rax, [rbp - 40]
     push rax
     # CONST_I64 600
     mov rax, 600
@@ -834,10 +1040,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_23
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_23:
+    cmp rbx, 262144
+    jb .Linstance_ok_25
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_25:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -861,7 +1067,7 @@ updateBall:
     pop rax
     test rax, rax
     jz .LupdateBall_if_end2
-    # .line 55 "newY = 600 - b.radius"
+    # .line 63 "newY = 600 - b.radius"
     # CONST_I64 600
     mov rax, 600
     push rax
@@ -874,10 +1080,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_24
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_24:
+    cmp rbx, 262144
+    jb .Linstance_ok_26
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_26:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -885,36 +1091,44 @@ updateBall:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # SUB_I64 
-    pop rbx
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # STORE 4
     pop rax
-    sub rax, rbx
-    push rax
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
-    # .line 56 "newVelY = 0 - newVelY"
-    # CONST_I64 0
-    mov rax, 0
-    push rax
-    # LOAD 1
-    mov rax, [rbp - 16]
-    push rax
-    # SUB_I64 
-    pop rbx
-    pop rax
-    sub rax, rbx
-    push rax
-    # STORE 1
-    pop rax
-    mov [rbp - 16], rax
-    # LABEL if_end2
-.LupdateBall_if_end2:
-    # .line 59 "return Ball(newX, newY, b.radius, b.velX, newVelY)"
-    # LOAD 2 3 0
+    mov [rbp - 40], rax
+    # .line 64 "newVelY = 0.0 - newVelY"
+    # CONST_F64 0.0
+    movsd xmm0, [.FLOAT6]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # LOAD 2
     mov rax, [rbp - 24]
     push rax
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # STORE 2
+    pop rax
+    mov [rbp - 24], rax
+    # LABEL if_end2
+.LupdateBall_if_end2:
+    # .line 67 "return Ball(newX, newY, b.radius, b.velX, newVelY)"
+    # LOAD 3 4 0
     mov rax, [rbp - 32]
+    push rax
+    mov rax, [rbp - 40]
     push rax
     mov rax, [rbp - 8]
     push rax
@@ -924,10 +1138,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_25
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_25:
+    cmp rbx, 262144
+    jb .Linstance_ok_27
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_27:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -944,10 +1158,10 @@ updateBall:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_26
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_26:
+    cmp rbx, 262144
+    jb .Linstance_ok_28
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_28:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -955,18 +1169,18 @@ updateBall:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # LOAD 1
-    mov rax, [rbp - 16]
+    # LOAD 2
+    mov rax, [rbp - 24]
     push rax
     # STRUCT_NEW 35
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_27  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_27:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_29  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_29:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -1009,7 +1223,7 @@ checkLeftPaddleCollision:
     # .arg p struct:Paddle
     mov rax, [rbp + 16]
     mov [rbp - 16], rax
-    # .line 63 "if (b.x - b.radius <= p.x + p.width && b.x >= p.x && b.y >= p.y && b.y <= p.y + p.height) {"
+    # .line 71 "if (b.x - b.radius <= p.x + p.width && b.x >= p.x && b.y >= p.y && b.y <= p.y + p.height) {"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1019,17 +1233,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_28
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_28:
+    cmp rbx, 262144
+    jb .Linstance_ok_30
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_30:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1039,17 +1254,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_29
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_29:
+    cmp rbx, 262144
+    jb .Linstance_ok_31
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_31:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # SUB_I64 
     pop rbx
     pop rax
@@ -1064,17 +1280,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_30
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_30:
+    cmp rbx, 262144
+    jb .Linstance_ok_32
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_32:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1084,17 +1301,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_31
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_31:
+    cmp rbx, 262144
+    jb .Linstance_ok_33
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_33:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # ADD_I64 
     pop rbx
     pop rax
@@ -1116,17 +1334,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_32
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_32:
+    cmp rbx, 262144
+    jb .Linstance_ok_34
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_34:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1136,17 +1355,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_33
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_33:
+    cmp rbx, 262144
+    jb .Linstance_ok_35
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_35:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_GE 
     pop rbx
     pop rax
@@ -1173,74 +1393,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_34
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_34:
-    mov rax, rbx
-    mov rdx, 256
-    imul rax, rdx  # rax = instance_id * 256
-    add rax, 8  # rax += field_idx * 8
-    lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # LOAD 1
-    mov rax, [rbp - 16]
-    push rax
-    # STRUCT_GET 1
-    pop rax  # struct reference
-    mov rbx, rax
-    shr rbx, 16  # rbx = instance_id
-    mov rcx, rax
-    and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_35
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_35:
-    mov rax, rbx
-    mov rdx, 256
-    imul rax, rdx  # rax = instance_id * 256
-    add rax, 8  # rax += field_idx * 8
-    lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # CMP_GE 
-    pop rbx
-    pop rax
-    cmp rax, rbx
-    setge al
-    movzx rax, al
-    push rax
-    # AND 
-    pop rbx
-    pop rax
-    test rax, rax
-    setnz al
-    test rbx, rbx
-    setnz bl
-    and al, bl
-    movzx rax, al
-    push rax
-    # LOAD 0
-    mov rax, [rbp - 8]
-    push rax
-    # STRUCT_GET 1
-    pop rax  # struct reference
-    mov rbx, rax
-    shr rbx, 16  # rbx = instance_id
-    mov rcx, rax
-    and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
+    cmp rbx, 262144
     jb .Linstance_ok_36
-    and rbx, 0x3FFF  # Wrap to 0-16383
+    and rbx, 0x3FFFF  # Wrap to 0-262143
     .Linstance_ok_36:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1250,17 +1414,77 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
+    cmp rbx, 262144
     jb .Linstance_ok_37
-    and rbx, 0x3FFF  # Wrap to 0-16383
+    and rbx, 0x3FFFF  # Wrap to 0-262143
     .Linstance_ok_37:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # CMP_GE 
+    pop rbx
+    pop rax
+    cmp rax, rbx
+    setge al
+    movzx rax, al
     push rax
+    # AND 
+    pop rbx
+    pop rax
+    test rax, rax
+    setnz al
+    test rbx, rbx
+    setnz bl
+    and al, bl
+    movzx rax, al
+    push rax
+    # LOAD 0
+    mov rax, [rbp - 8]
+    push rax
+    # STRUCT_GET 1
+    pop rax  # struct reference
+    mov rbx, rax
+    shr rbx, 16  # rbx = instance_id
+    mov rcx, rax
+    and rcx, 0xFFFF  # rcx = struct_id
+    cmp rbx, 262144
+    jb .Linstance_ok_38
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_38:
+    mov rax, rbx
+    mov rdx, 256
+    imul rax, rdx  # rax = instance_id * 256
+    add rax, 8  # rax += field_idx * 8
+    lea rdx, [rip + struct_data]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # LOAD 1
+    mov rax, [rbp - 16]
+    push rax
+    # STRUCT_GET 1
+    pop rax  # struct reference
+    mov rbx, rax
+    shr rbx, 16  # rbx = instance_id
+    mov rcx, rax
+    and rcx, 0xFFFF  # rcx = struct_id
+    cmp rbx, 262144
+    jb .Linstance_ok_39
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_39:
+    mov rax, rbx
+    mov rdx, 256
+    imul rax, rdx  # rax = instance_id * 256
+    add rax, 8  # rax += field_idx * 8
+    lea rdx, [rip + struct_data]
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1270,17 +1494,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_38
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_38:
+    cmp rbx, 262144
+    jb .Linstance_ok_40
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_40:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # ADD_I64 
     pop rbx
     pop rax
@@ -1307,7 +1532,7 @@ checkLeftPaddleCollision:
     pop rax
     test rax, rax
     jz .LcheckLeftPaddleCollision_if_end0
-    # .line 64 "return Ball(b.x + 12, b.y, b.radius, 0 - b.velX, b.velY)"
+    # .line 72 "return Ball(b.x + 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1317,21 +1542,26 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_39
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_39:
+    cmp rbx, 262144
+    jb .Linstance_ok_41
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_41:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # ADD_CONST_I64 12
-    pop rax
-    add rax, 12
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # ADD_CONST_F64 12.0
+    movsd xmm0, [.FLOAT7]
+    movsd xmm1, [rsp]
+    add rsp, 8
+    addsd xmm1, xmm0
+    sub rsp, 8
+    movsd [rsp], xmm1
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1341,17 +1571,18 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_40
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_40:
+    cmp rbx, 262144
+    jb .Linstance_ok_42
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_42:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1361,20 +1592,22 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_41
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_41:
+    cmp rbx, 262144
+    jb .Linstance_ok_43
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_43:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # CONST_I64 0
-    mov rax, 0
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # CONST_F64 0.0
+    movsd xmm0, [.FLOAT8]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1384,22 +1617,27 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_42
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_42:
+    cmp rbx, 262144
+    jb .Linstance_ok_44
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_44:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # SUB_I64 
-    pop rbx
-    pop rax
-    sub rax, rbx
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1409,26 +1647,27 @@ checkLeftPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_43
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_43:
+    cmp rbx, 262144
+    jb .Linstance_ok_45
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_45:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # STRUCT_NEW 35
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_44  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_44:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_46  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_46:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -1459,7 +1698,7 @@ checkLeftPaddleCollision:
     ret
     # LABEL if_end0
 .LcheckLeftPaddleCollision_if_end0:
-    # .line 66 "return b"
+    # .line 74 "return b"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1482,7 +1721,7 @@ checkRightPaddleCollision:
     # .arg p struct:Paddle
     mov rax, [rbp + 16]
     mov [rbp - 16], rax
-    # .line 70 "if (b.x + b.radius >= p.x && b.x <= p.x + p.width && b.y >= p.y && b.y <= p.y + p.height) {"
+    # .line 78 "if (b.x + b.radius >= p.x && b.x <= p.x + p.width && b.y >= p.y && b.y <= p.y + p.height) {"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1492,17 +1731,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_45
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_45:
+    cmp rbx, 262144
+    jb .Linstance_ok_47
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_47:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1512,17 +1752,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_46
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_46:
+    cmp rbx, 262144
+    jb .Linstance_ok_48
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_48:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # ADD_I64 
     pop rbx
     pop rax
@@ -1537,17 +1778,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_47
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_47:
+    cmp rbx, 262144
+    jb .Linstance_ok_49
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_49:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_GE 
     pop rbx
     pop rax
@@ -1564,17 +1806,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_48
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_48:
+    cmp rbx, 262144
+    jb .Linstance_ok_50
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_50:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1584,17 +1827,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_49
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_49:
+    cmp rbx, 262144
+    jb .Linstance_ok_51
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_51:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1604,17 +1848,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_50
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_50:
+    cmp rbx, 262144
+    jb .Linstance_ok_52
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_52:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # ADD_I64 
     pop rbx
     pop rax
@@ -1646,17 +1891,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_51
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_51:
+    cmp rbx, 262144
+    jb .Linstance_ok_53
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_53:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1666,17 +1912,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_52
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_52:
+    cmp rbx, 262144
+    jb .Linstance_ok_54
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_54:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_GE 
     pop rbx
     pop rax
@@ -1703,17 +1950,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_53
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_53:
+    cmp rbx, 262144
+    jb .Linstance_ok_55
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_55:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1723,17 +1971,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_54
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_54:
+    cmp rbx, 262144
+    jb .Linstance_ok_56
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_56:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 1
     mov rax, [rbp - 16]
     push rax
@@ -1743,17 +1992,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_55
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_55:
+    cmp rbx, 262144
+    jb .Linstance_ok_57
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_57:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # ADD_I64 
     pop rbx
     pop rax
@@ -1780,7 +2030,7 @@ checkRightPaddleCollision:
     pop rax
     test rax, rax
     jz .LcheckRightPaddleCollision_if_end0
-    # .line 71 "return Ball(b.x - 12, b.y, b.radius, 0 - b.velX, b.velY)"
+    # .line 79 "return Ball(b.x - 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1790,21 +2040,26 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_56
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_56:
+    cmp rbx, 262144
+    jb .Linstance_ok_58
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_58:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 0  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # SUB_CONST_I64 12
-    pop rax
-    sub rax, 12
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # SUB_CONST_F64 12.0
+    movsd xmm0, [.FLOAT9]
+    movsd xmm1, [rsp]
+    add rsp, 8
+    subsd xmm1, xmm0
+    sub rsp, 8
+    movsd [rsp], xmm1
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1814,17 +2069,18 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_57
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_57:
+    cmp rbx, 262144
+    jb .Linstance_ok_59
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_59:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 8  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1834,20 +2090,22 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_58
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_58:
+    cmp rbx, 262144
+    jb .Linstance_ok_60
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_60:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # CONST_I64 0
-    mov rax, 0
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # CONST_F64 0.0
+    movsd xmm0, [.FLOAT10]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1857,22 +2115,27 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_59
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_59:
+    cmp rbx, 262144
+    jb .Linstance_ok_61
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_61:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 24  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # SUB_I64 
-    pop rbx
-    pop rax
-    sub rax, rbx
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # TO_FLOAT 
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1882,26 +2145,27 @@ checkRightPaddleCollision:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_60
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_60:
+    cmp rbx, 262144
+    jb .Linstance_ok_62
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_62:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
     add rax, 32  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
+    movsd xmm0, [rdx + rax]
+    sub rsp, 8
+    movsd [rsp], xmm0
     # STRUCT_NEW 35
     lea rax, [rip + struct_counter]
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_61  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_61:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_63  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_63:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -1932,7 +2196,7 @@ checkRightPaddleCollision:
     ret
     # LABEL if_end0
 .LcheckRightPaddleCollision_if_end0:
-    # .line 73 "return b"
+    # .line 81 "return b"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -1965,29 +2229,29 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_init_aligned_99
+    jz .Lruntime_init_aligned_101
     sub rsp, 8
     call runtime_init
     add rsp, 8
-    jmp .Lruntime_init_done_99
-.Lruntime_init_aligned_99: 
+    jmp .Lruntime_init_done_101
+.Lruntime_init_aligned_101: 
     call runtime_init
-.Lruntime_init_done_99: 
-    lea rdi, [.STR5]  # filename
-    lea rsi, [.STR6]  # source
+.Lruntime_init_done_101: 
+    lea rdi, [.STR16]  # filename
+    lea rsi, [.STR17]  # source
     push rax  # Save rax and check alignment
     mov rax, rsp
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_set_source_info_aligned_100
+    jz .Lruntime_set_source_info_aligned_102
     sub rsp, 8
     call runtime_set_source_info
     add rsp, 8
-    jmp .Lruntime_set_source_info_done_100
-.Lruntime_set_source_info_aligned_100: 
+    jmp .Lruntime_set_source_info_done_102
+.Lruntime_set_source_info_aligned_102: 
     call runtime_set_source_info
-.Lruntime_set_source_info_done_100: 
+.Lruntime_set_source_info_done_102: 
     # .local ball struct:Ball
     # .local ballColor struct:Color
     # .local bgColor struct:Color
@@ -1997,14 +2261,14 @@ main:
     # .local rightPaddle struct:Paddle
     # .local rightScore i64
     # .local textColor struct:Color
-    # .line 77 "InitWindow(1200, 600, \"Pong\")"
+    # .line 85 "InitWindow(1200, 600, \"Pong\")"
     # CONST_I64 1200 600
     mov rax, 1200
     push rax
     mov rax, 600
     push rax
     # CONST_STR "Pong"
-    lea rax, [.STR0]
+    lea rax, [.STR11]
     push rax
     # CALL InitWindow 3 iii|v
     # CALL InitWindow: struct_args=set(), float_args=set(), stack_types=['i64', 'i64', 'str']
@@ -2014,15 +2278,15 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LInitWindow_aligned_62
+    jz .LInitWindow_aligned_64
     sub rsp, 8  # Align stack
     call InitWindow
     add rsp, 8  # Restore stack
-    jmp .LInitWindow_done_62
-    .LInitWindow_aligned_62:
+    jmp .LInitWindow_done_64
+    .LInitWindow_aligned_64:
     call InitWindow
-    .LInitWindow_done_62:
-    # .line 78 "SetTargetFPS(60)"
+    .LInitWindow_done_64:
+    # .line 86 "SetTargetFPS(60)"
     # CONST_I64 60
     mov rax, 60
     push rax
@@ -2032,15 +2296,15 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LSetTargetFPS_aligned_63
+    jz .LSetTargetFPS_aligned_65
     sub rsp, 8  # Align stack
     call SetTargetFPS
     add rsp, 8  # Restore stack
-    jmp .LSetTargetFPS_done_63
-    .LSetTargetFPS_aligned_63:
+    jmp .LSetTargetFPS_done_65
+    .LSetTargetFPS_aligned_65:
     call SetTargetFPS
-    .LSetTargetFPS_done_63:
-    # .line 80 "Color bgColor = Color(0, 0, 50, 255)"
+    .LSetTargetFPS_done_65:
+    # .line 88 "Color bgColor = Color(0, 0, 50, 255)"
     # CONST_I64 0 0 50 255
     mov rax, 0
     push rax
@@ -2055,10 +2319,10 @@ main:
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_64  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_64:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_66  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_66:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -2082,7 +2346,7 @@ main:
     # STORE 2
     pop rax
     mov [rbp - 24], rax
-    # .line 81 "Color paddleColor = Color(0, 255, 0, 255)"
+    # .line 89 "Color paddleColor = Color(0, 255, 0, 255)"
     # CONST_I64 0 255 0 255
     mov rax, 0
     push rax
@@ -2097,10 +2361,10 @@ main:
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_65  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_65:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_67  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_67:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -2124,7 +2388,7 @@ main:
     # STORE 5
     pop rax
     mov [rbp - 48], rax
-    # .line 82 "Color ballColor = Color(255, 255, 100, 255)"
+    # .line 90 "Color ballColor = Color(255, 255, 100, 255)"
     # CONST_I64 255 255 100 255
     mov rax, 255
     push rax
@@ -2139,10 +2403,10 @@ main:
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_66  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_66:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_68  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_68:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -2166,7 +2430,7 @@ main:
     # STORE 1
     pop rax
     mov [rbp - 16], rax
-    # .line 83 "Color textColor = Color(255, 255, 255, 255)"
+    # .line 91 "Color textColor = Color(255, 255, 255, 255)"
     # CONST_I64 255 255 255 255
     mov rax, 255
     push rax
@@ -2181,10 +2445,10 @@ main:
     mov rbx, [rax]  # rbx = current counter
     mov rcx, rbx
     inc rcx
-    cmp rcx, 16384
-    jb .Lstruct_no_wrap_67  # Jump if below 16384
-    xor rcx, rcx  # rcx >= 16384, wrap to 0
-    .Lstruct_no_wrap_67:
+    cmp rcx, 262144
+    jb .Lstruct_no_wrap_69  # Jump if below 262144
+    mov rcx, 1024  # Wrap to 1024 to preserve early instances
+    .Lstruct_no_wrap_69:
     mov [rax], rcx  # store counter
     mov rax, rcx  # rax = new instance_id after wrap
     mov rdx, 256
@@ -2208,7 +2472,7 @@ main:
     # STORE 8
     pop rax
     mov [rbp - 72], rax
-    # .line 85 "Paddle leftPaddle = createPaddle(30, 250)"
+    # .line 93 "Paddle leftPaddle = createPaddle(30, 250)"
     # CONST_I64 30 250
     mov rax, 30
     push rax
@@ -2221,7 +2485,7 @@ main:
     # STORE 3
     pop rax
     mov [rbp - 32], rax
-    # .line 86 "Paddle rightPaddle = createPaddle(1160, 250)"
+    # .line 94 "Paddle rightPaddle = createPaddle(1160, 250)"
     # CONST_I64 1160 250
     mov rax, 1160
     push rax
@@ -2234,7 +2498,7 @@ main:
     # STORE 6
     pop rax
     mov [rbp - 56], rax
-    # .line 87 "Ball ball = createBall(600, 300)"
+    # .line 95 "Ball ball = createBall(600, 300)"
     # CONST_I64 600 300
     mov rax, 600
     push rax
@@ -2247,15 +2511,15 @@ main:
     # STORE 0
     pop rax
     mov [rbp - 8], rax
-    # .line 89 "int leftScore = 0"
+    # .line 97 "int leftScore = 0"
     # STORE_CONST_I64 4 0
     mov rax, 0
     mov [rbp - 40], rax
-    # .line 90 "int rightScore = 0"
+    # .line 98 "int rightScore = 0"
     # STORE_CONST_I64 7 0
     mov rax, 0
     mov [rbp - 64], rax
-    # .line 92 "while (!WindowShouldClose()) {"
+    # .line 100 "while (!WindowShouldClose()) {"
     # LABEL while_start0
 .Lmain_while_start0:
     # CALL WindowShouldClose 0 |b
@@ -2263,14 +2527,14 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LWindowShouldClose_aligned_68
+    jz .LWindowShouldClose_aligned_70
     sub rsp, 8  # Align stack
     call WindowShouldClose
     add rsp, 8  # Restore stack
-    jmp .LWindowShouldClose_done_68
-    .LWindowShouldClose_aligned_68:
+    jmp .LWindowShouldClose_done_70
+    .LWindowShouldClose_aligned_70:
     call WindowShouldClose
-    .LWindowShouldClose_done_68:
+    .LWindowShouldClose_done_70:
     movzx rax, al  # Zero-extend bool (al) to rax
     push rax
     # NOT 
@@ -2283,25 +2547,9 @@ main:
     pop rax
     test rax, rax
     jz .Lmain_while_end1
-    # .line 93 "leftPaddle = updatePaddle(leftPaddle, 87, 83)"
+    # .line 101 "leftPaddle = updatePaddle(leftPaddle, 265, 264)"
     # LOAD 3
     mov rax, [rbp - 32]
-    push rax
-    # CONST_I64 87 83
-    mov rax, 87
-    push rax
-    mov rax, 83
-    push rax
-    # CALL updatePaddle 3
-    # CALL updatePaddle: struct_args=set(), float_args=set(), stack_types=['i64', 'i64', 'i64']
-    call updatePaddle
-    push rax
-    # STORE 3
-    pop rax
-    mov [rbp - 32], rax
-    # .line 94 "rightPaddle = updatePaddle(rightPaddle, 265, 264)"
-    # LOAD 6
-    mov rax, [rbp - 56]
     push rax
     # CONST_I64 265 264
     mov rax, 265
@@ -2312,10 +2560,26 @@ main:
     # CALL updatePaddle: struct_args=set(), float_args=set(), stack_types=['i64', 'i64', 'i64']
     call updatePaddle
     push rax
+    # STORE 3
+    pop rax
+    mov [rbp - 32], rax
+    # .line 102 "rightPaddle = updatePaddle(rightPaddle, 87, 83)"
+    # LOAD 6
+    mov rax, [rbp - 56]
+    push rax
+    # CONST_I64 87 83
+    mov rax, 87
+    push rax
+    mov rax, 83
+    push rax
+    # CALL updatePaddle 3
+    # CALL updatePaddle: struct_args=set(), float_args=set(), stack_types=['i64', 'i64', 'i64']
+    call updatePaddle
+    push rax
     # STORE 6
     pop rax
     mov [rbp - 56], rax
-    # .line 95 "ball = updateBall(ball)"
+    # .line 103 "ball = updateBall(ball)"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2326,7 +2590,7 @@ main:
     # STORE 0
     pop rax
     mov [rbp - 8], rax
-    # .line 97 "ball = checkLeftPaddleCollision(ball, leftPaddle)"
+    # .line 105 "ball = checkLeftPaddleCollision(ball, leftPaddle)"
     # LOAD 0 3
     mov rax, [rbp - 8]
     push rax
@@ -2339,7 +2603,7 @@ main:
     # STORE 0
     pop rax
     mov [rbp - 8], rax
-    # .line 98 "ball = checkRightPaddleCollision(ball, rightPaddle)"
+    # .line 106 "ball = checkRightPaddleCollision(ball, rightPaddle)"
     # LOAD 0 6
     mov rax, [rbp - 8]
     push rax
@@ -2352,7 +2616,7 @@ main:
     # STORE 0
     pop rax
     mov [rbp - 8], rax
-    # .line 100 "if (ball.x < ball.radius+2) {"
+    # .line 108 "if (ball.x < ball.radius+2) {"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2362,10 +2626,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_69
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_69:
+    cmp rbx, 262144
+    jb .Linstance_ok_71
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_71:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2382,10 +2646,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_70
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_70:
+    cmp rbx, 262144
+    jb .Linstance_ok_72
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_72:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2393,10 +2657,22 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # ADD_CONST_I64 2
-    pop rax
-    add rax, 2
+    # CONST_I64 2
+    mov rax, 2
     push rax
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # ADD_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    addsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_LT 
     pop rbx
     pop rax
@@ -2408,10 +2684,10 @@ main:
     pop rax
     test rax, rax
     jz .Lmain_if_end2
-    # .line 101 "rightScore = rightScore + 1"
-    # INC_LOCAL 7
-    inc qword ptr [rbp - 64]
-    # .line 102 "ball = createBall(600, 300)"
+    # .line 109 "leftScore = leftScore + 1"
+    # INC_LOCAL 4
+    inc qword ptr [rbp - 40]
+    # .line 110 "ball = createBall(600, 300)"
     # CONST_I64 600 300
     mov rax, 600
     push rax
@@ -2426,7 +2702,7 @@ main:
     mov [rbp - 8], rax
     # LABEL if_end2
 .Lmain_if_end2:
-    # .line 104 "if (ball.x > 1200 - ball.radius-2) {"
+    # .line 112 "if (ball.x > 1200 - ball.radius-2) {"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2436,10 +2712,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_71
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_71:
+    cmp rbx, 262144
+    jb .Linstance_ok_73
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_73:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2450,6 +2726,11 @@ main:
     # CONST_I64 1200
     mov rax, 1200
     push rax
+    # TO_FLOAT 
+    pop rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2459,10 +2740,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_72
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_72:
+    cmp rbx, 262144
+    jb .Linstance_ok_74
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_74:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2470,15 +2751,30 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
-    # SUB_I64 
-    pop rbx
-    pop rax
-    sub rax, rbx
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # CONST_I64 2
+    mov rax, 2
     push rax
-    # SUB_CONST_I64 2
+    # TO_FLOAT 
     pop rax
-    sub rax, 2
-    push rax
+    cvtsi2sd xmm0, rax
+    sub rsp, 8
+    movsd [rsp], xmm0
+    # SUB_F64 
+    movsd xmm1, [rsp]
+    add rsp, 8
+    movsd xmm0, [rsp]
+    add rsp, 8
+    subsd xmm0, xmm1
+    sub rsp, 8
+    movsd [rsp], xmm0
     # CMP_GT 
     pop rbx
     pop rax
@@ -2490,10 +2786,10 @@ main:
     pop rax
     test rax, rax
     jz .Lmain_if_end4
-    # .line 105 "leftScore = leftScore + 1"
-    # INC_LOCAL 4
-    inc qword ptr [rbp - 40]
-    # .line 106 "ball = createBall(600, 300)"
+    # .line 113 "rightScore = rightScore + 1"
+    # INC_LOCAL 7
+    inc qword ptr [rbp - 64]
+    # .line 114 "ball = createBall(600, 300)"
     # CONST_I64 600 300
     mov rax, 600
     push rax
@@ -2508,21 +2804,21 @@ main:
     mov [rbp - 8], rax
     # LABEL if_end4
 .Lmain_if_end4:
-    # .line 109 "BeginDrawing()"
+    # .line 117 "BeginDrawing()"
     # CALL BeginDrawing 0 |v
     # CALL BeginDrawing: struct_args=set(), float_args=set(), stack_types=[]
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LBeginDrawing_aligned_73
+    jz .LBeginDrawing_aligned_75
     sub rsp, 8  # Align stack
     call BeginDrawing
     add rsp, 8  # Restore stack
-    jmp .LBeginDrawing_done_73
-    .LBeginDrawing_aligned_73:
+    jmp .LBeginDrawing_done_75
+    .LBeginDrawing_aligned_75:
     call BeginDrawing
-    .LBeginDrawing_done_73:
-    # .line 110 "ClearBackground(bgColor)"
+    .LBeginDrawing_done_75:
+    # .line 118 "ClearBackground(bgColor)"
     # LOAD 2
     mov rax, [rbp - 24]
     push rax
@@ -2554,15 +2850,15 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LClearBackground_aligned_74
+    jz .LClearBackground_aligned_76
     sub rsp, 8  # Align stack
     call ClearBackground
     add rsp, 8  # Restore stack
-    jmp .LClearBackground_done_74
-    .LClearBackground_aligned_74:
+    jmp .LClearBackground_done_76
+    .LClearBackground_aligned_76:
     call ClearBackground
-    .LClearBackground_done_74:
-    # .line 112 "DrawRectangle(leftPaddle.x, leftPaddle.y, leftPaddle.width, leftPaddle.height, paddleColor)"
+    .LClearBackground_done_76:
+    # .line 120 "DrawRectangle(int(leftPaddle.x), int(leftPaddle.y), leftPaddle.width, leftPaddle.height, paddleColor)"
     # LOAD 3
     mov rax, [rbp - 32]
     push rax
@@ -2572,53 +2868,55 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_75
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_75:
-    mov rax, rbx
-    mov rdx, 256
-    imul rax, rdx  # rax = instance_id * 256
-    add rax, 0  # rax += field_idx * 8
-    lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # LOAD 3
-    mov rax, [rbp - 32]
-    push rax
-    # STRUCT_GET 1
-    pop rax  # struct reference
-    mov rbx, rax
-    shr rbx, 16  # rbx = instance_id
-    mov rcx, rax
-    and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_76
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_76:
-    mov rax, rbx
-    mov rdx, 256
-    imul rax, rdx  # rax = instance_id * 256
-    add rax, 8  # rax += field_idx * 8
-    lea rdx, [rip + struct_data]
-    mov rax, [rdx + rax]
-    push rax
-    # LOAD 3
-    mov rax, [rbp - 32]
-    push rax
-    # STRUCT_GET 2
-    pop rax  # struct reference
-    mov rbx, rax
-    shr rbx, 16  # rbx = instance_id
-    mov rcx, rax
-    and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
+    cmp rbx, 262144
     jb .Linstance_ok_77
-    and rbx, 0x3FFF  # Wrap to 0-16383
+    and rbx, 0x3FFFF  # Wrap to 0-262143
     .Linstance_ok_77:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
+    add rax, 0  # rax += field_idx * 8
+    lea rdx, [rip + struct_data]
+    mov rax, [rdx + rax]
+    push rax
+    # TO_INT 
+    # LOAD 3
+    mov rax, [rbp - 32]
+    push rax
+    # STRUCT_GET 1
+    pop rax  # struct reference
+    mov rbx, rax
+    shr rbx, 16  # rbx = instance_id
+    mov rcx, rax
+    and rcx, 0xFFFF  # rcx = struct_id
+    cmp rbx, 262144
+    jb .Linstance_ok_78
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_78:
+    mov rax, rbx
+    mov rdx, 256
+    imul rax, rdx  # rax = instance_id * 256
+    add rax, 8  # rax += field_idx * 8
+    lea rdx, [rip + struct_data]
+    mov rax, [rdx + rax]
+    push rax
+    # TO_INT 
+    # LOAD 3
+    mov rax, [rbp - 32]
+    push rax
+    # STRUCT_GET 2
+    pop rax  # struct reference
+    mov rbx, rax
+    shr rbx, 16  # rbx = instance_id
+    mov rcx, rax
+    and rcx, 0xFFFF  # rcx = struct_id
+    cmp rbx, 262144
+    jb .Linstance_ok_79
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_79:
+    mov rax, rbx
+    mov rdx, 256
+    imul rax, rdx  # rax = instance_id * 256
     add rax, 16  # rax += field_idx * 8
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
@@ -2632,10 +2930,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_78
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_78:
+    cmp rbx, 262144
+    jb .Linstance_ok_80
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_80:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2678,15 +2976,15 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawRectangle_aligned_79
+    jz .LDrawRectangle_aligned_81
     sub rsp, 8  # Align stack
     call DrawRectangle
     add rsp, 8  # Restore stack
-    jmp .LDrawRectangle_done_79
-    .LDrawRectangle_aligned_79:
+    jmp .LDrawRectangle_done_81
+    .LDrawRectangle_aligned_81:
     call DrawRectangle
-    .LDrawRectangle_done_79:
-    # .line 113 "DrawRectangle(rightPaddle.x, rightPaddle.y, rightPaddle.width, rightPaddle.height, paddleColor)"
+    .LDrawRectangle_done_81:
+    # .line 121 "DrawRectangle(int(rightPaddle.x), int(rightPaddle.y), rightPaddle.width, rightPaddle.height, paddleColor)"
     # LOAD 6
     mov rax, [rbp - 56]
     push rax
@@ -2696,10 +2994,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_80
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_80:
+    cmp rbx, 262144
+    jb .Linstance_ok_82
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_82:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2707,6 +3005,7 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
+    # TO_INT 
     # LOAD 6
     mov rax, [rbp - 56]
     push rax
@@ -2716,10 +3015,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_81
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_81:
+    cmp rbx, 262144
+    jb .Linstance_ok_83
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_83:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2727,6 +3026,7 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
+    # TO_INT 
     # LOAD 6
     mov rax, [rbp - 56]
     push rax
@@ -2736,10 +3036,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_82
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_82:
+    cmp rbx, 262144
+    jb .Linstance_ok_84
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_84:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2756,10 +3056,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_83
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_83:
+    cmp rbx, 262144
+    jb .Linstance_ok_85
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_85:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2802,15 +3102,15 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawRectangle_aligned_84
+    jz .LDrawRectangle_aligned_86
     sub rsp, 8  # Align stack
     call DrawRectangle
     add rsp, 8  # Restore stack
-    jmp .LDrawRectangle_done_84
-    .LDrawRectangle_aligned_84:
+    jmp .LDrawRectangle_done_86
+    .LDrawRectangle_aligned_86:
     call DrawRectangle
-    .LDrawRectangle_done_84:
-    # .line 115 "DrawCircle(ball.x, ball.y, ball.radius, ballColor)"
+    .LDrawRectangle_done_86:
+    # .line 123 "DrawCircle(int(ball.x), int(ball.y), ball.radius, ballColor)"
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2820,10 +3120,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_85
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_85:
+    cmp rbx, 262144
+    jb .Linstance_ok_87
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_87:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2831,6 +3131,7 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
+    # TO_INT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2840,10 +3141,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_86
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_86:
+    cmp rbx, 262144
+    jb .Linstance_ok_88
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_88:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2851,6 +3152,7 @@ main:
     lea rdx, [rip + struct_data]
     mov rax, [rdx + rax]
     push rax
+    # TO_INT 
     # LOAD 0
     mov rax, [rbp - 8]
     push rax
@@ -2860,10 +3162,10 @@ main:
     shr rbx, 16  # rbx = instance_id
     mov rcx, rax
     and rcx, 0xFFFF  # rcx = struct_id
-    cmp rbx, 16384
-    jb .Linstance_ok_87
-    and rbx, 0x3FFF  # Wrap to 0-16383
-    .Linstance_ok_87:
+    cmp rbx, 262144
+    jb .Linstance_ok_89
+    and rbx, 0x3FFFF  # Wrap to 0-262143
+    .Linstance_ok_89:
     mov rax, rbx
     mov rdx, 256
     imul rax, rdx  # rax = instance_id * 256
@@ -2907,17 +3209,17 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawCircle_aligned_88
+    jz .LDrawCircle_aligned_90
     sub rsp, 8  # Align stack
     call DrawCircle
     add rsp, 8  # Restore stack
-    jmp .LDrawCircle_done_88
-    .LDrawCircle_aligned_88:
+    jmp .LDrawCircle_done_90
+    .LDrawCircle_aligned_90:
     call DrawCircle
-    .LDrawCircle_done_88:
-    # .line 117 "DrawText(\"Pong Game\", 450, 20, 40, textColor)"
+    .LDrawCircle_done_90:
+    # .line 125 "DrawText(\"Pong Game\", 450, 20, 40, textColor)"
     # CONST_STR "Pong Game"
-    lea rax, [.STR1]
+    lea rax, [.STR12]
     push rax
     # CONST_I64 450 20 40
     mov rax, 450
@@ -2961,17 +3263,17 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawText_aligned_89
+    jz .LDrawText_aligned_91
     sub rsp, 8  # Align stack
     call DrawText
     add rsp, 8  # Restore stack
-    jmp .LDrawText_done_89
-    .LDrawText_aligned_89:
+    jmp .LDrawText_done_91
+    .LDrawText_aligned_91:
     call DrawText
-    .LDrawText_done_89:
-    # .line 118 "DrawText(f\"Left: {leftScore}\", 100, 50, 30, textColor)"
+    .LDrawText_done_91:
+    # .line 126 "DrawText(f\"Left: {leftScore}\", 100, 50, 30, textColor)"
     # CONST_STR "Left: "
-    lea rax, [.STR2]
+    lea rax, [.STR13]
     push rax
     # LOAD 4
     mov rax, [rbp - 40]
@@ -2983,14 +3285,14 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_int_to_str_aligned_90
+    jz .Lruntime_int_to_str_aligned_92
     sub rsp, 8
     call runtime_int_to_str
     add rsp, 8
-    jmp .Lruntime_int_to_str_done_90
-.Lruntime_int_to_str_aligned_90: 
+    jmp .Lruntime_int_to_str_done_92
+.Lruntime_int_to_str_aligned_92: 
     call runtime_int_to_str
-.Lruntime_int_to_str_done_90: 
+.Lruntime_int_to_str_done_92: 
     push rax
     # ADD_STR 
     pop rsi
@@ -3000,14 +3302,14 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_str_concat_checked_aligned_91
+    jz .Lruntime_str_concat_checked_aligned_93
     sub rsp, 8
     call runtime_str_concat_checked
     add rsp, 8
-    jmp .Lruntime_str_concat_checked_done_91
-.Lruntime_str_concat_checked_aligned_91: 
+    jmp .Lruntime_str_concat_checked_done_93
+.Lruntime_str_concat_checked_aligned_93: 
     call runtime_str_concat_checked
-.Lruntime_str_concat_checked_done_91: 
+.Lruntime_str_concat_checked_done_93: 
     push rax
     # CONST_I64 100 50 30
     mov rax, 100
@@ -3051,17 +3353,17 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawText_aligned_92
+    jz .LDrawText_aligned_94
     sub rsp, 8  # Align stack
     call DrawText
     add rsp, 8  # Restore stack
-    jmp .LDrawText_done_92
-    .LDrawText_aligned_92:
+    jmp .LDrawText_done_94
+    .LDrawText_aligned_94:
     call DrawText
-    .LDrawText_done_92:
-    # .line 119 "DrawText(f\"Right: {rightScore}\", 1000, 50, 30, textColor)"
+    .LDrawText_done_94:
+    # .line 127 "DrawText(f\"Right: {rightScore}\", 1000, 50, 30, textColor)"
     # CONST_STR "Right: "
-    lea rax, [.STR3]
+    lea rax, [.STR14]
     push rax
     # LOAD 7
     mov rax, [rbp - 64]
@@ -3073,14 +3375,14 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_int_to_str_aligned_93
+    jz .Lruntime_int_to_str_aligned_95
     sub rsp, 8
     call runtime_int_to_str
     add rsp, 8
-    jmp .Lruntime_int_to_str_done_93
-.Lruntime_int_to_str_aligned_93: 
+    jmp .Lruntime_int_to_str_done_95
+.Lruntime_int_to_str_aligned_95: 
     call runtime_int_to_str
-.Lruntime_int_to_str_done_93: 
+.Lruntime_int_to_str_done_95: 
     push rax
     # ADD_STR 
     pop rsi
@@ -3090,14 +3392,14 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_str_concat_checked_aligned_94
+    jz .Lruntime_str_concat_checked_aligned_96
     sub rsp, 8
     call runtime_str_concat_checked
     add rsp, 8
-    jmp .Lruntime_str_concat_checked_done_94
-.Lruntime_str_concat_checked_aligned_94: 
+    jmp .Lruntime_str_concat_checked_done_96
+.Lruntime_str_concat_checked_aligned_96: 
     call runtime_str_concat_checked
-.Lruntime_str_concat_checked_done_94: 
+.Lruntime_str_concat_checked_done_96: 
     push rax
     # CONST_I64 1000 50 30
     mov rax, 1000
@@ -3141,49 +3443,49 @@ main:
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LDrawText_aligned_95
+    jz .LDrawText_aligned_97
     sub rsp, 8  # Align stack
     call DrawText
     add rsp, 8  # Restore stack
-    jmp .LDrawText_done_95
-    .LDrawText_aligned_95:
+    jmp .LDrawText_done_97
+    .LDrawText_aligned_97:
     call DrawText
-    .LDrawText_done_95:
-    # .line 121 "EndDrawing()"
+    .LDrawText_done_97:
+    # .line 129 "EndDrawing()"
     # CALL EndDrawing 0 |v
-    # CALL EndDrawing: struct_args=set(), float_args=set(), stack_types=[]
+    # CALL EndDrawing: struct_args=set(), float_args=set(), stack_types=['i64', 'i64', 'i64', 'i64', 'i64', 'i64']
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LEndDrawing_aligned_96
+    jz .LEndDrawing_aligned_98
     sub rsp, 8  # Align stack
     call EndDrawing
     add rsp, 8  # Restore stack
-    jmp .LEndDrawing_done_96
-    .LEndDrawing_aligned_96:
+    jmp .LEndDrawing_done_98
+    .LEndDrawing_aligned_98:
     call EndDrawing
-    .LEndDrawing_done_96:
+    .LEndDrawing_done_98:
     # JUMP while_start0
     jmp .Lmain_while_start0
     # LABEL while_end1
 .Lmain_while_end1:
-    # .line 124 "CloseWindow()"
+    # .line 132 "CloseWindow()"
     # CALL CloseWindow 0 |v
     # CALL CloseWindow: struct_args=set(), float_args=set(), stack_types=[]
     # Stack alignment for external call
     mov r11, rsp
     and r11, 0xF
-    jz .LCloseWindow_aligned_97
+    jz .LCloseWindow_aligned_99
     sub rsp, 8  # Align stack
     call CloseWindow
     add rsp, 8  # Restore stack
-    jmp .LCloseWindow_done_97
-    .LCloseWindow_aligned_97:
+    jmp .LCloseWindow_done_99
+    .LCloseWindow_aligned_99:
     call CloseWindow
-    .LCloseWindow_done_97:
-    # .line 125 "println(\"Thanks for playing Pong in Fr!\")"
+    .LCloseWindow_done_99:
+    # .line 133 "println(\"Thanks for playing Pong in Fr!\")"
     # CONST_STR "Thanks for playing Pong in Fr!"
-    lea rax, [.STR4]
+    lea rax, [.STR15]
     push rax
     # BUILTIN_PRINTLN 
     pop rdi
@@ -3192,14 +3494,14 @@ main:
     add rax, 8  # Account for the push
     test rax, 0xF
     pop rax
-    jz .Lruntime_println_str_aligned_98
+    jz .Lruntime_println_str_aligned_100
     sub rsp, 8
     call runtime_println_str
     add rsp, 8
-    jmp .Lruntime_println_str_done_98
-.Lruntime_println_str_aligned_98: 
+    jmp .Lruntime_println_str_done_100
+.Lruntime_println_str_aligned_100: 
     call runtime_println_str
-.Lruntime_println_str_done_98: 
+.Lruntime_println_str_done_100: 
     # RETURN_VOID 
 .Lmain_skip_labels:
     xor rax, rax
@@ -3210,25 +3512,56 @@ main:
     # .entry main
 
 .section .rodata
-.STR0:
+.FLOAT0:
+    .double 720.0
+.FLOAT1:
+    .double 20.0
+.FLOAT2:
+    .double 300.0
+.FLOAT3:
+    .double 100.0
+.FLOAT4:
+    .double 0.0
+.FLOAT5:
+    .double 0.0
+.FLOAT6:
+    .double 0.0
+.FLOAT7:
+    .double 12.0
+.FLOAT8:
+    .double 0.0
+.FLOAT9:
+    .double 12.0
+.FLOAT10:
+    .double 0.0
+.STR11:
     .asciz "Pong"
-.STR1:
+.STR12:
     .asciz "Pong Game"
-.STR2:
+.STR13:
     .asciz "Left: "
-.STR3:
+.STR14:
     .asciz "Right: "
-.STR4:
+.STR15:
     .asciz "Thanks for playing Pong in Fr!"
-.STR5:
+.STR16:
     .asciz "pong.fr"
-.STR6:
-    .asciz "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nreturn Paddle(startX, startY, 20, 120, 12)\n\n\n\nreturn Ball(startX, startY, 20, 8, 6)\n\n\n\nint newY = p.y\nif (IsKeyDown(upKey)) {\nnewY = p.y - p.speed\n\nif (IsKeyDown(downKey)) {\nnewY = p.y + p.speed\n\nif (newY < 0) {\nnewY = 0\n\nif (newY + p.height > 600) {\nnewY = 600 - p.height\n\nreturn Paddle(p.x, newY, p.width, p.height, p.speed)\n\n\n\nint newX = int(b.x + b.velX)\nint newY = int(b.y + b.velY)\nint newVelY = b.velY\n\nif (newY < b.radius) {\nnewY = b.radius\nnewVelY = 0 - newVelY\n\nif (newY > 600 - b.radius) {\nnewY = 600 - b.radius\nnewVelY = 0 - newVelY\n\n\nreturn Ball(newX, newY, b.radius, b.velX, newVelY)\n\n\n\nif (b.x - b.radius <= p.x + p.width && b.x >= p.x && b.y >= p.y && b.y <= p.y + p.height) {\nreturn Ball(b.x + 12, b.y, b.radius, 0 - b.velX, b.velY)\n\nreturn b\n\n\n\nif (b.x + b.radius >= p.x && b.x <= p.x + p.width && b.y >= p.y && b.y <= p.y + p.height) {\nreturn Ball(b.x - 12, b.y, b.radius, 0 - b.velX, b.velY)\n\nreturn b\n\n\n\nInitWindow(1200, 600, \"Pong\")\nSetTargetFPS(60)\n\nColor bgColor = Color(0, 0, 50, 255)\nColor paddleColor = Color(0, 255, 0, 255)\nColor ballColor = Color(255, 255, 100, 255)\nColor textColor = Color(255, 255, 255, 255)\n\nPaddle leftPaddle = createPaddle(30, 250)\nPaddle rightPaddle = createPaddle(1160, 250)\nBall ball = createBall(600, 300)\n\nint leftScore = 0\nint rightScore = 0\n\nwhile (!WindowShouldClose()) {\nleftPaddle = updatePaddle(leftPaddle, 87, 83)\nrightPaddle = updatePaddle(rightPaddle, 265, 264)\nball = updateBall(ball)\n\nball = checkLeftPaddleCollision(ball, leftPaddle)\nball = checkRightPaddleCollision(ball, rightPaddle)\n\nif (ball.x < ball.radius+2) {\nrightScore = rightScore + 1\nball = createBall(600, 300)\n\nif (ball.x > 1200 - ball.radius-2) {\nleftScore = leftScore + 1\nball = createBall(600, 300)\n\n\nBeginDrawing()\nClearBackground(bgColor)\n\nDrawRectangle(leftPaddle.x, leftPaddle.y, leftPaddle.width, leftPaddle.height, paddleColor)\nDrawRectangle(rightPaddle.x, rightPaddle.y, rightPaddle.width, rightPaddle.height, paddleColor)\n\nDrawCircle(ball.x, ball.y, ball.radius, ballColor)\n\n\"DrawText(\"Pong\n\"DrawText(f\"Left:\n\"DrawText(f\"Right:\n\nEndDrawing()\n\n\nCloseWindow()\n\"println(\"Thanks"
+.STR17:
+    .asciz "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nfloat fx = float(startX)\nfloat fy = float(startY)\nreturn Paddle(fx, fy, 20, 120, 720.0)\n\n\n\nfloat fx = float(startX)\nfloat fy = float(startY)\nreturn Ball(fx, fy, 20.0, -300.0, 100.0)\n\n\n\nfloat dt = GetFrameTime()\n\nfloat newY = p.y\nif (IsKeyDown(upKey)) {\nnewY = p.y - p.speed * dt\n\nif (IsKeyDown(downKey)) {\nnewY = p.y + p.speed * dt\n\nif (newY < 0) {\nnewY = 0\n\nif (newY + p.height > 600) {\nnewY = 600 - p.height\n\nreturn Paddle(p.x, newY, p.width, p.height, p.speed)\n\n\n\nfloat dt = GetFrameTime()\n\nfloat newX = b.x + b.velX * dt\nfloat newY = b.y + b.velY * dt\nfloat newVelY = b.velY\n\nif (newY < b.radius) {\nnewY = b.radius\nnewVelY = 0.0 - newVelY\n\nif (newY > 600 - b.radius) {\nnewY = 600 - b.radius\nnewVelY = 0.0 - newVelY\n\n\nreturn Ball(newX, newY, b.radius, b.velX, newVelY)\n\n\n\nif (b.x - b.radius <= p.x + p.width && b.x >= p.x && b.y >= p.y && b.y <= p.y + p.height) {\nreturn Ball(b.x + 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)\n\nreturn b\n\n\n\nif (b.x + b.radius >= p.x && b.x <= p.x + p.width && b.y >= p.y && b.y <= p.y + p.height) {\nreturn Ball(b.x - 12.0, b.y, b.radius, 0.0 - b.velX, b.velY)\n\nreturn b\n\n\n\nInitWindow(1200, 600, \"Pong\")\nSetTargetFPS(60)\n\nColor bgColor = Color(0, 0, 50, 255)\nColor paddleColor = Color(0, 255, 0, 255)\nColor ballColor = Color(255, 255, 100, 255)\nColor textColor = Color(255, 255, 255, 255)\n\nPaddle leftPaddle = createPaddle(30, 250)\nPaddle rightPaddle = createPaddle(1160, 250)\nBall ball = createBall(600, 300)\n\nint leftScore = 0\nint rightScore = 0\n\nwhile (!WindowShouldClose()) {\nleftPaddle = updatePaddle(leftPaddle, 265, 264)\nrightPaddle = updatePaddle(rightPaddle, 87, 83)\nball = updateBall(ball)\n\nball = checkLeftPaddleCollision(ball, leftPaddle)\nball = checkRightPaddleCollision(ball, rightPaddle)\n\nif (ball.x < ball.radius+2) {\nleftScore = leftScore + 1\nball = createBall(600, 300)\n\nif (ball.x > 1200 - ball.radius-2) {\nrightScore = rightScore + 1\nball = createBall(600, 300)\n\n\nBeginDrawing()\nClearBackground(bgColor)\n\nDrawRectangle(int(leftPaddle.x), int(leftPaddle.y), leftPaddle.width, leftPaddle.height, paddleColor)\nDrawRectangle(int(rightPaddle.x), int(rightPaddle.y), rightPaddle.width, rightPaddle.height, paddleColor)\n\nDrawCircle(int(ball.x), int(ball.y), ball.radius, ballColor)\n\n\"DrawText(\"Pong\n\"DrawText(f\"Left:\n\"DrawText(f\"Right:\n\nEndDrawing()\n\n\nCloseWindow()\n\"println(\"Thanks"
 
 .section .bss
+.globl global_vars
 global_vars:
     .space 2048  # Space for 256 global variables (8 bytes each)
+.globl struct_heap_ptr
+struct_heap_ptr:
+    .quad 0  # Current heap position (bump allocator)
+.globl struct_heap_base
+struct_heap_base:
+    .quad 0  # Base pointer to heap (allocated at runtime)
 struct_counter:
     .quad 0  # Counter for dynamic struct allocation
+list_append_scratch:
+    .quad 0  # Temporary storage for list pointer during list_append
 struct_data:
-    .space 4194304  # Space for struct instances (16384 instances * 256 bytes each)
+    .space 67108864  # Space for struct instances (262144 instances * 256 bytes each = 64MB)

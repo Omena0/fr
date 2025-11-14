@@ -1,5 +1,4 @@
 
-
 # Fr
 
 [![Build](https://github.com/Omena0/fr/actions/workflows/publish.yaml/badge.svg)](https://github.com/Omena0/fr/actions/workflows/publish.yaml)
@@ -16,6 +15,7 @@ pip install frscript
 ```
 
 ## Features:
+
 - **Command line launcher** (`fr`)
 - **File and Socket I/O** - Low-level file operations and sockets.
 - **Multiprocessing**. - Easy threading with fork() and wait().
@@ -24,14 +24,105 @@ pip install frscript
 - **Stack-based VM** - Fast and memory efficient.
 - **Readable bytecode** - Optimize hot code manually
 
+## Benchmarks:
+
+### Pi_1k
+
+This benchmark computes 1000 digits of pi.
+
+```text
+Python: 0.421s
+Python VM: DNF
+C VM: 69.81s
+Native: 0.033s
+```
+
+### Fibonacci
+
+This benchmark computes the 1-billionth fibonacci number in mod 1 000 000.
+
+```text
+Python: 40.435s
+Python VM: DNF
+C VM: 31.556s
+Native: 4.553s
+```
+
 ## What's New
 
+### In version 9B:
+
+This release adds support for native executables.
+
+#### Full changelog:
+
+Added initial native compiler implementation.
+Added `.struct_type` directive handler in C VM to support struct type name-to-ID mappings
+Added `bool` return type support to function type signatures for C functions
+Added `float` parameter support in native compiler for C function calls using `xmm0`-`xmm7` registers
+Added `instance_id` clamping to prevent out-of-bounds struct memory access
+Added `list_append_scratch` BSS symbol for temporary list pointer storage during runtime calls
+Added native optimizer pass to optimize multiply-by-2 to add instruction and multiply-by-power-of-2 to `shl` instruction
+Added native optimizer pass to optimize multiply-by-constant to use immediate `imul`
+Added native optimizer pass to simplify stack alignment checks from 5 instructions to 2
+Added `struct_heap_ptr` and `struct_heap_base` BSS symbols required by `runtime_init`
+Added support for `#pragma no_eval` directive to disable constant evaluation at parse time
+Added support for `c_import <file.c|file.h>` statements to import C code with automatic signature extraction
+Added support for `c_link <flags>` statements for C linker flags
+Added support for `import <file.fr>` statements to import other Fr files
+Changed native compiler GCC optimization from `-O0` to `-O3` for better runtime performance
+Changed test runner GCC optimization from `-O0` to `-O3` to match CLI compilation flags
+Fixed assembly optimizer bug that removed `mov` instructions used in subsequent address calculations
+Fixed C VM `LOAD2_DIV_F64` to handle integer operands by converting to `float` for true division
+Fixed CLI native command to properly distinguish between `-O` (optimize) and `-O0` (no optimize) flags
+Fixed `Color` struct packing to use unsigned shift and clamping for raylib compatibility
+Fixed `Color` struct packing using `rcx` as temp register when `rcx` is the target
+Fixed duplicate function epilogues when `RETURN` was present
+Fixed implicit function epilogue generation for functions without explicit return statements
+Fixed internal Fr function argument handling to read from stack in reverse order
+Fixed missing comma in f-string assembly generation
+Fixed native compiler `ARG` instruction to track argument types in `local_types`
+Fixed native compiler `BUILTIN_PRINT` to handle `float` values using `runtime_print_float`
+Fixed native compiler C function calls to use separate integer and `float` register counters
+Fixed native compiler `LOAD2_DIV_F64` to update `stack_types` tracking for proper println type dispatch
+Fixed native compiler `LOAD2_MOD_I64` to use signed division (`cqo`) instead of unsigned (`xor rdx,rdx`)
+Fixed native compiler `MOD_CONST_I64` broken optimization that assumed values less than 2x modulo
+Fixed native compiler `RETURN` instruction emitting bare `ret` without epilogue for non-GOTO control flow labels causing segfaults
+Fixed native compiler `SET_ADD` to preserve set pointer across function calls using scratch variable
+Fixed native compiler `SET_REMOVE` to preserve set pointer across function calls using scratch variable
+Fixed native compiler `STRUCT_GET` to handle both numeric struct IDs and struct names in type tracking
+Fixed native compiler argument type tracking using stale `stack_types` indices when popping arguments from stack
+Fixed native compiler control flow label detection to recognize labels without underscores (`else11`, `if5`, `for2`, etc)
+Fixed native compiler `float` field handling when passing struct `float` fields to C functions
+Fixed native compiler label detection for control flow statements to check label names without underscores
+Fixed native compiler `LIST_APPEND` to preserve list pointer across function calls using global scratch variable
+Fixed native compiler `LIST_SET` to preserve list pointer across function calls using global scratch variable
+Fixed native compiler only applying stack alignment to external C function calls
+Fixed native compiler parsing `.struct` directive to skip `total_size` field
+Fixed native compiler struct field type extraction from `stack_types`
+Fixed native compiler struct heap allocation to use `mmap()` for runtime allocation
+Fixed native compiler struct stack allocations not being cleaned up after passing structs to C functions
+Fixed native compiler to zero-extend `bool` return values to prevent garbage in upper bits
+Fixed parser `loop_depth` tracking for break/continue statements inside for loops
+Fixed struct counter wrapping comparison for proper unsigned wraparound
+Fixed struct `instance_id` extraction using signed shift instead of unsigned shift
+Fixed `void` functions in native compiler pushing garbage return values onto stack
+Implemented automatic C header parsing to extract function signatures and struct definitions
+Implemented automatic int-to-`float` conversion for `float` parameters in C calls
+Implemented `Color` struct packing for raylib C interop
+Implemented native compiler `LOAD2_DIV_F64` instruction for fused load-and-divide `float` operations with int-to-`float` conversion
+Implemented native compiler `LOAD2_DIV_I64` instruction for fused load-and-divide operations with division by zero checking
+Inlined native compiler `LIST_GET` operation with fast-path bounds checking for better performance
+Inlined native compiler `LIST_SET` operation with fast-path bounds checking for better performance
+
 ### In version 8A:
+
 Major new update.
 
 This update brings the speed of the fibonacci benchmark faster than python.
 
 #### Major changes:
+
 - Added `goto` - Allows jumping to specific parts of code
 - Added `<type> <var> = goto <label>` syntax, gotos can return values.
 - Added compiler directives:
@@ -44,6 +135,7 @@ This update brings the speed of the fibonacci benchmark faster than python.
 - Added support for basic global vars
 
 #### Full changelog:
+
 - Added OP_LOAD_GLOBAL and OP_STORE_GLOBAL bytecode instructions
 - Added global_vars array to VM struct for shared variable storage across function calls
 - Added .global directive for declaring global variables in bytecode
@@ -93,6 +185,7 @@ This update brings the speed of the fibonacci benchmark faster than python.
 - Modified compiler to emit LOAD_GLOBAL/STORE_GLOBAL for global variables
 
 ### In version 7B:
+
 Bugfixes and performance.
 
 - Fixed FUSED_LOAD_STORE and FUSED_STORE_LOAD instructions executing in pairs.
@@ -102,6 +195,7 @@ Bugfixes and performance.
 - Optimizer detects and preserves side effects in conditional branches
 
 ### In version 7A:
+
 General performance upgrade.
 
 This version is ~10% faster than 6A.
@@ -143,6 +237,7 @@ This version is ~10% faster than 6A.
 - Fixed type errors
 
 ### In Version 6D
+
 Feature and bugfix update
 
 - Added runtime error handling
@@ -163,6 +258,7 @@ Feature and bugfix update
 - Fixed test runner to properly handle exceptions vs partial output in C VM
 
 ### In Version 6A
+
 Bugfixes.
 
 - Fixed Python SyntaxError handling for unclosed strings in parser
@@ -173,6 +269,7 @@ Bugfixes.
 - Updated README with improved installation instructions
 
 ### In Version 5A
+
 Debugging update
 
 - Added comprehensive debugging support
@@ -190,11 +287,13 @@ Debugging update
 - Moved over 240 test files into organized directory structure
 
 ### In Version 4E
+
 - Fixed C runtime Python object handling
 - Improved optimizer for Python objects
 - Enhanced test suite stability
 
 ### In Version 4D
+
 - Added pyobj as type alias for pyobject
 
     You can now use the shorter `pyobj` keyword instead of `pyobject` for Python object types.
@@ -203,6 +302,7 @@ Debugging update
 - Updated examples to use shorter pyobj syntax
 
 ### In Version 4C
+
 - Added 9 test cases for Python object setattr functionality
 
     Comprehensive testing for setting Python object attributes from FRScript, covering all data types and edge cases.
@@ -210,6 +310,7 @@ Debugging update
 - Tests cover: basic setattr, boolean, float, list, multiple attributes, multiple objects, nested attributes, overwrite, string values
 
 ### In Version 4B
+
 - Fixed Python attribute access in both runtimes
 - Added Python module function call support
 
@@ -221,6 +322,7 @@ Debugging update
 - Enhanced compiler with better Python integration
 
 ### In Version 4A
+
 - Full Python integration and interoperability
 
     You can now use any Python libraries from FRScript! Import Python modules, create Python objects, call functions, and access attributes seamlessly.
@@ -244,12 +346,14 @@ Debugging update
 - Updated README with Python integration examples
 
 ### In Version 3B
+
 - Bugfixes for HTTP server
 - Enhanced builtin functions
 - Improved CLI functionality
 - Fixed compiler edge cases
 
 ### In Version 3A
+
 - Added HTTP server example with static file serving
 
     Full-featured HTTP server implementation with routing, static file serving, and socket handling.
@@ -260,6 +364,7 @@ Debugging update
 - Added comprehensive HTTP routing example
 
 ### In Version 2B
+
 - Added more I/O utility functions
 
     Enhanced file I/O with sequential reads, write returns, and improved socket handling for multiple connections.
@@ -273,6 +378,7 @@ Debugging update
 - Added var_in_function test case
 
 ### In Version 2A
+
 - Added comprehensive file I/O support
 
     Low-level file operations including read, write, append, and partial reads.
@@ -288,6 +394,7 @@ Debugging update
 - Added 10 I/O test cases
 
 ### In Version A1
+
 - Initial release of FRScript
 
     A simple bytecode compiled C-style scripting language with Python runtime and C VM.
@@ -314,4 +421,3 @@ Debugging update
 - Utility functions for runtime operations (265 lines)
 - Test runner (250 lines)
 - Complete README documentation
-

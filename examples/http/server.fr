@@ -7,17 +7,17 @@ void main(str argv) {
     listen(sock, 5)
 
     while (true) {
-        int cs = accept(sock)
+        int cs = sock.accept()
 
         // Read the entire HTTP request at once
-        bytes request_bytes = recv(cs, 4096)
+        bytes request_bytes = cs.recv(4096)
         str request = request_bytes.decode()
 
         // Extract just the first line (method + path)
-        list lines = split(request, "\r\n")
-        list header = split(lines[0], " ")
+        list lines = request.split("\r\n")
+        list header = lines[0].split(" ")[1:]
         str type = header[0]
-        str path = "./static" + header[1] + ".html"
+        str path = f"./static/{header[1]}.html"
 
         println(f"Serving {path}..")
 
@@ -28,15 +28,15 @@ void main(str argv) {
             response += "404 Not Found"
         } else {
             int fd_page = fopen(path)
-            str content = fread(fd_page, -1)
+            bytes content = fd_page.fread()
 
-            response += content
+            response += content.decode()
         }
 
         // Send HTTP response
-        send(cs, (response + "\r\n\r\n").encode())
-        sclose(cs)
+        cs.send(encode(response + "\r\n\r\n"))
+        cs.sclose()
     }
 
-    sclose(sock)
+    cs.sclose()
 }

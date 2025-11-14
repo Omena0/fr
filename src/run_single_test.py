@@ -119,11 +119,17 @@ def main():
     
     for i, line in enumerate(lines):
         stripped = line.strip()
+        
+        # Skip pragma directives when looking for expectations
+        if stripped.startswith('#pragma'):
+            code_start_idx = i + 1
+            continue
+        
         if stripped.startswith('//'):
             comment_content = stripped[2:].strip()  # Remove '//' and whitespace
             
-            if i == 0:
-                # First line: Always treat as expectation
+            if not expect_lines:
+                # First expectation line: Always treat as expectation
                 expect_lines.append(comment_content)
                 code_start_idx = i + 1
             elif comment_content.startswith('!') or comment_content.startswith('?') or comment_content.startswith('@'):
@@ -422,15 +428,12 @@ def main():
                 native_bin = f.name
 
             # Use same compilation flags as cli.py to ensure ABI compatibility
-            # Using -O0 with selected optimizations because -O2+ breaks handwritten assembly
             compile_cmd = [
                 'gcc',
                 obj_file,
                 runtime_file,
                 f'-I{runtime_include_dir}',
-                '-O0', '-march=native', '-mtune=native',
-                '-finline-functions', '-funroll-loops',
-                '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
+                '-O3', '-march=native', '-mtune=native',
                 '-ffunction-sections', '-fdata-sections',
                 '-Wl,--gc-sections',
                 '-o',
