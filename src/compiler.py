@@ -84,6 +84,12 @@ builtin_map = {
     'py_getattr': 'PY_GETATTR',
     'py_setattr': 'PY_SETATTR',
     'py_call_method': 'PY_CALL_METHOD',
+    # Collection operations
+    'append': 'LIST_APPEND',
+    'pop': 'LIST_POP',
+    'set_add': 'SET_ADD',
+    'set_remove': 'SET_REMOVE',
+    'set_contains': 'SET_CONTAINS',
 }
 
 
@@ -288,6 +294,116 @@ class BytecodeCompiler:
             return ''
 
         return ''
+
+    def infer_expr_type(self, expr: Any) -> str:
+        """Infer the type of an expression (returns 'i64', 'f64', 'str', 'bool', etc.)"""
+        if expr is None:
+            return 'i64'
+
+        # Literal types
+        if isinstance(expr, bool):
+            return 'bool'
+        if isinstance(expr, int):
+            return 'i64'
+        if isinstance(expr, float):
+            return 'f64'
+        if isinstance(expr, str):
+            # Could be a variable reference or string literal
+            return self.var_types.get(expr, 'i64') if expr in self.var_mapping else 'str'
+        if isinstance(expr, list):
+            return 'list'
+
+        if not isinstance(expr, dict):
+            return 'i64'
+
+        # Check for wrapped literals like {'value': 0.8}
+        if 'value' in expr and len(expr) == 1:
+            return self.infer_expr_type(expr['value'])
+
+        # Check expr type field
+        expr_type_field = expr.get('type', '')
+        if expr_type_field == 'int':
+            return 'i64'
+        if expr_type_field == 'float':
+            return 'f64'
+        if expr_type_field in ('string', 'str'):
+            return 'str'
+        if expr_type_field == 'bool':
+            return 'bool'
+
+        # Variable reference
+        if 'id' in expr:
+            var_name = expr['id']
+            var_type = self.var_types.get(var_name, 'i64')
+            # Normalize to basic types
+            if var_type in ('int', 'i64'):
+                return 'i64'
+            if var_type in ('float', 'f64'):
+                return 'f64'
+            if var_type in ('str', 'string'):
+                return 'str'
+            return 'bool' if var_type == 'bool' else var_type
+
+        # Member access (struct field)
+        if 'attr' in expr and 'value' in expr:
+            field_name = expr['attr']
+            base_type = self.get_expr_struct_type(expr['value'])
+            if base_type and base_type in self.struct_defs:
+                struct_def = self.struct_defs[base_type]
+                fields = struct_def.get('fields', [])
+                for field in fields:
+                    if field.get('name') == field_name:
+                        field_type = field.get('type', 'i64')
+                        # Normalize to basic types
+                        if field_type in ('int', 'i64'):
+                            return 'i64'
+                        if field_type in ('float', 'f64'):
+                            return 'f64'
+                        if field_type in ('str', 'string'):
+                            return 'str'
+                        return 'bool' if field_type == 'bool' else field_type
+
+        # Binary operation - infer result type from operands
+        if 'op' in expr and 'left' in expr and 'right' in expr:
+            left_type = self.infer_expr_type(expr['left'])
+            right_type = self.infer_expr_type(expr['right'])
+            # If either operand is float, result is float
+            if left_type in ('f64', 'float') or right_type in ('f64', 'float'):
+                return 'f64'
+            # If either is string, result is string (for concatenation)
+            if left_type in ('str', 'string') or right_type in ('str', 'string'):
+                return 'str'
+            # If either is bool and it's a logical op, result is bool
+            return 'bool' if left_type == 'bool' or right_type == 'bool' else 'i64'
+
+        # Function call - check return type
+        if expr.get('type') == 'call' or 'func' in expr:
+            # Try to get function info from bytecode if available
+            func_name = None
+            if 'name' in expr:
+                func_name = expr['name']
+            elif 'func' in expr:
+                func_info = expr['func']
+                if isinstance(func_info, str):
+                    func_name = func_info
+                elif isinstance(func_info, dict) and 'id' in func_info:
+                    func_name = func_info['id']
+
+            # Check if we have the function signature from C imports
+            if func_name and func_name in self.c_functions:
+                return_type = self.c_functions[func_name].get('return_type', 'i64')
+                # Normalize
+                if return_type in ('int', 'i64', 'i'):
+                    return 'i64'
+                if return_type in ('float', 'f64', 'f'):
+                    return 'f64'
+                if return_type in ('str', 'string', 's'):
+                    return 'str'
+                if return_type in ('bool', 'b'):
+                    return 'bool'
+                return return_type
+
+        return 'i64'  # Default
 
     def compile_expr(self, expr: Any, expr_type: str = 'i64'):
         """Compile an expression node to bytecode (pushes result to stack)"""
@@ -608,9 +724,24 @@ class BytecodeCompiler:
                 left = expr['left']
                 right = expr['right']
 
+                # Infer actual types of operands
+                left_type = self.infer_expr_type(left)
+                right_type = self.infer_expr_type(right)
+
                 # Compile operands (push to stack)
                 self.compile_expr(left, expr_type)
+                
+                # If types don't match and one is float, convert the int to float
+                if left_type in ('i64', 'int') and right_type in ('f64', 'float'):
+                    self.emit("TO_FLOAT")
+                    left_type = 'f64'  # Update after conversion
+                
                 self.compile_expr(right, expr_type)
+                
+                # If types don't match and one is float, convert the int to float
+                if right_type in ('i64', 'int') and left_type in ('f64', 'float'):
+                    self.emit("TO_FLOAT")
+                    right_type = 'f64'  # Update after conversion
 
                 # Determine type suffix - check if either operand is a string
                 # For string concatenation, we need ADD_STR
@@ -634,8 +765,12 @@ class BytecodeCompiler:
                     elif is_function_call(right) and extract_func_name(right.get('func', '')) == 'str':
                         is_string_op = True
 
-                if is_string_op or expr_type in {'str', 'string'}:
+                # Determine type suffix based on actual operand types (after conversions)
+                if is_string_op or expr_type in {'str', 'string'} or left_type in ('str', 'string') or right_type in ('str', 'string'):
                     type_suffix = '_STR'
+                # If either operand is a float, use float operations
+                elif left_type in ('f64', 'float') or right_type in ('f64', 'float'):
+                    type_suffix = '_F64'
                 elif expr_type in {'i64', 'int'} or expr_type not in (
                     'f64',
                     'float',
@@ -643,6 +778,7 @@ class BytecodeCompiler:
                     type_suffix = '_I64'
                 else:
                     type_suffix = '_F64'
+                
                 op_map = {
                     'Add': f'ADD{type_suffix}',
                     '+': f'ADD{type_suffix}',  # Support literal '+' operator
@@ -686,55 +822,14 @@ class BytecodeCompiler:
                     # Check if it's a method call (obj.method())
                     if isinstance(func_info, dict) and 'attr' in func_info and 'value' in func_info:
                         # This is a method call: obj.method(args)
+                        # Convert to method(obj, args...) for all cases
                         method_name = func_info['attr']
                         value_node = func_info['value']
                         is_pyobject = False
                         is_module = False
-                        is_builtin_method = False
 
-                        # Check if this is a builtin string/bytes method that can be called on expressions
-                        builtin_methods = {
-                            'encode': 'ENCODE',
-                            'decode': 'DECODE',
-                            'upper': 'STR_UPPER',
-                            'lower': 'STR_LOWER',
-                            'strip': 'STR_STRIP',
-                            'split': 'STR_SPLIT',
-                            'join': 'STR_JOIN',
-                            'replace': 'STR_REPLACE',
-                        }
-
-                        # Check if method is a builtin method FIRST, before checking pyobject
-                        # This allows builtin methods to work on any expression, including variables and chained calls
-                        if method_name in builtin_methods:
-                            # Compile the expression
-                            self.compile_expr(value_node, expr_type)
-                            # Compile any arguments for the method
-                            for arg in args:
-                                self.compile_expr(arg, expr_type)
-
-                            # Add default parameters for methods that need them
-                            if method_name == 'encode' and len(args) == 0:
-                                # encode() defaults to utf-8
-                                self.emit('CONST_STR "utf-8"')
-                            elif method_name == 'decode' and len(args) == 0:
-                                # decode() defaults to utf-8
-                                self.emit('CONST_STR "utf-8"')
-
-                            # Emit the builtin instruction
-                            self.emit(builtin_methods[method_name])
-                            return
-                        # Check for integer/process methods like pid.wait()
-                        elif method_name == 'wait':
-                            # Compile the PID expression
-                            self.compile_expr(value_node, expr_type)
-                            # Compile any arguments (wait() takes no args)
-                            for arg in args:
-                                self.compile_expr(arg, expr_type)
-                            # Emit JOIN (which pops PID and waits for it)
-                            self.emit('JOIN')
-                            return
-                        elif isinstance(value_node, dict) and 'id' in value_node:
+                        # Check if it's a Python module
+                        if isinstance(value_node, dict) and 'id' in value_node:
                             var_name = value_node['id']
                             var_type = self.var_types.get(var_name)
                             if var_type == 'pyobject':
@@ -742,6 +837,7 @@ class BytecodeCompiler:
                             # Check if it's a module alias or name
                             elif var_name in self.py_imports:
                                 is_module = True
+
                         elif isinstance(value_node, dict) and ('func' in value_node or value_node.get('type') == 'call'):
                             # The value is itself a method/function call that might return a pyobject
                             # For example: hashlib.md5(password).hexdigest()
@@ -786,7 +882,15 @@ class BytecodeCompiler:
                             self.emit('PY_CALL_METHOD')
                             return
 
-                    func_name = func_info.get('id', '') if isinstance(func_info, dict) else func_info
+                        # For all other cases: convert x.y(...) to y(x, ...)
+                        # This includes builtins and user-defined functions
+                        func_name = method_name
+                        # Insert the object as the first argument
+                        args = [value_node] + args
+                        # Continue with normal function call processing below
+
+                    else:
+                        func_name = func_info.get('id', '') if isinstance(func_info, dict) else func_info
                 else:
                     func_name = expr.get('name', '')
                     args = expr.get('args', [])
@@ -848,138 +952,103 @@ class BytecodeCompiler:
                         self.emit("SET_REMOVE")
                         return
 
-                    # Special handling for socket() with default arguments
-                    if func_name == 'socket' and len(args) == 0:
-                        # Push default arguments: "inet" and "stream"
-                        self.emit('CONST_STR "inet"')
-                        self.emit('CONST_STR "stream"')
-                    # Special handling for recv() with default size
-                    elif func_name == 'recv' and len(args) == 1:
-                        # Push default size: 4096
-                        self.emit('CONST_I64 4096')
-                    # Special handling for exit() with default code
-                    elif func_name == 'exit' and len(args) == 0:
-                        # Push default exit code: 0
-                        self.emit('CONST_I64 0')
-                    # Special handling for encode() with default encoding
-                    elif func_name == 'encode' and len(args) == 1:
-                        # Push default encoding: "utf-8"
-                        self.emit('CONST_STR "utf-8"')
-                    # Special handling for decode() with default encoding
-                    elif func_name == 'decode' and len(args) == 1:
-                        # Push default encoding: "utf-8"
-                        self.emit('CONST_STR "utf-8"')
+                    # Handle default arguments for builtin functions
+                    default_args = {
+                        ('socket', 0): [('CONST_STR', '"inet"'), ('CONST_STR', '"stream"')],
+                        ('recv', 1): [('CONST_I64', '4096')],
+                        ('exit', 0): [('CONST_I64', '0')],
+                        ('encode', 1): [('CONST_STR', '"utf-8"')],
+                        ('decode', 1): [('CONST_STR', '"utf-8"')],
+                    }
+                    
+                    key = (func_name, len(args))
+                    if key in default_args:
+                        for instr, value in default_args[key]:
+                            self.emit(f'{instr} {value}')
+                    
                     # Special handling for py_call which needs num_args at the end
-                    elif func_name == 'py_call':
+                    if func_name == 'py_call':
                         # py_call(module_name, func_name, arg1, arg2, ...)
                         # Stack should be: module_name, func_name, arg1, ..., argN, num_args
                         if len(args) < 2:
                             raise CompilerError("py_call requires at least module_name and func_name")
 
-                        # Check if first argument is a string literal (module name or alias)
+                        # Extract module reference from first argument
                         first_arg = args[0]
                         module_ref = None
                         if isinstance(first_arg, str):
                             module_ref = first_arg
-                        elif isinstance(first_arg, dict) and first_arg.get('type') == 'string':
-                            module_ref = first_arg.get('value')
-                        elif isinstance(first_arg, dict) and 'value' in first_arg and isinstance(first_arg['value'], str):
-                            module_ref = first_arg['value']
+                        elif isinstance(first_arg, dict):
+                            if first_arg.get('type') == 'string':
+                                module_ref = first_arg.get('value')
+                            elif 'value' in first_arg and isinstance(first_arg['value'], str):
+                                module_ref = first_arg['value']
 
-                        # Check if module/alias was imported at top level
-                        # Note: module_ref might be the actual module name after alias resolution
-                        # Check both the original ref and the actual module
-                        found_import = False
-                        for key, import_info in self.py_imports.items():
-                            if key == module_ref or import_info['module'] == module_ref:
-                                found_import = True
-                                break
-
-                        if not found_import and module_ref:
-                            raise CompilerError(f"Module '{module_ref}' must be imported with py_import at the top of the file")
+                        # Validate that module was imported at top level
+                        if module_ref:
+                            found_import = any(
+                                key == module_ref or import_info['module'] == module_ref
+                                for key, import_info in self.py_imports.items()
+                            )
+                            if not found_import:
+                                raise CompilerError(f"Module '{module_ref}' must be imported with py_import at the top of the file")
 
                         # Arguments are already compiled above, now push the count
                         num_py_args = len(args) - 2  # Subtract module_name and func_name
                         self.emit(f"CONST_I64 {num_py_args}")
                     elif func_name == 'py_call_method':
                         # py_call_method(obj, method_name, arg1, arg2, ...)
-                        # Stack should be: obj, method_name, arg1, ..., argN, num_args
                         if len(args) < 2:
                             raise CompilerError("py_call_method requires at least obj and method_name")
-
-                        # Arguments are already compiled above, now push the count
-                        num_py_args = len(args) - 2  # Subtract obj and method_name
+                        num_py_args = len(args) - 2
                         self.emit(f"CONST_I64 {num_py_args}")
                     elif func_name == 'py_getattr':
-                        # py_getattr(obj, attr_name)
-                        # Stack should be: obj, attr_name
                         if len(args) != 2:
                             raise CompilerError("py_getattr requires exactly 2 arguments: obj and attr_name")
                     elif func_name == 'py_setattr':
-                        # py_setattr(obj, attr_name, value)
-                        # Stack should be: obj, attr_name, value
                         if len(args) != 3:
                             raise CompilerError("py_setattr requires exactly 3 arguments: obj, attr_name, and value")
+                    
                     self.emit(builtin_map[func_name])
-                elif func_name == 'append':
-                    # append(list, value) - special handling
-                    # Args are already on stack: list, value
-                    self.emit("LIST_APPEND")
-                elif func_name == 'pop':
-                    # pop(list) - special handling
-                    # List is already on stack
-                    self.emit("LIST_POP")
-                elif func_name == 'set_add':
-                    # set_add(set, value) - special handling for sets
-                    # Args are already on stack: set, value
-                    self.emit("SET_ADD")
-                elif func_name == 'set_remove':
-                    # set_remove(set, value) - special handling for sets
-                    # Args are already on stack: set, value
-                    self.emit("SET_REMOVE")
-                elif func_name == 'set_contains':
-                    # set_contains(set, value) - special handling for sets
-                    # Args are already on stack: set, value
-                    self.emit("SET_CONTAINS")
-                else:
-                    # Check if this is a C function with type information
-                    if func_name in self.c_functions:
-                        func_info = self.c_functions[func_name]
-                        params = func_info.get('params', [])
-                        return_type = func_info.get('return_type', 'void')
 
-                        # Build type signature string for CALL instruction
-                        # Format: "i" for int, "f" for float/double, "s" for struct
-                        type_sig = ""
-                        for i, param in enumerate(params[:len(args)]):
-                            param_type = param.get('type', 'int')
-                            if 'float' in param_type or 'double' in param_type:
-                                type_sig += "f"
-                            elif param_type in self.struct_defs:
-                                # Struct parameter - will be passed as packed i64
-                                type_sig += "s"
-                            else:
-                                type_sig += "i"
+                # Check if this is a C function with type information
+                elif func_name in self.c_functions:
+                    func_info = self.c_functions[func_name]
+                    params = func_info.get('params', [])
+                    return_type = func_info.get('return_type', 'void')
 
-                        # Add return type indicator at the end (separated by |)
-                        # Format: "i" for int, "f" for float, "b" for bool, "v" for void
-                        if 'float' in return_type or 'double' in return_type:
-                            type_sig += "|f"
-                        elif return_type == 'bool':
-                            type_sig += "|b"
-                        elif return_type != 'void':
-                            type_sig += "|i"
+                    # Build type signature string for CALL instruction
+                    # Format: "i" for int, "f" for float/double, "s" for struct
+                    type_sig = ""
+                    for i, param in enumerate(params[:len(args)]):
+                        param_type = param.get('type', 'int')
+                        if 'float' in param_type or 'double' in param_type:
+                            type_sig += "f"
+                        elif param_type in self.struct_defs:
+                            # Struct parameter - will be passed as packed i64
+                            type_sig += "s"
                         else:
-                            type_sig += "|v"
+                            type_sig += "i"
 
-                        if type_sig:
-                            # Emit as space-separated: CALL func_name arg_count type_sig
-                            self.emit(f"CALL {func_name} {len(args)} {type_sig}")
-                        else:
-                            self.emit(f"CALL {func_name} {len(args)}")
+                    # Add return type indicator at the end (separated by |)
+                    # Format: "i" for int, "f" for float, "b" for bool, "v" for void
+                    if 'float' in return_type or 'double' in return_type:
+                        type_sig += "|f"
+                    elif return_type == 'bool':
+                        type_sig += "|b"
+                    elif return_type != 'void':
+                        type_sig += "|i"
                     else:
-                        # For user-defined functions, emit simple CALL
+                        type_sig += "|v"
+
+                    if type_sig:
+                        # Emit as space-separated: CALL func_name arg_count type_sig
+                        self.emit(f"CALL {func_name} {len(args)} {type_sig}")
+                    else:
                         self.emit(f"CALL {func_name} {len(args)}")
+                else:
+                    # For user-defined functions, emit simple CALL
+                    self.emit(f"CALL {func_name} {len(args)}")
                 return
 
         # Default: treat as constant 0
@@ -1042,6 +1111,18 @@ class BytecodeCompiler:
             # Compile value expression
             value_type = self.map_type(node.get('value_type'))
             self.compile_expr(value, value_type)
+
+            # Add type conversion if needed
+            # Infer the actual type of the expression result
+            actual_type = self.infer_expr_type(value)
+            declared_type = self.normalize_type(node.get('value_type', 'any'))
+            
+            # Convert float to int if assigning to int variable
+            if actual_type in ('f64', 'float') and declared_type in ('int', 'i64'):
+                self.emit("TO_INT")
+            # Convert int to float if assigning to float variable
+            elif actual_type in ('i64', 'int') and declared_type in ('float', 'f64'):
+                self.emit("TO_FLOAT")
 
             # Store to variable
             self.emit_store(name)
@@ -1408,8 +1489,9 @@ class BytecodeCompiler:
             idx_var_id = self.get_var_id(idx_var_name)
 
             # Determine if iterable is a variable reference
-            iterable_var_id = None
+            iterable_var_name = None
             if isinstance(iterable, str):
+                iterable_var_name = iterable
                 iterable_var_id = self.get_var_id(iterable)
 
             loop_start = self.get_label("forin_start")
@@ -1430,9 +1512,9 @@ class BytecodeCompiler:
             self.emit(f"LOAD {idx_var_id}")  # Index is always local
 
             # Get iterable and compute its length
-            if iterable_var_id is not None:
+            if iterable_var_name is not None:
                 # Variable reference - iterable is the variable name string
-                self.emit_load(iterable)  # iterable is str when iterable_var_id is set
+                self.emit_load(iterable_var_name)
             else:
                 # Expression
                 self.compile_expr(iterable)
@@ -1442,8 +1524,8 @@ class BytecodeCompiler:
             self.emit(f"JUMP_IF_FALSE {loop_end}")
 
             # Get current item: var = iterable[idx]
-            if iterable_var_id is not None:
-                self.emit_load(iterable)  # iterable is str when iterable_var_id is set
+            if iterable_var_name is not None:
+                self.emit_load(iterable_var_name)
             else:
                 self.compile_expr(iterable)
 
@@ -1520,6 +1602,40 @@ class BytecodeCompiler:
 
         elif 'func' in node and 'args' in node:
             # This is a call expression node from Python's AST (or transformed method call)
+            
+            # Check for list/set modifying methods
+            func_ref = node.get('func', {})
+            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+            args = node.get('args', [])
+            
+            # Special handling for append(list, value) - modifies list in place
+            if func_name == 'append' and len(args) >= 1:
+                first_arg = args[0]
+                if is_var_ref(first_arg):
+                    # Get the variable name
+                    var_name = first_arg['id']
+                    
+                    # Compile the expression (will generate LIST_APPEND)
+                    self.compile_expr(node)
+                    
+                    # Store result back to the variable
+                    self.emit_store(var_name)
+                    return
+            
+            # Special handling for set_add/set_remove(set, value) - modifies set in place
+            if func_name in ('set_add', 'set_remove') and len(args) >= 1:
+                first_arg = args[0]
+                if is_var_ref(first_arg):
+                    # Get the variable name
+                    var_name = first_arg['id']
+                    
+                    # Compile the expression (will generate SET_ADD/SET_REMOVE)
+                    self.compile_expr(node)
+                    
+                    # Store result back to the variable
+                    self.emit_store(var_name)
+                    return
+            
             self.compile_expr(node)
 
             # Check if this is a void function - don't pop if it returns None
@@ -1871,19 +1987,6 @@ class BytecodeCompiler:
                     source_file = node['source_file']
                     break
 
-        if source_file:
-            results.append(f"# source: {source_file}")
-            results.append("")
-
-            # Store source file and read its content
-            self.source_file = source_file
-            try:
-                with open(source_file, 'r') as f:
-                    self.source_lines = f.read().splitlines()
-            except (FileNotFoundError, IOError):
-                # If source file can't be read, continue without it
-                pass
-
         # Collect global variable declarations
         global_vars = []
 
@@ -1952,8 +2055,10 @@ class BytecodeCompiler:
                     for f in fields:
                         name = f.get('name', '').strip().strip(',')
                         ftype = f.get('type', '').strip().strip(',')
-                        # Split comma-separated lists (like "m0, m4, m8")
-                        for name_part in re.split(r'[,\s]+', name):
+                        # Split comma-separated field names (like "m0, m4, m8")
+                        # But do NOT split spaces in the name itself
+                        for name_part in re.split(r',\s*', name):
+                            name_part = name_part.strip()
                             if not name_part:
                                 continue
                             clean_fields.append({'name': name_part, 'type': ftype})
@@ -2034,14 +2139,22 @@ class BytecodeCompiler:
                 # Store in global_vars dict for access by all functions
                 self.global_vars[var_name] = node
 
+        results.append("# Struct definitions")
         # Emit struct definitions as bytecode directives
         for struct_name, struct_def in self.struct_defs.items():
             struct_id = struct_def['id']
             fields = struct_def['fields']
 
-            # Clean up names and types
-            field_names = ' '.join(f['name'].strip(',') for f in fields)
-            field_types = ' '.join(f['type'].strip(',') for f in fields)
+            # Build field names and types - preserve multi-word types by joining fields directly
+            # Format: field1 field2 field3... type1 type2 type3...
+            # For multi-word types like "unsigned char", they stay as single tokens
+            field_parts = []
+            for f in fields:
+                field_parts.append(f['name'].strip(','))
+            for f in fields:
+                field_parts.append(f['type'].strip(','))
+
+            field_spec = ' '.join(field_parts)
 
             # Compute struct size for C/imported structs
             total_size = 256  # default fallback
@@ -2083,8 +2196,11 @@ class BytecodeCompiler:
                 else:
                     total_size = cur_offset
 
-            results.append(f".struct {struct_id} {len(fields)} {total_size} {field_names} {field_types}")
-        
+            results.append(f".struct {struct_id} {len(fields)} {total_size} {field_spec}")
+
+        results.append("")
+
+        results.append("# Struct type mappings")
         # Emit struct type mappings for nested struct field resolution
         # This allows the native compiler to map type names like "Point" to struct_ids
         if self.struct_defs:
@@ -2096,6 +2212,8 @@ class BytecodeCompiler:
             results.append("")
 
         # Emit global variable declarations
+        if self.global_vars:
+            results.append("# Global vars")
         for var_name in sorted(self.global_vars.keys()):
             var_node = self.global_vars[var_name]
             var_type = self.map_type(var_node.get('value_type'))
@@ -2104,20 +2222,9 @@ class BytecodeCompiler:
         if self.global_vars:
             results.append("")
 
-        # Emit C file imports as metadata (will be used by native compiler)
-        if self.c_import_files:
-            for c_file in self.c_import_files:
-                results.append(f"# C import: {c_file}")
-            results.append("")
-
-        # Emit C linker flags as metadata (will be used by native compiler)
-        if self.c_link_flags:
-            # Combine all flags into a single "# Link:" comment for the native compiler
-            link_line = ' '.join(self.c_link_flags)
-            results.append(f"# Link: {link_line}")
-            results.append("")
-
         # Emit raw bytecode blocks (these may define functions)
+        if bytecode_blocks:
+            results.append("# Bytecode functions")
         for block in bytecode_blocks:
             bytecode_lines = block.get('bytecode', [])
             for line in bytecode_lines:
@@ -2125,10 +2232,41 @@ class BytecodeCompiler:
             if bytecode_lines:
                 results.append("")  # Add spacing after block
 
+        # Put all the metadata comments at the top of the file
+        a = []
+        if source_file:
+            a.append(f"# source: {source_file}")
+
+            # Store source file and read its content
+            self.source_file = source_file
+            try:
+                with open(source_file, 'r') as f:
+                    self.source_lines = f.read().splitlines()
+            except (FileNotFoundError, IOError):
+                # If source file can't be read, continue without it
+                pass
+
+        # Emit C file imports as metadata (will be used by native compiler)
+        if self.c_import_files:
+            for c_file in self.c_import_files:
+                a.append(f"# C import: {c_file}")
+
+        # Emit C linker flags as metadata (will be used by native compiler)
+        if self.c_link_flags:
+            # Combine all flags into a single "# Link:" comment for the native compiler
+            link_line = ' '.join(self.c_link_flags)
+            a.append(f"# Link: {link_line}")
+            a.append("")
+
+        for i in reversed(a):
+            results.insert(2, i)
+
         # Compile all functions (including imported ones)
         entry_point = None
 
         # First compile imported functions
+        if imported_functions:
+            results.append("# Imported functions")
         for node in imported_functions:
             func_name = node.get('name', '')
 
@@ -2140,8 +2278,11 @@ class BytecodeCompiler:
                 results.append(bytecode)
 
         # Then compile functions from main AST
+        results.append("# Functions")
         for node in ast:
             if node.get('type') == 'function':
+                results.append("")
+                results.append(f"# {node['return']} {node['name']}({', '.join([' '.join(arg) for arg in node['args']])}) {{")
                 func_name = node.get('name', '')
 
                 # Pass global variables to main function
@@ -2154,7 +2295,11 @@ class BytecodeCompiler:
                         entry_point = func_name
 
         # Emit entry point (only if not already defined by bytecode blocks)
-        if entry_point and not any('.entry' in line for block in bytecode_blocks for line in block.get('bytecode', [])):
+        if entry_point and all(
+            '.entry' not in line
+            for block in bytecode_blocks
+            for line in block.get('bytecode', [])
+        ):
             results.append(f".entry {entry_point}")
 
         return '\n'.join(results)

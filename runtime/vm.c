@@ -300,6 +300,7 @@ typedef enum
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
     OP_LOAD2_MUL_I64, // LOAD x y, MUL_I64 -> single instruction
+    OP_LOAD2_DIV_I64, // LOAD x y, DIV_I64 -> single instruction
     OP_LOAD2_MOD_I64, // LOAD x y, MOD_I64 -> single instruction
     OP_LOAD2_ADD_F64, // LOAD x y, ADD_F64 -> single instruction (float)
     OP_LOAD2_SUB_F64, // LOAD x y, SUB_F64 -> single instruction (float)
@@ -1619,6 +1620,15 @@ static inline Value vm_pop(VM *vm)
     }
     return vm->stack[--vm->stack_top];
 }
+static inline Value vm_peek(VM *vm, int offset)
+{
+    if (unlikely(vm->stack_top <= offset))
+    {
+        fprintf(stderr, "Stack peek underflow at PC=%d\n", vm->pc - 1);
+        exit(1);
+    }
+    return vm->stack[vm->stack_top - 1 - offset];
+}
 
 // Print value
 void value_print(Value val)
@@ -1913,6 +1923,16 @@ static inline Value value_add(Value a, Value b)
     {
         return value_make_f64(a.as.f64 + b.as.f64);
     }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int + float -> float
+        return value_make_f64((double)a.as.int64 + b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float + int -> float
+        return value_make_f64(a.as.f64 + (double)b.as.int64);
+    }
     else if (a.type == VAL_STR && b.type == VAL_STR)
     {
         Value result;
@@ -1973,6 +1993,16 @@ Value value_sub(Value a, Value b)
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 - b.as.f64);
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int - float -> float
+        return value_make_f64((double)a.as.int64 - b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float - int -> float
+        return value_make_f64(a.as.f64 - (double)b.as.int64);
     }
     fprintf(stderr, "Type error in subtraction\n");
     exit(1);
@@ -2040,6 +2070,16 @@ Value value_mul(Value a, Value b)
     {
         return value_make_f64(a.as.f64 * b.as.f64);
     }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int * float -> float
+        return value_make_f64((double)a.as.int64 * b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float * int -> float
+        return value_make_f64(a.as.f64 * (double)b.as.int64);
+    }
     fprintf(stderr, "Type error in multiplication\n");
     exit(1);
 }
@@ -2048,7 +2088,7 @@ Value value_div(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
-        // Fast path: native int64 division
+        // Integer division (floor division like Python //)
         Value result;
         result.type = VAL_INT;
         result.as.int64 = a.as.int64 / b.as.int64;
@@ -2091,6 +2131,16 @@ Value value_div(Value a, Value b)
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 / b.as.f64);
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int / float -> float
+        return value_make_f64((double)a.as.int64 / b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float / int -> float
+        return value_make_f64(a.as.f64 / (double)b.as.int64);
     }
     fprintf(stderr, "Type error in division\n");
     exit(1);
@@ -3732,6 +3782,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.indices.src = safe_atoi(var1);
                 inst.operand.indices.dst = safe_atoi(var2);
             }
+            else if (strcmp(token, "LOAD2_DIV_I64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_DIV_I64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
             else if (strcmp(token, "LOAD2_MOD_I64") == 0)
             {
                 char *var1 = strtok(NULL, " ");
@@ -4045,6 +4103,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
+        [OP_LOAD2_DIV_I64] = &&L_LOAD2_DIV_I64,
         [OP_LOAD2_MOD_I64] = &&L_LOAD2_MOD_I64,
         [OP_LOAD2_ADD_F64] = &&L_LOAD2_ADD_F64,
         [OP_LOAD2_SUB_F64] = &&L_LOAD2_SUB_F64,
@@ -5968,7 +6027,7 @@ L_LIST_APPEND: // OP_LIST_APPEND
 
     list_append(list_val.as.list, value);
     value_free(value);
-    vm_push(vm, list_val);
+    vm_push(vm, list_val);  // Push list back
     DISPATCH();
 }
 
@@ -8052,6 +8111,29 @@ L_LOAD2_MUL_I64: // OP_LOAD2_MUL_I64
     DISPATCH();
 }
 
+L_LOAD2_DIV_I64: // OP_LOAD2_DIV_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    // Check for division by zero
+    if (likely(b.type == VAL_INT && b.as.int64 == 0))
+    {
+        vm_runtime_error(vm, "division by zero", 0);
+        DISPATCH();
+    }
+
+    // Always use value_div to handle type conversions
+    Value result = value_div(a, b);
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
 L_LOAD2_MOD_I64: // OP_LOAD2_MOD_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -8159,13 +8241,29 @@ L_LOAD2_DIV_F64: // OP_LOAD2_DIV_F64
     Value a = current_frame->vars.vars[idx1];
     Value b = current_frame->vars.vars[idx2];
 
-    if (a.type != VAL_F64 || b.type != VAL_F64)
+    // Convert integers to floats if needed (for true division)
+    double a_val, b_val;
+    if (a.type == VAL_INT)
+        a_val = (double)a.as.int64;
+    else if (a.type == VAL_F64)
+        a_val = a.as.f64;
+    else
     {
-        vm_runtime_error(vm, "LOAD2_DIV_F64 requires float operands", 0);
+        vm_runtime_error(vm, "LOAD2_DIV_F64 requires numeric operands", 0);
         return;
     }
 
-    if (b.as.f64 == 0.0)
+    if (b.type == VAL_INT)
+        b_val = (double)b.as.int64;
+    else if (b.type == VAL_F64)
+        b_val = b.as.f64;
+    else
+    {
+        vm_runtime_error(vm, "LOAD2_DIV_F64 requires numeric operands", 0);
+        return;
+    }
+
+    if (b_val == 0.0)
     {
         vm_runtime_error(vm, "[ZeroDivisionError] Float division by zero", 0);
         return;
@@ -8173,7 +8271,7 @@ L_LOAD2_DIV_F64: // OP_LOAD2_DIV_F64
 
     Value result;
     result.type = VAL_F64;
-    result.as.f64 = a.as.f64 / b.as.f64;
+    result.as.f64 = a_val / b_val;
     vm_push(vm, result);
 
     DISPATCH();

@@ -436,7 +436,8 @@ def native_cmd(args):
     # Compile to x86_64
     try:
         import native
-        optimize = '-O' in args
+        # Check for optimization flag, but -O0 disables it
+        optimize = '-O' in args and '-O0' not in args
         if optimize:
             print('Optimizing assembly')
         asm, runtime_deps = native.compile(bytecode, optimize)
@@ -461,7 +462,7 @@ def native_cmd(args):
                 print(f"Compiling C file: {c_file}")
                 result = subprocess.run([
                     'gcc', '-c', c_file, '-o', c_obj,
-                    '-O0', '-march=native', '-mtune=native',
+                    '-Ofast', '-march=native', '-mtune=native',
                     '-finline-functions', '-funroll-loops',
                     '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
                     '-ffunction-sections', '-fdata-sections'
@@ -501,7 +502,7 @@ def native_cmd(args):
             # -fno-ipa-cp: prevents interprocedural constant propagation that assumes things about callers
             gcc_flags = [
                 'gcc', obj_file, *c_obj_files, str(runtime_lib), '-o', exe_file,
-                f'-I{runtime_dir}', '-O0', '-march=native', '-mtune=native',
+                f'-I{runtime_dir}', '-O3', '-march=native', '-mtune=native',
                 '-finline-functions', '-funroll-loops',
                 '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
                 '-ffunction-sections', '-fdata-sections',

@@ -11,12 +11,20 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 
 // Global state for error formatting
 static int runtime_test_mode = -1;  // -1 = uninitialized, 0 = user mode, 1 = test mode
 static const char* runtime_source_file = NULL;
 static const char** runtime_source_lines = NULL;
 static int runtime_source_line_count = 0;
+
+// Extern symbols for struct heap (defined in generated assembly)
+// These are the addresses of the variables in the BSS section
+extern uint64_t struct_heap_ptr;   // Current heap position
+extern uint64_t struct_heap_base;  // Base pointer to allocated heap
+// Struct heap size (64MB)
+#define STRUCT_HEAP_SIZE (64 * 1024 * 1024)
 
 // Check if we're in test mode (returns 1 for test mode, 0 for user mode)
 static int is_test_mode() {
@@ -1098,8 +1106,23 @@ void runtime_check_div_zero_f64_at(double divisor, int line) {
 // ============================================================================
 
 void runtime_init() {
-    // Initialize any global state here
+    // Initialize exception handling
     runtime_exception_init();
+    
+    // Allocate struct heap using mmap if not already allocated
+    if (struct_heap_base == 0) {
+        // Allocate 64MB for struct heap
+        void* heap = mmap(NULL, STRUCT_HEAP_SIZE, PROT_READ | PROT_WRITE, 
+                          MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (heap == MAP_FAILED) {
+            fprintf(stderr, "Runtime error: failed to allocate struct heap\n");
+            exit(1);
+        }
+        
+        // Store the base pointer for use in compiled code
+        struct_heap_base = (uint64_t)heap;
+        struct_heap_ptr = 0;  // Start at offset 0
+    }
 }
 
 void runtime_cleanup() {

@@ -488,15 +488,6 @@ funcs:dict[ # Holy type annotations
         "return_type": "str",
         "can_eval": True
     },
-    'sqrt': {
-        "type": "builtin",
-        "args": {
-            "num": "float"
-        },
-        "func": sqrt,
-        "return_type": "float",
-        "can_eval": True
-    },
     'input': {
         "type": "builtin",
         "args": {
@@ -513,22 +504,6 @@ funcs:dict[ # Holy type annotations
         },
         "func": round,
         "return_type": "int",
-        "can_eval": True
-    },
-    'str': {
-        "type": "builtin",
-        "args": {
-            "value": "any"
-        },
-        "func": lambda value: (
-            'true' if value is True else 
-            'false' if value is False else 
-            '{}' if isinstance(value, set) and len(value) == 0 else
-            '{' + ', '.join(str(x) if not isinstance(x, str) else x for x in sorted(value, key=lambda x: (type(x).__name__, str(x)))) + '}' if isinstance(value, set) else
-            repr(value) if isinstance(value, bytes) else
-            str(value)
-        ),
-        "return_type": "string",
         "can_eval": True
     },
     'len': {
@@ -589,6 +564,24 @@ funcs:dict[ # Holy type annotations
         "return_type": "bool",
         "can_eval": True
     },
+
+    # Types
+    'str': {
+        "type": "builtin",
+        "args": {
+            "value": "any"
+        },
+        "func": lambda value: (
+            'true' if value is True else 
+            'false' if value is False else 
+            '{}' if isinstance(value, set) and len(value) == 0 else
+            '{' + ', '.join(x if isinstance(x, str) else str(x) for x in sorted(value, key=lambda x: (type(x).__name__, str(x)))) + '}' if isinstance(value, set) else
+            repr(value) if isinstance(value, bytes) else
+            str(value)
+        ),
+        "return_type": "string",
+        "can_eval": True
+    },
     'int': {
         "type": "builtin",
         "args": {
@@ -616,6 +609,8 @@ funcs:dict[ # Holy type annotations
         "return_type": "bool",
         "can_eval": True
     },
+
+    # String manipulation
     'upper': {
         "type": "builtin",
         "args": {
@@ -674,6 +669,8 @@ funcs:dict[ # Holy type annotations
         "return_type": "string",
         "can_eval": True
     },
+
+    # Math functions
     'abs': {
         "type": "builtin",
         "args": {
@@ -729,6 +726,15 @@ funcs:dict[ # Holy type annotations
         },
         "func": ceil,
         "return_type": "int",
+        "can_eval": True
+    },
+    'sqrt': {
+        "type": "builtin",
+        "args": {
+            "num": "float"
+        },
+        "func": sqrt,
+        "return_type": "float",
         "can_eval": True
     },
     'sin': {

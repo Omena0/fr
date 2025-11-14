@@ -1,0 +1,8 @@
+// !6.1\n4.2
+
+void main() {
+    int x = 5
+    float y = 1.1
+    println(x + y)
+    println(x - 0.8)
+}
