@@ -1,4 +1,4 @@
-// @c-only !Recursion test passed
+// !Recursion test passed
 
 int recurse(int n) {
     if (n <= 0) {

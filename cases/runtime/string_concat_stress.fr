@@ -1,4 +1,4 @@
-// @c-only !String concat stress test passed
+// !String concat stress test passed
 
 void main() {
     str s = "a"

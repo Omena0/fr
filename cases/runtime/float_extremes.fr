@@ -1,4 +1,4 @@
-// @c-only !Float extremes test passed
+// !Float extremes test passed
 
 void main() {
     float inf = 1e308 * 10.0

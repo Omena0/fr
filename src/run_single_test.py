@@ -9,6 +9,7 @@ import os
 import tempfile
 import subprocess
 from io import StringIO
+from pathlib import Path
 
 # Save original argv before modifying it
 original_argv = sys.argv.copy()
@@ -22,6 +23,39 @@ from parser import parse
 from compiler import compile_ast_to_bytecode
 from runtime import run, format_runtime_exception # type: ignore
 from native import compile as compile_to_native
+
+RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
+RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
+RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
+RUNTIME_OBJ = Path(tempfile.gettempdir()) / 'frscript_runtime_lib.o'
+
+def ensure_runtime_object():
+    """Compile runtime_lib.c to an object file and reuse it across tests."""
+    src_mtime = RUNTIME_SRC.stat().st_mtime
+    if RUNTIME_OBJ.exists():
+        try:
+            if RUNTIME_OBJ.stat().st_mtime >= src_mtime:
+                return str(RUNTIME_OBJ)
+        except OSError:
+            pass
+
+    tmp_obj = RUNTIME_OBJ.with_suffix('.o.tmp')
+    compile_cmd = [
+        'gcc', '-c', '-O3', '-march=native', '-mtune=native',
+        '-ffunction-sections', '-fdata-sections',
+        '-I', RUNTIME_INCLUDE_DIR,
+        '-o', str(tmp_obj), str(RUNTIME_SRC)
+    ]
+    result = subprocess.run(compile_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        try:
+            tmp_obj.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(result.stderr.strip() or 'Failed to compile runtime_lib.c')
+
+    tmp_obj.replace(RUNTIME_OBJ)
+    return str(RUNTIME_OBJ)
 
 def extract_error_message(error_text):
     """Extract and normalize error message to match expected format"""
@@ -228,6 +262,17 @@ def main():
         print(f"IS_OUTPUT:{is_output_test}")
         return 0
 
+    # Determine whether we need bytecode for VM/native runtimes
+    needs_bytecode = (runtime_filter != 'python' and not skip_c) or not skip_native
+    bytecode = None
+    line_map = []
+    compile_error = None
+    if needs_bytecode:
+        try:
+            bytecode, line_map = compile_ast_to_bytecode(ast)
+        except Exception as e:
+            compile_error = str(e)
+
     # Run on Python runtime (unless filtered out or skipped)
     py_error = None
     py_output = None
@@ -258,108 +303,109 @@ def main():
     vm_error = None
     vm_output = None
     if runtime_filter != 'python' and not skip_c:
-        try:
-            bytecode, line_map = compile_ast_to_bytecode(ast)
-
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
-                bc_file = f.name
-                f.write(bytecode)
-
-            # Extract and compile C imports
-            c_import_so_files = []
-            for line in bytecode.split('\n'):
-                if line.startswith('# C import:'):
-                    c_file = line.split(':', 1)[1].strip()
-                    # Make C file path absolute relative to test file
-                    test_dir = os.path.dirname(os.path.abspath(test_filename))
-                    c_file_abs = os.path.join(test_dir, c_file)
-                    
-                    # Compile to .so
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.so', delete=False) as so_f:
-                        so_file = so_f.name
-                        c_import_so_files.append(so_file)
-                    
-                    # Compile C file to shared library
-                    compile_result = subprocess.run(
-                        ['gcc', '-fPIC', '-shared', '-o', so_file, c_file_abs],
-                        capture_output=True,
-                        text=True
-                    )
-                    if compile_result.returncode != 0:
-                        vm_error = f"Failed to compile {c_file}: {compile_result.stderr}"
-                        break
-
-            # Try to find VM path
-            vm_path = None
-            # Try new package location
+        if compile_error:
+            vm_error = compile_error
+        else:
             try:
-                import importlib.util
-                spec = importlib.util.find_spec('runtime')
-                if spec and spec.origin:
-                    from pathlib import Path
-                    runtime_pkg_path = Path(spec.origin).parent
-                    vm_candidate = runtime_pkg_path / 'vm'
-                    if vm_candidate.exists():
-                        vm_path = str(vm_candidate)
-            except (ImportError, AttributeError):
-                pass
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
+                    bc_file = f.name
+                    f.write(bytecode)
 
-            # Fall back to development locations
-            if not vm_path:
-                from pathlib import Path
-                vm_candidate = Path('runtime/vm')
-                vm_path = str(vm_candidate) if vm_candidate.exists() else 'runtime/vm'
-            # Prepare debug info for VM
-            import json
-            debug_info = json.dumps({
-                'file': test_filename,
-                'source': code,
-                'line_map': line_map
-            })
+                # Extract and compile C imports
+                c_import_so_files = []
+                for line in bytecode.split('\n'):
+                    if line.startswith('# C import:'):
+                        c_file = line.split(':', 1)[1].strip()
+                        # Make C file path absolute relative to test file
+                        test_dir = os.path.dirname(os.path.abspath(test_filename))
+                        c_file_abs = os.path.join(test_dir, c_file)
+                        
+                        # Compile to .so
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.so', delete=False) as so_f:
+                            so_file = so_f.name
+                            c_import_so_files.append(so_file)
+                        
+                        # Compile C file to shared library
+                        compile_result = subprocess.run(
+                            ['gcc', '-fPIC', '-shared', '-o', so_file, c_file_abs],
+                            capture_output=True,
+                            text=True
+                        )
+                        if compile_result.returncode != 0:
+                            vm_error = f"Failed to compile {c_file}: {compile_result.stderr}"
+                            break
 
-            # Build VM command with .so files
-            vm_command = [vm_path, '--debug-info', bc_file] + c_import_so_files
-
-            # Set FR_TEST_MODE=1 for test error format
-            env = os.environ.copy()
-            env['FR_TEST_MODE'] = '1'
-
-            result = subprocess.run(
-                vm_command,
-                input=debug_info,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=env
-            )
-
-            os.unlink(bc_file)
-            # Clean up .so files
-            for so_file in c_import_so_files:
+                # Try to find VM path
+                vm_path = None
+                # Try new package location
                 try:
-                    os.unlink(so_file)
-                except:
+                    import importlib.util
+                    spec = importlib.util.find_spec('runtime')
+                    if spec and spec.origin:
+                        from pathlib import Path
+                        runtime_pkg_path = Path(spec.origin).parent
+                        vm_candidate = runtime_pkg_path / 'vm'
+                        if vm_candidate.exists():
+                            vm_path = str(vm_candidate)
+                except (ImportError, AttributeError):
                     pass
 
-            # Capture output even if program crashes (e.g., stack overflow after main returns)
-            vm_output = result.stdout.strip() if result.stdout else ""
+                # Fall back to development locations
+                if not vm_path:
+                    from pathlib import Path
+                    vm_candidate = Path('runtime/vm')
+                    vm_path = str(vm_candidate) if vm_candidate.exists() else 'runtime/vm'
+                # Prepare debug info for VM
+                import json
+                debug_info = json.dumps({
+                    'file': test_filename,
+                    'source': code,
+                    'line_map': line_map
+                })
 
-            if result.returncode != 0:
-                stderr_text = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
-                # Extract the error message from stderr
-                vm_error = extract_error_message(stderr_text)
+                # Build VM command with .so files
+                vm_command = [vm_path, '--debug-info', bc_file] + c_import_so_files
 
-                # If there's an error in stderr (exception, runtime error), discard partial stdout
-                # to match Python runtime behavior where exceptions override partial output
-                if (stderr_text and "Exception:" in stderr_text or not vm_output):
-                    vm_output = None
+                # Set FR_TEST_MODE=1 for test error format
+                env = os.environ.copy()
+                env['FR_TEST_MODE'] = '1'
 
-        except subprocess.TimeoutExpired:
-            vm_error = "Timeout"
-            vm_output = None
-        except Exception as e:
-            vm_error = str(e)
-            vm_output = None
+                result = subprocess.run(
+                    vm_command,
+                    input=debug_info,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=env
+                )
+
+                os.unlink(bc_file)
+                # Clean up .so files
+                for so_file in c_import_so_files:
+                    try:
+                        os.unlink(so_file)
+                    except:
+                        pass
+
+                # Capture output even if program crashes (e.g., stack overflow after main returns)
+                vm_output = result.stdout.strip() if result.stdout else ""
+
+                if result.returncode != 0:
+                    stderr_text = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
+                    # Extract the error message from stderr
+                    vm_error = extract_error_message(stderr_text)
+
+                    # If there's an error in stderr (exception, runtime error), discard partial stdout
+                    # to match Python runtime behavior where exceptions override partial output
+                    if (stderr_text and "Exception:" in stderr_text or not vm_output):
+                        vm_output = None
+
+            except subprocess.TimeoutExpired:
+                vm_error = "Timeout"
+                vm_output = None
+            except Exception as e:
+                vm_error = str(e)
+                vm_output = None
     else:
         # Skip C VM runtime for python-only tests or if --skip-py was specified
         vm_output = None
@@ -369,143 +415,121 @@ def main():
     native_error = None
     native_output = None
     if not skip_native:
-        try:
-            # Compile to bytecode (reuse from VM compilation)
-            bytecode, line_map = compile_ast_to_bytecode(ast)
-
-            # Extract C imports from bytecode
-            c_import_files = []
-            for line in bytecode.split('\n'):
-                if line.startswith('# C import:'):
-                    c_file = line.split(':', 1)[1].strip()
-                    # Make C file path absolute relative to test file
-                    test_dir = os.path.dirname(os.path.abspath(test_filename))
-                    c_file_abs = os.path.join(test_dir, c_file)
-                    c_import_files.append(c_file_abs)
-
-            # Compile bytecode to x86_64 assembly
-            assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
-
-            # Create runtime file with library code
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-                runtime_file = f.name
-                # Write runtime library code
-                from pathlib import Path
-                runtime_lib_path = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.c'
-                with open(runtime_lib_path, 'r') as runtime_src:
-                    f.write(runtime_src.read())
-
-            # Write assembly to temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.s', delete=False) as f:
-                asm_file = f.name
-                f.write(assembly)
-
-            # Assemble to object file (like cli.py does)
-            obj_file = asm_file.replace('.s', '.o')
-            asm_result = subprocess.run(
-                ['as', asm_file, '-o', obj_file],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if asm_result.returncode != 0:
-                native_error = extract_error_message(asm_result.stderr)
-                native_output = None
-                # Clean up
-                os.remove(asm_file)
-                os.remove(runtime_file)
-                print(f"NATIVE_OUTPUT:{native_output}")
-                print(f"NATIVE_ERROR:{native_error}")
-                return 0  # Skip to next runtime
-
-            # Find runtime library header (for compilation)
-            from pathlib import Path
-            runtime_h = Path(__file__).parent.parent / 'runtime' / 'runtime_lib.h'
-            runtime_include_dir = str(runtime_h.parent)
-
-            # Compile assembly and runtime to binary using gcc
-            with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
-                native_bin = f.name
-
-            # Use same compilation flags as cli.py to ensure ABI compatibility
-            compile_cmd = [
-                'gcc',
-                obj_file,
-                runtime_file,
-                f'-I{runtime_include_dir}',
-                '-O3', '-march=native', '-mtune=native',
-                '-ffunction-sections', '-fdata-sections',
-                '-Wl,--gc-sections',
-                '-o',
-                native_bin,
-            ] + c_import_files + [  # Add C import files to the command
-                '-lm',
-                '-no-pie',
-            ]
-
-            result = subprocess.run(
-                compile_cmd,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode != 0:
-                native_error = extract_error_message(result.stderr)
-                native_output = None
-            else:
-                # Run the compiled binary with FR_TEST_MODE=1
-                env = os.environ.copy()
-                env['FR_TEST_MODE'] = '1'
-                
-                result = subprocess.run(
-                    [native_bin],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    env=env
-                )
-
-                native_output = result.stdout.strip() if result.stdout else ""
-
-                if result.returncode != 0:
-                    # Check if it's a signal (negative exit code)
-                    if result.returncode < 0:
-                        signal_num = -result.returncode
-                        signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
-                        signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
-                        stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
-                    else:
-                        stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
-                    native_error = extract_error_message(stderr_text)
-
-                    # If there's an error in stderr, discard partial stdout to match Python runtime behavior
-                    if stderr_text and not native_output:
-                        native_output = None
-
-                # Clean up binary
-                try:
-                    os.unlink(native_bin)
-                except:
-                    pass
-
-            # Clean up temporary files
+        if compile_error:
+            native_error = compile_error
+        else:
+            runtime_obj = None
             try:
-                os.unlink(asm_file)
-                os.unlink(obj_file)
-                os.unlink(runtime_file)
-            except:
-                pass
+                runtime_obj = ensure_runtime_object()
+            except Exception as exc:
+                native_error = str(exc)
+            if runtime_obj:
+                try:
+                    # Extract C imports from bytecode
+                    c_import_files = []
+                    for line in bytecode.split('\n'):
+                        if line.startswith('# C import:'):
+                            c_file = line.split(':', 1)[1].strip()
+                            # Make C file path absolute relative to test file
+                            test_dir = os.path.dirname(os.path.abspath(test_filename))
+                            c_file_abs = os.path.join(test_dir, c_file)
+                            c_import_files.append(c_file_abs)
 
-        except subprocess.TimeoutExpired:
-            native_error = "Timeout"
-            native_output = None
-        except Exception as e:
-            native_error = str(e)
-            native_output = None
+                    # Compile bytecode to x86_64 assembly
+                    assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
+
+                    # Assemble via stdin without writing the assembly file
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.o', delete=False) as f:
+                        obj_file = f.name
+
+                    asm_result = subprocess.run(
+                        ['as', '-o', obj_file, '-'],
+                        input=assembly,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if asm_result.returncode != 0:
+                        native_error = extract_error_message(asm_result.stderr)
+                        native_output = None
+                    else:
+                        # Compile assembly and runtime to binary using gcc
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
+                            native_bin = f.name
+
+                        compile_cmd = [
+                            'gcc',
+                            obj_file,
+                            runtime_obj,
+                            f'-I{RUNTIME_INCLUDE_DIR}',
+                            '-O3', '-march=native', '-mtune=native',
+                            '-ffunction-sections', '-fdata-sections',
+                            '-Wl,--gc-sections',
+                            '-o',
+                            native_bin,
+                        ] + c_import_files + [  # Add C import files to the command
+                            '-lm',
+                            '-no-pie',
+                        ]
+
+                        result = subprocess.run(
+                            compile_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+
+                        if result.returncode != 0:
+                            native_error = extract_error_message(result.stderr)
+                            native_output = None
+                        else:
+                            env = os.environ.copy()
+                            env['FR_TEST_MODE'] = '1'
+
+                            result = subprocess.run(
+                                [native_bin],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                                env=env
+                            )
+
+                            native_output = result.stdout.strip() if result.stdout else ""
+
+                            if result.returncode != 0:
+                                if result.returncode < 0:
+                                    signal_num = -result.returncode
+                                    signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
+                                    signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
+                                    stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
+                                else:
+                                    stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
+                                native_error = extract_error_message(stderr_text)
+
+                                if stderr_text and not native_output:
+                                    native_output = None
+
+                        try:
+                            os.unlink(native_bin)
+                        except:
+                            pass
+
+                    try:
+                        os.unlink(obj_file)
+                    except:
+                        pass
+
+                except subprocess.TimeoutExpired:
+                    native_error = "Timeout"
+                    native_output = None
+                except Exception as e:
+                    native_error = str(e)
+                    native_output = None
     else:
         # Skip native compiler if requested
         native_output = None
+        native_error = "SKIPPED"
         native_error = "SKIPPED"
 
     # Output results

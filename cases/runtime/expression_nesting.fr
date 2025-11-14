@@ -1,4 +1,4 @@
-// @c-only !Extreme nesting test passed
+// !Extreme nesting test passed
 
 void main() {
     int result = ((((((((((1 + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1)

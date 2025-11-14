@@ -168,7 +168,7 @@ This update brings the speed of the fibonacci benchmark faster than python.
 - Fixed dict variable initialization with {} to create Python dict instead of empty set
 - Fixed method chaining on f-strings and expressions
 - Fixed optimizer incorrectly merging CONST_STR instructions for PY_CALL arguments
-- Fixed 13 failing C VM tests related to sets, membership operators, fstrings, and process managementAdded @c-only and @python-only test markers for runtime-specific tests
+- Fixed 13 failing C VM tests related to sets, membership operators, fstrings, and process managementAdded and @python-only test markers for runtime-specific tests
 - Inlined arithmetic operations for int64 fast path to avoid function call overhead
 - Implemented proper global variable support with dedicated VM storage
 - Implemented arena allocator for batch allocation/deallocation of temporary values (64KB blocks)
