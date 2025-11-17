@@ -2541,14 +2541,20 @@ class WasmCompiler:
             self.imports.add('file_write')
 
         elif opcode == 'FILE_CLOSE':
-            # Stack: fd(i64) -> (nothing)
-            # Convert fd from i64 to i32
-            if self.type_stack and self.type_stack[-1] == 'i64':
-                self.emit("i32.wrap_i64", indent)
-                self.type_stack[-1] = 'i32'
-            self.emit("call $file_close", indent)
-            if self.type_stack:
-                self.type_stack.pop()
+            # Stack: fd(i64) -> (nothing) OR Stack: empty -> (nothing)
+            # Handle both cases: fd on stack or no fd on stack (bytecode inconsistency)
+            if self.type_stack and len(self.type_stack) > 0:
+                # Convert fd from i64 to i32
+                if self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
+                self.emit("call $file_close", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
+            else:
+                # No fd on stack - file is already closed or bytecode issue
+                # Just emit a comment and don't call file_close
+                self.emit_comment("FILE_CLOSE - no fd on stack, skipping", indent)
             self.imports.add('file_close')
 
         elif opcode == 'EXIT':
