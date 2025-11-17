@@ -680,6 +680,7 @@ class WasmCompiler:
         # Detect all jumps and classify them as forward or backward
         forward_jumps = {}  # Maps jump position -> target label (for forward jumps)
         backward_jumps = {}  # Maps jump position -> target label (for backward jumps)
+        switch_case_labels = set()  # Track all switch case labels that need blocks
 
         for i, line in enumerate(func_lines):
             target = None
@@ -695,6 +696,19 @@ class WasmCompiler:
                             forward_jumps[i] = target
                         elif target_pos <= i:
                             backward_jumps[i] = target
+            
+            # Also detect switch case labels from SWITCH_JUMP_TABLE
+            elif line.startswith('SWITCH_JUMP_TABLE '):
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Format: SWITCH_JUMP_TABLE min_val max_val label1 label2 ... labelN
+                    case_labels = parts[3:]  # All labels after min and max
+                    for target in case_labels:
+                        if target in label_positions:
+                            target_pos = label_positions[target]
+                            if target_pos > i:
+                                # Mark this as a switch case label
+                                switch_case_labels.add(target)
 
         # Identify loop structures by analyzing backward jumps and loop naming
         loop_structures = {}  # Maps loop_start -> (loop_end, loop_continue)
@@ -744,6 +758,15 @@ class WasmCompiler:
 
         for target in forward_jumps.values():
             # Don't create blocks for loop structures - they're handled specially
+            if target not in loop_structures and target not in loop_end_labels:
+                target_pos = label_positions[target]
+                if is_inside_loop(target_pos):
+                    labels_needing_blocks_inside_loops.add(target)
+                else:
+                    labels_needing_blocks_outside_loops.add(target)
+        
+        # Add switch case labels to blocks that need to be opened
+        for target in switch_case_labels:
             if target not in loop_structures and target not in loop_end_labels:
                 target_pos = label_positions[target]
                 if is_inside_loop(target_pos):
@@ -2074,9 +2097,17 @@ class WasmCompiler:
             # Push struct pointer back to stack
             self.emit("local.get $temp", indent)
 
-            # Update type stack
-            for _ in range(field_count):
-                self.pop_type()
+            # Update type stack - pop values based on actual stack consumption
+            # String fields consume 2 values (ptr, len), other fields consume 1
+            for i in range(field_count):
+                field_type = field_types[i]
+                if field_type == 'str':
+                    # String field consumes 2 stack values
+                    self.pop_type()  # len
+                    self.pop_type()  # ptr
+                else:
+                    # Other fields consume 1 stack value
+                    self.pop_type()
             self.push_type('i32', struct_id)
 
         elif opcode == 'STRUCT_GET':
