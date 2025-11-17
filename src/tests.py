@@ -182,6 +182,9 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
     # If neither NATIVE_OUTPUT nor NATIVE_ERROR is present, native was skipped
     if native_output is None and native_error is None:
         native_skipped = True
+    # If neither WASM_OUTPUT nor WASM_ERROR is present, wasm was skipped
+    if wasm_output is None and wasm_error is None:
+        wasm_skipped = True
 
     # Define helper functions for error message comparison
     def extract_msg(text):

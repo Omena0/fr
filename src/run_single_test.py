@@ -668,9 +668,7 @@ def main():
         print("NATIVE_OUTPUT:")
 
     # Wasm command output (compile-only, no expectation match)
-    if wasm_error == "SKIPPED":
-        pass
-    elif wasm_error:
+    if wasm_error:
         print(f"WASM_ERROR:{wasm_error}")
     else:
         escaped_wasm = wasm_output.replace('\\', '\\\\').replace('\n', '\\n') if wasm_output is not None else ''
