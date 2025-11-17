@@ -1,0 +1,10 @@
+// !List stress test passed
+
+void main() {
+    list huge = []
+    for (i, 500) {
+        huge = append(huge, i)
+    }
+    
+    println("List stress test passed")
+}

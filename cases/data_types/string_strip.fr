@@ -1,6 +1,6 @@
 // !hello
 
 void main() {
-    string s = "  hello  "
+    str s = "  hello  "
     println(strip(s))
 }

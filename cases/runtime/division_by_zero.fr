@@ -1,0 +1,13 @@
+// !Division by zero handled
+
+void main() {
+    float x = 10.0
+    float y = 0.0
+    
+    if (y == 0.0) {
+        println("Division by zero handled")
+    } else {
+        float z = x / y
+        println(str(z))
+    }
+}

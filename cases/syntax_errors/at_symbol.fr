@@ -1,4 +1,4 @@
-// ?4:"@println" is not defined.
+// ?4,0:Function "@println" is not defined.
 
 void main() {
     @println("test")

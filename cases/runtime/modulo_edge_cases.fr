@@ -1,0 +1,12 @@
+// !Modulo edge cases test passed
+
+void main() {
+    int a = -10 % 3
+    int b = 10 % -3
+    int c = -10 % -3
+    
+    int big = 2 ** 50
+    int result = big % 999999
+    
+    println("Modulo edge cases test passed")
+}

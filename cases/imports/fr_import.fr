@@ -1,0 +1,7 @@
+// 7
+import lib.fr
+
+void main() {
+    int num = add(2, 5)
+    println(num)
+}

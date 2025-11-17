@@ -1,0 +1,15 @@
+// !Struct stress test passed
+
+struct Point {
+    int x
+    int y
+}
+
+void main() {
+    list points = []
+    for (i, 300) {
+        points = append(points, Point(i, i * 2))
+    }
+    
+    println("Struct stress test passed")
+}

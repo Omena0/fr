@@ -1,0 +1,10 @@
+// !String concat stress test passed
+
+void main() {
+    str s = "a"
+    for (i, 18) {
+        s = s + s
+    }
+    
+    println("String concat stress test passed")
+}

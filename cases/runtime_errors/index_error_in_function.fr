@@ -1,4 +1,4 @@
-// !100 (length: 1)
+// ?5,19:Index error: list index out of range: 100 (length: 1)
 
 void helper() {
     list nums = [42]

@@ -1,0 +1,33 @@
+{
+    "native": {
+        "enabled": true,
+        "timeout": 10,
+        "ignore": [
+            "syntax_errors",
+            "python_interop"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    },
+    "c": {
+        "enabled": true,
+        "timeout": 5,
+        "ignore": [
+            "syntax_errors",
+            "imports/c_import.fr"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    },
+    "py": {
+        "enabled": true,
+        "timeout": 10,
+        "ignore": [
+            "runtime",
+            "imports/c_import.fr",
+            "misc/goto_with_return.fr"
+        ],
+        "skip_mismatch": [],
+        "allow_timeout_failures": false
+    }
+}

@@ -1,0 +1,10 @@
+// !pass
+
+void test() {
+    return
+}
+
+void main() {
+    test()
+    println("pass")
+}

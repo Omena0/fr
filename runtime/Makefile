@@ -1,7 +1,8 @@
 CC = gcc
 PYTHON_CONFIG = python3-config
-CFLAGS = -Wall -Wextra -Ofast -std=c11 -march=native -flto -ffast-math -funroll-loops -finline-functions -fomit-frame-pointer $(shell $(PYTHON_CONFIG) --cflags --embed 2>/dev/null || $(PYTHON_CONFIG) --cflags)
-LDFLAGS = -lm -lgmp -flto $(shell $(PYTHON_CONFIG) --ldflags --embed 2>/dev/null || $(PYTHON_CONFIG) --ldflags)
+# Use -O3 with -fno-strict-aliasing to prevent issues with type punning
+CFLAGS = -Wall -Wextra -O3 -std=c11 -march=native -mtune=native -fno-strict-aliasing -funroll-loops -finline-functions $(shell $(PYTHON_CONFIG) --cflags --embed 2>/dev/null || $(PYTHON_CONFIG) --cflags)
+LDFLAGS = -lm -lgmp $(shell $(PYTHON_CONFIG) --ldflags --embed 2>/dev/null || $(PYTHON_CONFIG) --ldflags)
 
 TARGET = vm
 SRC = vm.c
@@ -15,3 +16,4 @@ clean:
 	rm -f $(TARGET)
 
 .PHONY: all clean
+

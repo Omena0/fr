@@ -1,0 +1,70 @@
+#pragma no_eval
+
+str pi_spigot(int n_digits) {
+    list a = []
+    int n = int((10 * n_digits) / 3 + 1)
+    for (i, n) {
+        a.append(2)
+    }
+
+    str result = ""
+    int nines = 0
+    int predigit = 1
+
+    for (i, n_digits) {
+        int carry = 0
+        int k = n - 1
+
+        // Main inner loop
+        while (k >= 1) {
+            int x = a[k] * 10 + carry * k
+            int denom = 2 * k - 1
+            a[k] = x % denom
+            carry = x / denom
+            k -= 1
+        }
+
+        int x = a[0] * 10 + carry
+        int q = int(x / 10)
+        a[0] = x % 10
+
+        if (i < 2) {
+            continue
+        }
+
+        // Handle carries and 9-runs properly
+        if (q == 9) {
+            nines += 1
+        }
+        elif (q == 10) {
+            result += str(predigit + 1)
+            for (j, nines) {
+                result += "0"
+            }
+            predigit = 0
+            nines = 0
+        }
+        else {
+            result += str(predigit)
+            predigit = q
+            if (nines > 0) {
+                for (j, nines) {
+                    result += "9"
+                }
+                nines = 0
+            }
+        }
+    }
+
+    // Append last pending digit
+    result += str(predigit)
+
+    // Add the leading "3."
+    return f"3.{result}"
+}
+
+
+void main() {
+    str pi = pi_spigot(10000)
+    println(pi)
+}

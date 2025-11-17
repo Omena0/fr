@@ -50,24 +50,34 @@ def format_runtime_exception(e: Exception) -> str:
     ctx = get_runtime_context()
     error_msg = str(e)
     char_pos = ctx['char']
-    
+
     # Get the source line if available
     source_line = ""
     if ctx['source'] and ctx['line'] > 0:
         lines = ctx['source'].split('\n')
         if 0 < ctx['line'] <= len(lines):
             source_line = lines[ctx['line'] - 1]
-    
+
     # Format location
     location = f"{ctx['file']}:{ctx['line']}:{char_pos}" if ctx['file'] else f"Line {ctx['line']}:{char_pos}"
-    
+
+    # Check if this is a raise statement (has [Type] marker)
+    is_raise = error_msg.startswith('[') and ']' in error_msg
+
     # Build error message in same format as parse errors
     if source_line:
-        pointer = ' ' * char_pos + '^'
-        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
+        if is_raise:
+            # For raise statements: no caret, no column number
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n\n    {ctx['file']}:{ctx['line']}: {error_msg}"
+        else:
+            # For runtime errors: show caret and column number
+            pointer = ' ' * char_pos + '^'
+            formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n      {source_line}\n      {pointer}\n    {location}: {error_msg}"
+    elif is_raise:
+        formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {ctx['file']}:{ctx['line']}: {error_msg}"
     else:
         formatted = f"Runtime Error\n  File \"{ctx['file']}\" line {ctx['line']} in {ctx['func']}\n    {location}: {error_msg}"
-    
+
     return formatted
 
 sys.setrecursionlimit(1000000000)
@@ -109,6 +119,8 @@ NODE_TYPE_INDEX_ASSIGN = 'index_assign'
 NODE_TYPE_FIELD_ASSIGN = 'field_assign'
 NODE_TYPE_STRING = 'string'
 NODE_TYPE_PY_IMPORT = 'py_import'
+NODE_TYPE_IMPORT = 'import'
+NODE_TYPE_C_IMPORT = 'c_import'
 
 # Control flow exceptions for break/continue
 class BreakException(Exception):
@@ -240,6 +252,9 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
     # Execute builtin or user-defined function
     if func['type'] == NODE_TYPE_BUILTIN and callable(func['func']):
         out = func['func'](*processed_args)
+    elif func['type'] == 'c_function':
+        # C functions cannot be called from Python runtime
+        raise RuntimeError(f'Cannot call C function "{name}" from Python runtime. Use C VM or Native compiler.')
     else:
         func_body = func['func']
         if not isinstance(func_body, list):
@@ -430,13 +445,12 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         value = node['id']
         if value in vars:
             var_value = vars[value].get('value')
-            return var_value if var_value is not None else value
+            # Return the actual value, even if it's None
+            # Only return the variable name if the key doesn't exist
+            return var_value if 'value' in vars[value] else value
         # At parse time, if variable not found, return the node unchanged
         # This prevents treating undefined variables as string literals
-        if not runtime:
-            return node
-        return value
-    
+        return value if runtime else node
     # Function call (from parse_expr - has 'func' key)
     # OR call from f-string expansion (has 'name' key)
     if 'func' in node or ('name' in node and 'type' in node and node['type'] == 'call'):
@@ -500,7 +514,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         else:
             # Check if node has 'name' key directly (from f-string expansion)
             func_id = node.get('name')
-            
+
         if isinstance(func_id, str):
             return run_func(func_id, new_args)
         raise RuntimeError(f"Invalid function call: {func}")
@@ -525,7 +539,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
     if 'type' in node and node['type'] == 'set':
         # Convert to Python set, evaluating each element
         elements = node.get('value', [])
-        return set(eval_expr_node(elem) for elem in elements)
+        return {eval_expr_node(elem) for elem in elements}
 
     # Direct value
     if 'value' in node:
@@ -807,20 +821,24 @@ def _execute_node_field_assign(node: dict):
 def _execute_node_if(node: dict) -> Any:
     """Handle if/elif/else statement"""
     condition_result = eval_expr(node['condition'])
-    
-    if condition_result:
+
+    # Convert to boolean properly - handle None as False
+    # but use Python truthiness for numbers/strings
+    is_truthy = bool(condition_result) if condition_result is not None else False
+
+    if is_truthy:
         return run_scope(node['scope'])
 
     # Try elif branches
     if node['elifs']:
         for elif_node in node['elifs']:
-            if eval_expr(elif_node['condition']):
+            elif_result = eval_expr(elif_node['condition'])
+            elif_truthy = bool(elif_result) if elif_result is not None else False
+            if elif_truthy:
                 return run_scope(elif_node['scope'])
 
     # Execute else if present
-    if node['else']:
-        return run_scope(node['else'])
-    return None
+    return run_scope(node['else']) if node['else'] else None
 
 def _execute_node_switch(node: dict) -> Any:
     """Handle switch statement"""
@@ -901,19 +919,15 @@ def _execute_node_assert(node: dict):
 def _execute_node_try(node: dict, level: int) -> Any:
     """Handle try-except statement"""
     try:
-        # Execute the try block
-        result = run_scope(node['try_scope'], level+1)
-        return result
+        return run_scope(node['try_scope'], level+1)
     except Exception as e:
         # Get the exception type name
         exc_name = type(e).__name__
         expected_exc = node['exc_type']
-        
+
         # Check if the exception type matches
         if exc_name == expected_exc:
-            # Execute the except block
-            result = run_scope(node['except_scope'], level+1)
-            return result
+            return run_scope(node['except_scope'], level+1)
         else:
             # Re-raise if it doesn't match
             raise
@@ -977,6 +991,10 @@ def run_scope(ast: AstType, level=0):
 
         node_type = node['type']
 
+        # Skip metadata nodes (used for compiler info)
+        if node_type == 'metadata':
+            continue
+
         # Handle each node type
         if node_type == NODE_TYPE_FUNCTION:
             _execute_node_function(node, level)
@@ -984,6 +1002,13 @@ def run_scope(ast: AstType, level=0):
             _execute_node_struct_def(node)
         elif node_type == NODE_TYPE_PY_IMPORT:
             _execute_node_py_import(node)
+        elif node_type == NODE_TYPE_IMPORT:
+            # Fr import - execute the imported AST
+            if 'ast' in node:
+                run_scope(node['ast'], level)
+        elif node_type == NODE_TYPE_C_IMPORT:
+            # C import - no runtime action needed, handled at compile/link time
+            pass
         elif node_type == NODE_TYPE_VAR:
             _execute_node_var(node)
         elif node_type == NODE_TYPE_INDEX_ASSIGN:
@@ -1046,7 +1071,9 @@ def run(ast:AstType, file:str='', source:str=''):
         py_imports.clear()
         # Reset funcs to only include builtin functions (remove user-defined functions from previous runs)
         # Remove any functions that are not in the original builtin set
-        user_func_names = [name for name in funcs.keys() if name not in builtin_func_names]
+        # BUT keep C-imported functions (they are defined in c_import statements)
+        user_func_names = [name for name in funcs.keys() 
+                          if name not in builtin_func_names and funcs[name].get('type') != 'c_function']
         for name in user_func_names:
             del funcs[name]
 

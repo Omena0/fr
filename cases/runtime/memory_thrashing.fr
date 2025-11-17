@@ -1,0 +1,17 @@
+// !Memory thrashing test passed
+
+void main() {
+    for (outer, 20) {
+        list temp_lists = []
+        
+        for (i, 20) {
+            list l = []
+            for (j, 10) {
+                l = append(l, j * i)
+            }
+            temp_lists = append(temp_lists, l)
+        }
+    }
+    
+    println("Memory thrashing test passed")
+}

@@ -1,0 +1,12 @@
+// !Float extremes test passed
+
+void main() {
+    float inf = 1e308 * 10.0
+    float tiny = 1e-308 / 10.0
+    
+    float result1 = inf + inf
+    float result2 = inf * 0.0
+    float result3 = tiny + tiny
+    
+    println("Float extremes test passed")
+}

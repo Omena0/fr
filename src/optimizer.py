@@ -299,7 +299,7 @@ class BytecodeOptimizer:
 
             # Check for consecutive CONST_STR instructions
             # Note: These need special handling due to quoted strings
-            # BUT: Don't merge if they're arguments to PY_CALL (module_name, func_name)
+            # BUT: Don't merge if they're arguments to a function call (CALL, PY_CALL, etc.)
             if line.startswith('CONST_STR "'):
                 constants = []
                 j = i
@@ -310,12 +310,25 @@ class BytecodeOptimizer:
                     constants.append(const_str)
                     j += 1
 
-                # Check if the next non-whitespace line after the CONST_STR sequence is PY_CALL
-                # If so, don't merge - these strings are separate arguments
+                # Look ahead to find if these CONST_STR values are function arguments
+                # Don't merge if they're followed by LOAD/DUP/other stack ops then CALL
                 next_line = lines[j].strip() if j < len(lines) else ""
-                is_py_call_args = next_line.startswith('CONST_I64 ') and j + 1 < len(lines) and lines[j + 1].strip() == 'PY_CALL'
                 
-                if len(constants) >= 2 and not is_py_call_args:
+                # Check if these are function call arguments by looking for CALL in the next few lines
+                is_func_call_args = False
+                lookahead = j
+                lookahead_limit = min(lookahead + 10, len(lines))
+                while lookahead < lookahead_limit:
+                    lookahead_line = lines[lookahead].strip()
+                    if lookahead_line.startswith('CALL '):
+                        is_func_call_args = True
+                        break
+                    # Stop searching if we hit something that's not a stack operation
+                    if lookahead_line and not lookahead_line.startswith(('LOAD', 'DUP', 'CONST_', '.line')):
+                        break
+                    lookahead += 1
+                
+                if len(constants) >= 2 and not is_func_call_args:
                     result.append(f"{indent}CONST_STR {' '.join(constants)}")
                     i = j
                     continue
@@ -2033,13 +2046,15 @@ class BytecodeOptimizer:
         i = 0
         
         # Instructions that consume stack and may change types - not safe for DUP optimization
+        # Also includes void functions that consume their arguments without leaving a value
         unsafe_for_dup = {
             'BUILTIN_STR', 'TO_STR', 'TO_INT', 'TO_FLOAT', 'TO_BOOL',
             'BUILTIN_LEN', 'LIST_POP', 'LIST_GET', 'STRUCT_GET',
             'ADD_STR', 'ADD_I64', 'ADD_F64', 'SUB_I64', 'SUB_F64',
             'MUL_I64', 'MUL_F64', 'DIV_I64', 'DIV_F64', 'MOD_I64',
             'CMP_EQ', 'CMP_NE', 'CMP_LT', 'CMP_GT', 'CMP_LE', 'CMP_GE',
-            'AND', 'OR', 'NOT', 'NEG'
+            'AND', 'OR', 'NOT', 'NEG',
+            'BUILTIN_PRINTLN', 'BUILTIN_PRINT',  # Void functions that consume arguments
         }
         
         while i < len(lines):

@@ -1,0 +1,8 @@
+// !7\nHello from C!
+c_import lib.c
+
+void main() {
+    int num = add(2, 5)
+    println(num)
+    hello()
+}

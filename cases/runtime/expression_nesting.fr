@@ -1,0 +1,8 @@
+// !Extreme nesting test passed
+
+void main() {
+    int result = ((((((((((1 + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1)
+    result = ((((((((((result + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1)
+    
+    println("Extreme nesting test passed")
+}

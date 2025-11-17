@@ -1,0 +1,13 @@
+// !Recursion test passed
+
+int recurse(int n) {
+    if (n <= 0) {
+        return 1
+    }
+    return recurse(n - 1) + 1
+}
+
+void main() {
+    int result = recurse(1000)
+    println("Recursion test passed")
+}

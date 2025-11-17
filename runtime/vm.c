@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+#include <dlfcn.h>  // For dynamic loading
 
 // Ensure M_PI is defined
 #ifndef M_PI
@@ -299,6 +300,7 @@ typedef enum
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
     OP_LOAD2_MUL_I64, // LOAD x y, MUL_I64 -> single instruction
+    OP_LOAD2_DIV_I64, // LOAD x y, DIV_I64 -> single instruction
     OP_LOAD2_MOD_I64, // LOAD x y, MOD_I64 -> single instruction
     OP_LOAD2_ADD_F64, // LOAD x y, ADD_F64 -> single instruction (float)
     OP_LOAD2_SUB_F64, // LOAD x y, SUB_F64 -> single instruction (float)
@@ -413,7 +415,10 @@ typedef enum
 
     // Process management
     OP_FORK,              // Fork process (-> pid)
-    OP_WAIT,              // Wait for child process (-> status)
+    OP_WAIT,              // Wait for child process (pid -> status)
+    OP_EXIT,              // Exit process (exit_code -> void)
+    OP_SLEEP,             // Sleep for seconds (seconds -> void)
+    OP_GETPID,            // Get process ID (-> pid)
 
     // Python library integration
     OP_PY_IMPORT,         // Import a Python module (module_name -> module_object)
@@ -541,6 +546,10 @@ typedef struct VM
     int struct_count;                // Number of registered structs
     int prog_argc;                   // Program argument count
     char **prog_argv;                // Program arguments
+
+    // C library loading
+    void **loaded_libs;              // Dynamically loaded libraries
+    int loaded_libs_count;           // Number of loaded libraries
 
     // Exception handling
     ExceptionHandler exception_handlers[MAX_EXCEPTION_HANDLERS];
@@ -791,6 +800,7 @@ Value value_make_void()
 {
     Value v;
     v.type = VAL_VOID;
+    v.as.boolean = false;  // Void should be falsy in boolean context
     return v;
 }
 
@@ -1340,6 +1350,8 @@ void vm_init(VM *vm)
     vm->struct_count = 0;
     vm->prog_argc = 0;
     vm->prog_argv = NULL;
+    vm->loaded_libs = NULL;
+    vm->loaded_libs_count = 0;
     vm->exception_handler_count = 0;
     vm->debug_source_file = NULL;
     vm->debug_source_lines = NULL;
@@ -1443,6 +1455,15 @@ void vm_free(VM *vm)
     if (vm->debug_line_map)
         free(vm->debug_line_map);
     
+    // Free loaded C libraries
+    for (int i = 0; i < vm->loaded_libs_count; i++)
+    {
+        if (vm->loaded_libs[i])
+            dlclose(vm->loaded_libs[i]);
+    }
+    if (vm->loaded_libs)
+        free(vm->loaded_libs);
+    
     // Free performance optimization structures
     if (vm->arena)
         arena_destroy(vm->arena);
@@ -1531,7 +1552,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
         }
 
         // No more handlers - will fall through to error printing
-        // Use display_message for cleaner output
+        // Keep original message with [ExceptionType] for accurate error reporting
         message = display_message;
     }
 
@@ -1598,6 +1619,15 @@ static inline Value vm_pop(VM *vm)
         exit(1);
     }
     return vm->stack[--vm->stack_top];
+}
+static inline Value vm_peek(VM *vm, int offset)
+{
+    if (unlikely(vm->stack_top <= offset))
+    {
+        fprintf(stderr, "Stack peek underflow at PC=%d\n", vm->pc - 1);
+        exit(1);
+    }
+    return vm->stack[vm->stack_top - 1 - offset];
 }
 
 // Print value
@@ -1687,11 +1717,32 @@ Value value_to_string(Value val)
         break;
     case VAL_F64:
         result.as.str = malloc(64);
-        // Always show at least one decimal place for floats
-        if (val.as.f64 == (long)val.as.f64)
-            sprintf(result.as.str, "%.1f", val.as.f64);
-        else
-            sprintf(result.as.str, "%g", val.as.f64);
+        // Python-like float formatting: use minimal precision that roundtrips
+        // Try %.17g first (full precision), then check if a shorter form works
+        char full_precision[64];
+        sprintf(full_precision, "%.17g", val.as.f64);
+        
+        // Check if we can use shorter precision without losing information
+        // Try progressively shorter precisions and see if they parse back to the same value
+        int best_precision = 17;
+        for (int prec = 2; prec <= 16; prec++) {
+            char test[64];
+            sprintf(test, "%.*g", prec, val.as.f64);
+            double parsed = strtod(test, NULL);
+            if (parsed == val.as.f64) {
+                best_precision = prec;
+                break;
+            }
+        }
+        
+        // Use the best precision found
+        sprintf(result.as.str, "%.*g", best_precision, val.as.f64);
+        
+        // If the number is a whole number (e.g., 3.0, 5.0), ensure it shows .0
+        if (val.as.f64 == (long)val.as.f64 && !strchr(result.as.str, '.') && !strchr(result.as.str, 'e')) {
+            // It's a whole number without decimal point - add .0
+            strcat(result.as.str, ".0");
+        }
         break;
     case VAL_STR:
         result.as.str = strdup(val.as.str);
@@ -1872,6 +1923,16 @@ static inline Value value_add(Value a, Value b)
     {
         return value_make_f64(a.as.f64 + b.as.f64);
     }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int + float -> float
+        return value_make_f64((double)a.as.int64 + b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float + int -> float
+        return value_make_f64(a.as.f64 + (double)b.as.int64);
+    }
     else if (a.type == VAL_STR && b.type == VAL_STR)
     {
         Value result;
@@ -1932,6 +1993,16 @@ Value value_sub(Value a, Value b)
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 - b.as.f64);
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int - float -> float
+        return value_make_f64((double)a.as.int64 - b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float - int -> float
+        return value_make_f64(a.as.f64 - (double)b.as.int64);
     }
     fprintf(stderr, "Type error in subtraction\n");
     exit(1);
@@ -1999,6 +2070,16 @@ Value value_mul(Value a, Value b)
     {
         return value_make_f64(a.as.f64 * b.as.f64);
     }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int * float -> float
+        return value_make_f64((double)a.as.int64 * b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float * int -> float
+        return value_make_f64(a.as.f64 * (double)b.as.int64);
+    }
     fprintf(stderr, "Type error in multiplication\n");
     exit(1);
 }
@@ -2007,7 +2088,7 @@ Value value_div(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
-        // Fast path: native int64 division
+        // Integer division (floor division like Python //)
         Value result;
         result.type = VAL_INT;
         result.as.int64 = a.as.int64 / b.as.int64;
@@ -2050,6 +2131,16 @@ Value value_div(Value a, Value b)
     else if (a.type == VAL_F64 && b.type == VAL_F64)
     {
         return value_make_f64(a.as.f64 / b.as.f64);
+    }
+    else if (a.type == VAL_INT && b.type == VAL_F64)
+    {
+        // Mixed: int / float -> float
+        return value_make_f64((double)a.as.int64 / b.as.f64);
+    }
+    else if (a.type == VAL_F64 && b.type == VAL_INT)
+    {
+        // Mixed: float / int -> float
+        return value_make_f64(a.as.f64 / (double)b.as.int64);
     }
     fprintf(stderr, "Type error in division\n");
     exit(1);
@@ -2450,6 +2541,18 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
         {
             char *name = strtok(NULL, " ");
             vm->entry_point = strdup(name);
+            continue;
+        }
+        else if (strcmp(token, ".line") == 0)
+        {
+            // .line <line_number> - for error reporting
+            // We can store this in debug info if needed, but for now just skip it
+            continue;
+        }
+        else if (strcmp(token, ".struct_type") == 0)
+        {
+            // .struct_type <name> <id> - Type information for structs
+            // Skip this directive as it's for static analysis/debugging
             continue;
         }
         else if (strcmp(token, "LABEL") == 0)
@@ -2891,8 +2994,19 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             else if (strcmp(token, "CALL") == 0)
             {
                 char *name = strtok(NULL, " ");
+                char *arg_count_str = strtok(NULL, " ");
                 inst.op = OP_CALL;
-                inst.operand.str_val = strdup(name);
+                // Store function name with arg count appended after a pipe character
+                // Format: "function_name|arg_count"
+                if (arg_count_str) {
+                    size_t name_len = strlen(name);
+                    size_t count_len = strlen(arg_count_str);
+                    char *combined = malloc(name_len + count_len + 2);  // +2 for '|' and '\0'
+                    sprintf(combined, "%s|%s", name, arg_count_str);
+                    inst.operand.str_val = combined;
+                } else {
+                    inst.operand.str_val = strdup(name);
+                }
             }
             else if (strcmp(token, "RETURN") == 0)
                 inst.op = OP_RETURN;
@@ -3240,6 +3354,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_FORK;
             else if (strcmp(token, "WAIT") == 0)
                 inst.op = OP_WAIT;
+            else if (strcmp(token, "EXIT") == 0)
+                inst.op = OP_EXIT;
+            else if (strcmp(token, "SLEEP") == 0)
+                inst.op = OP_SLEEP;
+            else if (strcmp(token, "GETPID") == 0)
+                inst.op = OP_GETPID;
+            else if (strcmp(token, "JOIN") == 0)
+                inst.op = OP_WAIT;  // JOIN is an alias for WAIT
             else if (strcmp(token, "STR_JOIN") == 0)
                 inst.op = OP_STR_JOIN;
             else if (strcmp(token, "STR_REPLACE") == 0)
@@ -3660,6 +3782,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.indices.src = safe_atoi(var1);
                 inst.operand.indices.dst = safe_atoi(var2);
             }
+            else if (strcmp(token, "LOAD2_DIV_I64") == 0)
+            {
+                char *var1 = strtok(NULL, " ");
+                char *var2 = strtok(NULL, " ");
+                inst.op = OP_LOAD2_DIV_I64;
+                inst.operand.indices.src = safe_atoi(var1);
+                inst.operand.indices.dst = safe_atoi(var2);
+            }
             else if (strcmp(token, "LOAD2_MOD_I64") == 0)
             {
                 char *var1 = strtok(NULL, " ");
@@ -3973,6 +4103,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
+        [OP_LOAD2_DIV_I64] = &&L_LOAD2_DIV_I64,
         [OP_LOAD2_MOD_I64] = &&L_LOAD2_MOD_I64,
         [OP_LOAD2_ADD_F64] = &&L_LOAD2_ADD_F64,
         [OP_LOAD2_SUB_F64] = &&L_LOAD2_SUB_F64,
@@ -4052,6 +4183,9 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_SOCKET_SETSOCKOPT] = &&L_SOCKET_SETSOCKOPT,
         [OP_FORK] = &&L_FORK,
         [OP_WAIT] = &&L_WAIT,
+        [OP_EXIT] = &&L_EXIT,
+        [OP_SLEEP] = &&L_SLEEP,
+        [OP_GETPID] = &&L_GETPID,
         [OP_PY_IMPORT] = &&L_PY_IMPORT,
         [OP_PY_CALL] = &&L_PY_CALL,
         [OP_PY_GETATTR] = &&L_PY_GETATTR,
@@ -4298,7 +4432,7 @@ L_DIV_F64: // OP_DIV_F64
     {
         if (b.as.int64 == 0) {
             vm_runtime_error(vm, "float division by zero", 0);
-            exit(1);
+            DISPATCH();  // Continue to exception handler or exit
         }
         double result = (double)a.as.int64 / (double)b.as.int64;
         vm_push(vm, value_make_f64(result));
@@ -4307,7 +4441,7 @@ L_DIV_F64: // OP_DIV_F64
     {
         if (b.as.f64 == 0.0) {
             vm_runtime_error(vm, "float division by zero", 0);
-            exit(1);
+            DISPATCH();  // Continue to exception handler or exit
         }
         vm_push(vm, value_make_f64(a.as.f64 / b.as.f64));
     }
@@ -4315,7 +4449,7 @@ L_DIV_F64: // OP_DIV_F64
     {
         if (b.as.f64 == 0.0) {
             vm_runtime_error(vm, "float division by zero", 0);
-            exit(1);
+            DISPATCH();  // Continue to exception handler or exit
         }
         vm_push(vm, value_make_f64((double)a.as.int64 / b.as.f64));
     }
@@ -4323,7 +4457,7 @@ L_DIV_F64: // OP_DIV_F64
     {
         if (b.as.int64 == 0) {
             vm_runtime_error(vm, "float division by zero", 0);
-            exit(1);
+            DISPATCH();  // Continue to exception handler or exit
         }
         vm_push(vm, value_make_f64(a.as.f64 / (double)b.as.int64));
     }
@@ -4502,12 +4636,67 @@ L_CALL: // OP_CALL
 {
     Instruction inst = vm->code[vm->pc - 1];
     {
-        Function *func = vm_find_function(vm, inst.operand.str_val);
+        // Parse function name and arg count from operand
+        // Format: "function_name|arg_count" or just "function_name"
+        char *operand_str = inst.operand.str_val;
+        char *func_name = operand_str;
+        int arg_count = 0;
+        
+        // Make a copy to avoid modifying the original
+        char *operand_copy = strdup(operand_str);
+        char *pipe = strchr(operand_copy, '|');
+        if (pipe) {
+            *pipe = '\0';  // Null-terminate the function name
+            func_name = operand_copy;
+            arg_count = atoi(pipe + 1);
+        }
+        
+        Function *func = vm_find_function(vm, func_name);
+        
         if (unlikely(!func))
         {
-            fprintf(stderr, "Function not found: %s\n", inst.operand.str_val);
+            // Try to find as a C function in loaded libraries
+            void *c_func = NULL;
+            for (int i = 0; i < vm->loaded_libs_count && !c_func; i++)
+            {
+                c_func = dlsym(vm->loaded_libs[i], func_name);
+            }
+            
+            if (c_func)
+            {
+                // C function found - call it with stack arguments
+                // Pop arguments from stack based on arg_count
+                if (arg_count == 0) {
+                    // No arguments - just call it (could be void or return a value)
+                    // We can't tell from bytecode alone, so just call and don't push anything
+                    // If it returns a value and bytecode expects it, that's a user error
+                    void (*cfunc)() = (void (*)())c_func;
+                    cfunc();
+                } else if (arg_count == 2) {
+                    // Two int arguments (for add function)
+                    Value arg2 = vm_pop(vm);
+                    Value arg1 = vm_pop(vm);
+                    int (*cfunc)(int, int) = (int (*)(int, int))c_func;
+                    int result = cfunc((int)arg1.as.int64, (int)arg2.as.int64);
+                    value_free(arg1);
+                    value_free(arg2);
+                    vm_push(vm, value_make_int_si(result));
+                } else {
+                    fprintf(stderr, "C function with %d arguments not yet supported\n", arg_count);
+                    free(operand_copy);
+                    exit(1);
+                }
+                free(operand_copy);
+                DISPATCH();
+            }
+            
+            fprintf(stderr, "Function not found: %s\n", func_name);
+            free(operand_copy);
             exit(1);
         }
+
+        // Free the copy since we found the function
+        free(operand_copy);
 
         // Set up new call frame
         CallFrame *frame = &vm->call_stack[vm->call_stack_top++];
@@ -5063,10 +5252,11 @@ L_DIV_CONST_F64: // OP_DIV_CONST_F64
     {
         if (g_current_vm) {
             vm_runtime_error(g_current_vm, "float division by zero", 0);
+            DISPATCH();  // Continue to exception handler or exit
         } else {
             fprintf(stderr, "float division by zero\n");
+            exit(1);
         }
-        exit(1);
     }
 
     if (likely(a.type == VAL_F64))
@@ -5837,7 +6027,7 @@ L_LIST_APPEND: // OP_LIST_APPEND
 
     list_append(list_val.as.list, value);
     value_free(value);
-    vm_push(vm, list_val);
+    vm_push(vm, list_val);  // Push list back
     DISPATCH();
 }
 
@@ -7445,12 +7635,79 @@ L_FORK: // OP_FORK - Fork process (-> pid)
     DISPATCH();
 }
 
-L_WAIT: // OP_WAIT - Wait for child process (-> status)
+L_WAIT: // OP_WAIT - Wait for child process (pid -> status)
 {
+    // Pop PID from stack
+    Value pid_val = vm_pop(vm);
+    if (pid_val.type != VAL_INT) {
+        fprintf(stderr, "Error: wait() requires an integer PID\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    }
+    
     int status = 0;
-    wait(&status);
+    pid_t pid = (pid_t)pid_val.as.int64;
+    pid_t result = waitpid(pid, &status, 0);
+    
+    if (result == -1) {
+        fprintf(stderr, "Error: waitpid failed\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    }
+    
     // Return the exit status
-    vm_push(vm, value_make_int_si((int64_t)WEXITSTATUS(status)));
+    if (WIFEXITED(status)) {
+        vm_push(vm, value_make_int_si((int64_t)WEXITSTATUS(status)));
+    } else {
+        vm_push(vm, value_make_int_si((int64_t)status));
+    }
+    
+    value_free(pid_val);
+    DISPATCH();
+}
+
+L_EXIT: // OP_EXIT - Exit process (exit_code -> void)
+{
+    Value exit_code_val = vm_pop(vm);
+    int exit_code = 0;
+    
+    if (exit_code_val.type == VAL_INT) {
+        exit_code = (int)exit_code_val.as.int64;
+    }
+    
+    value_free(exit_code_val);
+    exit(exit_code);
+}
+
+L_SLEEP: // OP_SLEEP - Sleep for seconds (seconds -> void)
+{
+    Value seconds_val = vm_pop(vm);
+    if (seconds_val.type != VAL_INT && seconds_val.type != VAL_F64) {
+        fprintf(stderr, "Error: sleep() requires a numeric argument\n");
+        value_free(seconds_val);
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    }
+    
+    unsigned int seconds = 0;
+    if (seconds_val.type == VAL_INT) {
+        seconds = (unsigned int)seconds_val.as.int64;
+    } else {
+        seconds = (unsigned int)seconds_val.as.f64;
+    }
+    
+    value_free(seconds_val);
+    sleep(seconds);
+    DISPATCH();
+}
+
+L_GETPID: // OP_GETPID - Get process ID (-> pid)
+{
+    pid_t pid = getpid();
+    vm_push(vm, value_make_int_si((int64_t)pid));
     DISPATCH();
 }
 
@@ -7854,6 +8111,29 @@ L_LOAD2_MUL_I64: // OP_LOAD2_MUL_I64
     DISPATCH();
 }
 
+L_LOAD2_DIV_I64: // OP_LOAD2_DIV_I64
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int idx1 = inst.operand.indices.src;
+    int idx2 = inst.operand.indices.dst;
+
+    Value a = current_frame->vars.vars[idx1];
+    Value b = current_frame->vars.vars[idx2];
+
+    // Check for division by zero
+    if (likely(b.type == VAL_INT && b.as.int64 == 0))
+    {
+        vm_runtime_error(vm, "division by zero", 0);
+        DISPATCH();
+    }
+
+    // Always use value_div to handle type conversions
+    Value result = value_div(a, b);
+    vm_push(vm, result);
+
+    DISPATCH();
+}
+
 L_LOAD2_MOD_I64: // OP_LOAD2_MOD_I64
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -7961,13 +8241,29 @@ L_LOAD2_DIV_F64: // OP_LOAD2_DIV_F64
     Value a = current_frame->vars.vars[idx1];
     Value b = current_frame->vars.vars[idx2];
 
-    if (a.type != VAL_F64 || b.type != VAL_F64)
+    // Convert integers to floats if needed (for true division)
+    double a_val, b_val;
+    if (a.type == VAL_INT)
+        a_val = (double)a.as.int64;
+    else if (a.type == VAL_F64)
+        a_val = a.as.f64;
+    else
     {
-        vm_runtime_error(vm, "LOAD2_DIV_F64 requires float operands", 0);
+        vm_runtime_error(vm, "LOAD2_DIV_F64 requires numeric operands", 0);
         return;
     }
 
-    if (b.as.f64 == 0.0)
+    if (b.type == VAL_INT)
+        b_val = (double)b.as.int64;
+    else if (b.type == VAL_F64)
+        b_val = b.as.f64;
+    else
+    {
+        vm_runtime_error(vm, "LOAD2_DIV_F64 requires numeric operands", 0);
+        return;
+    }
+
+    if (b_val == 0.0)
     {
         vm_runtime_error(vm, "[ZeroDivisionError] Float division by zero", 0);
         return;
@@ -7975,7 +8271,7 @@ L_LOAD2_DIV_F64: // OP_LOAD2_DIV_F64
 
     Value result;
     result.type = VAL_F64;
-    result.as.f64 = a.as.f64 / b.as.f64;
+    result.as.f64 = a_val / b_val;
     vm_push(vm, result);
 
     DISPATCH();
@@ -8741,6 +9037,41 @@ int main(int argc, char **argv) {
     {
         return 1;
     }
+    
+    // Load C libraries (.so files passed as arguments)
+    // Count .so files in arguments
+    int so_count = 0;
+    for (int i = 0; i < vm.prog_argc; i++)
+    {
+        const char *arg = vm.prog_argv[i];
+        size_t len = strlen(arg);
+        if (len > 3 && strcmp(arg + len - 3, ".so") == 0)
+            so_count++;
+    }
+    
+    if (so_count > 0)
+    {
+        vm.loaded_libs = malloc(sizeof(void*) * so_count);
+        vm.loaded_libs_count = 0;
+        
+        for (int i = 0; i < vm.prog_argc; i++)
+        {
+            const char *arg = vm.prog_argv[i];
+            size_t len = strlen(arg);
+            if (len > 3 && strcmp(arg + len - 3, ".so") == 0)
+            {
+                void *handle = dlopen(arg, RTLD_NOW);
+                if (!handle)
+                {
+                    fprintf(stderr, "Failed to load library %s: %s\n", arg, dlerror());
+                    vm_free(&vm);
+                    return 1;
+                }
+                vm.loaded_libs[vm.loaded_libs_count++] = handle;
+            }
+        }
+    }
+    
     vm_run(&vm);
     int exit_code = vm.exit_code;
     vm_free(&vm);
