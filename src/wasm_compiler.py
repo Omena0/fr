@@ -786,8 +786,7 @@ class WasmCompiler:
             except Exception as e:
                 raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
 
-        current_loop = None
-        loop_internal_blocks = []  # Track blocks opened inside current loop
+        loop_stack = []  # Stack of (loop_start, loop_end, continue_label, internal_blocks)
 
         for i, raw_line in enumerate(post_label_lines):
             stripped = raw_line.strip()
@@ -802,10 +801,10 @@ class WasmCompiler:
             if stripped.startswith('LABEL '):
                 label_name = stripped.split()[1]
 
-                # Close any blocks that end at this label
+                # Close any blocks that end at this label (but not loops - they close at backward jumps)
                 blocks_to_close = []
                 for j, (lbl, is_loop, _) in enumerate(active_blocks):
-                    if lbl == label_name:
+                    if lbl == label_name and not is_loop:
                         blocks_to_close.append(j)
 
                 # Close in reverse order (from innermost to outermost)
@@ -813,32 +812,10 @@ class WasmCompiler:
                     lbl, is_loop, _ = active_blocks.pop(j)
                     indent -= 1
                     self.emit(")", indent)
-                    if is_loop:
-                        current_loop = None
-                        loop_internal_blocks = []
 
                 # Check if this is a loop start label
                 if label_name in loop_structures:
                     end_label, continue_label = loop_structures[label_name]
-
-                    # Open blocks for labels inside this loop first
-                    loop_start_pos = label_positions[label_name]
-                    loop_end_pos = label_positions.get(end_label, len(func_lines))
-
-                    # Find labels inside this loop that need blocks
-                    labels_in_this_loop = []
-                    for lbl in labels_needing_blocks_inside_loops:
-                        lbl_pos = label_positions[lbl]
-                        if loop_start_pos < lbl_pos < loop_end_pos:
-                            labels_in_this_loop.append(lbl)
-
-                    # Open blocks for these labels (in reverse position order for proper nesting)
-                    labels_in_this_loop.sort(key=lambda x: label_positions[x], reverse=True)
-                    for lbl in labels_in_this_loop:
-                        self.emit(f"(block ${lbl}", indent)
-                        indent += 1
-                        active_blocks.append((lbl, False, indent))
-                        loop_internal_blocks.append(lbl)
 
                     # Open outer block for loop exit
                     self.emit(f"(block ${end_label}", indent)
@@ -848,47 +825,42 @@ class WasmCompiler:
                     self.emit(f"(loop ${label_name}", indent)
                     indent += 1
                     active_blocks.append((label_name, True, indent))
-                    current_loop = (label_name, end_label, continue_label)
-                    continue
-
-                # Check if this is a loop end label
-                if current_loop and label_name == current_loop[1]:
-                    # Close the loop block first
-                    for j in range(len(active_blocks) - 1, -1, -1):
-                        if active_blocks[j][0] == current_loop[0]:
-                            active_blocks.pop(j)
-                            indent -= 1
-                            self.emit(")", indent)
-                            break
-                    # Close the end block
-                    for j in range(len(active_blocks) - 1, -1, -1):
-                        if active_blocks[j][0] == label_name:
-                            active_blocks.pop(j)
-                            indent -= 1
-                            self.emit(")", indent)
-                            break
-                    # Close any loop internal blocks that are still open
-                    for lbl in loop_internal_blocks:
-                        for j in range(len(active_blocks) - 1, -1, -1):
-                            if active_blocks[j][0] == lbl:
-                                active_blocks.pop(j)
-                                indent -= 1
-                                self.emit(")", indent)
-                                break
-                    current_loop = None
-                    loop_internal_blocks = []
+                    # Push this loop onto the stack
+                    loop_stack.append((label_name, end_label, continue_label, []))
                     continue
 
                 # Check if this is a continue label - just a marker
-                if current_loop and label_name == current_loop[2]:
+                if loop_stack and label_name == loop_stack[-1][2]:
                     continue
 
                 continue
 
+            # Compile the instruction
             try:
                 self._compile_instruction(stripped, indent)
             except Exception as e:
                 raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
+            
+            # After compiling, check if this was a backward jump - if so, close the loop
+            # Check by examining the instruction directly
+            if stripped.startswith('JUMP '):
+                parts = stripped.split()
+                if len(parts) > 1:
+                    target_label = parts[1]
+                    # Check if this is a backward jump to a loop start
+                    for j in range(len(loop_stack) - 1, -1, -1):
+                        loop_start, loop_end, continue_label, internal_blocks = loop_stack[j]
+                        if loop_start == target_label:
+                            # Close the loop block
+                            for k in range(len(active_blocks) - 1, -1, -1):
+                                if active_blocks[k][0] == loop_start and active_blocks[k][1]:  # is_loop
+                                    active_blocks.pop(k)
+                                    indent -= 1
+                                    self.emit(")", indent)
+                                    break
+                            # Pop from loop stack
+                            loop_stack.pop(j)
+                            break
 
         # Close all remaining blocks
         while active_blocks:
