@@ -617,6 +617,28 @@ class WasmCompiler:
                 type_stack_sim.append('i32')  # len
                 value_type_tracker[len(type_stack_sim) - 2] = 'str'
                 value_type_tracker[len(type_stack_sim) - 1] = 'str'
+            
+            elif opcode == 'FUSED_LOAD_STORE':
+                # Handle type inference for FUSED_LOAD_STORE
+                # Pattern: src1 dst1 src2 dst2 ... [optional final_src]
+                for i in range(0, len(parts) - 1, 2):
+                    if i + 2 < len(parts) and parts[i + 1].isdigit() and parts[i + 2].isdigit():
+                        src_idx = int(parts[i + 1])
+                        dst_idx = int(parts[i + 2])
+                        # Copy type from source to destination
+                        if src_idx in local_inferred_types:
+                            local_inferred_types[dst_idx] = local_inferred_types[src_idx]
+                
+                # If odd number of args, final value is left on stack
+                if len(parts) % 2 == 0 and len(parts) > 1:  # has final LOAD
+                    final_idx = int(parts[-1])
+                    if final_idx in local_inferred_types:
+                        final_type = local_inferred_types[final_idx]
+                        if final_type == 'str':
+                            type_stack_sim.append('i32')
+                            type_stack_sim.append('i32')
+                        else:
+                            type_stack_sim.append(final_type)
 
         # Update local_vars with inferred types (but don't overwrite explicit types like 'str')
         for idx, inferred_type in local_inferred_types.items():
@@ -1596,21 +1618,67 @@ class WasmCompiler:
             for i in range(0, len(args) - 1, 2):
                 src_idx = int(args[i])
                 dst_idx = int(args[i + 1])
+                
+                # Determine source type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if src_idx < param_count:
+                        src_type_fr = func_meta['params'][src_idx][1]
+                    else:
+                        src_type_fr = self.local_vars.get(src_idx - param_count, 'i64')
+                else:
+                    src_type_fr = 'i64'
+                
                 src_ref = self._get_var_ref(src_idx)
                 dst_ref = self._get_var_ref(dst_idx)
-                self.emit(f"local.get {src_ref}", indent)
-                self.emit(f"local.set {dst_ref}", indent)
+                
+                # Handle strings specially (need to copy both ptr and len)
+                if src_type_fr == 'str':
+                    self.emit(f"local.get {src_ref}", indent)
+                    self.emit(f"local.set {dst_ref}", indent)
+                    src_len_ref = f"{src_ref}_len"
+                    dst_len_ref = f"{dst_ref}_len"
+                    self.emit(f"local.get {src_len_ref}", indent)
+                    self.emit(f"local.set {dst_len_ref}", indent)
+                else:
+                    self.emit(f"local.get {src_ref}", indent)
+                    self.emit(f"local.set {dst_ref}", indent)
+                
                 # Update type tracking
-                src_type = self.local_vars.get(src_idx, 'i64')
-                self.local_vars[dst_idx] = src_type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if dst_idx >= param_count:
+                        self.local_vars[dst_idx - param_count] = src_type_fr
 
             # If odd number of args, there's a final LOAD
             if len(args) % 2 == 1:
                 final_idx = int(args[-1])
                 final_ref = self._get_var_ref(final_idx)
-                self.emit(f"local.get {final_ref}", indent)
-                local_type = self.local_vars.get(final_idx, 'i64')
-                self.type_stack.append(self._map_type_to_wasm(local_type))
+                
+                # Determine type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if final_idx < param_count:
+                        local_type_fr = func_meta['params'][final_idx][1]
+                    else:
+                        local_type_fr = self.local_vars.get(final_idx - param_count, 'i64')
+                else:
+                    local_type_fr = 'i64'
+                
+                # Handle strings specially
+                if local_type_fr == 'str':
+                    self.emit(f"local.get {final_ref}", indent)
+                    self.type_stack.append('i32')
+                    len_ref = f"{final_ref}_len"
+                    self.emit(f"local.get {len_ref}", indent)
+                    self.type_stack.append('i32')
+                else:
+                    self.emit(f"local.get {final_ref}", indent)
+                    local_type = self._map_type_to_wasm(local_type_fr)
+                    self.type_stack.append(local_type)
 
         elif opcode == 'INC_LOCAL':
             var_idx = int(args[0])
