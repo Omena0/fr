@@ -585,6 +585,28 @@ class WasmCompiler:
             elif opcode == 'POP':
                 if type_stack_sim:
                     type_stack_sim.pop()
+            
+            elif opcode == 'TO_INT':
+                # Convert top of stack to i64
+                if type_stack_sim:
+                    if type_stack_sim[-1] == 'f64':
+                        type_stack_sim[-1] = 'i64'
+                    elif len(type_stack_sim) >= 2 and type_stack_sim[-1] == 'i32' and type_stack_sim[-2] == 'i32':
+                        # String (ptr, len) to int
+                        type_stack_sim.pop()  # len
+                        type_stack_sim.pop()  # ptr
+                        type_stack_sim.append('i64')
+            
+            elif opcode == 'TO_FLOAT':
+                # Convert to float
+                if type_stack_sim:
+                    if type_stack_sim[-1] == 'i64':
+                        type_stack_sim[-1] = 'f64'
+                    elif len(type_stack_sim) >= 2 and type_stack_sim[-1] == 'i32' and type_stack_sim[-2] == 'i32':
+                        # String to float
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                        type_stack_sim.append('f64')
 
         # Update local_vars with inferred types (but don't overwrite explicit types like 'str')
         for idx, inferred_type in local_inferred_types.items():
