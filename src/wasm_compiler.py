@@ -607,6 +607,16 @@ class WasmCompiler:
                         type_stack_sim.pop()
                         type_stack_sim.pop()
                         type_stack_sim.append('f64')
+            
+            elif opcode == 'FILE_READ':
+                # FILE_READ consumes fd(i64), size(i64) and returns string (ptr, len) as two i32 values
+                if len(type_stack_sim) >= 2:
+                    type_stack_sim.pop()  # size
+                    type_stack_sim.pop()  # fd
+                type_stack_sim.append('i32')  # ptr
+                type_stack_sim.append('i32')  # len
+                value_type_tracker[len(type_stack_sim) - 2] = 'str'
+                value_type_tracker[len(type_stack_sim) - 1] = 'str'
 
         # Update local_vars with inferred types (but don't overwrite explicit types like 'str')
         for idx, inferred_type in local_inferred_types.items():
@@ -2432,12 +2442,22 @@ class WasmCompiler:
             self.imports.add('file_open')
 
         elif opcode == 'FILE_READ':
-            # Stack: fd(i32) -> ptr(i32) len(i32)
+            # Stack: fd(i64) size(i64) -> ptr(i32) len(i32)
+            # Convert fd from i64 to i32
+            if len(self.type_stack) >= 2:
+                # Pop size (not used by runtime function, just consumed from stack)
+                if self.type_stack[-1] == 'i64':
+                    self.emit("drop", indent)
+                    self.type_stack.pop()
+                # Convert fd from i64 to i32
+                if self.type_stack and self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
             self.emit("call $file_read", indent)
             if self.type_stack:
-                self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
+                self.type_stack.pop()  # fd
+            self.type_stack.append('i32')  # ptr
+            self.type_stack.append('i32')  # len
             self.imports.add('file_read')
 
         elif opcode == 'FILE_WRITE':
@@ -2449,7 +2469,11 @@ class WasmCompiler:
             self.imports.add('file_write')
 
         elif opcode == 'FILE_CLOSE':
-            # Stack: fd(i32) -> (nothing)
+            # Stack: fd(i64) -> (nothing)
+            # Convert fd from i64 to i32
+            if self.type_stack and self.type_stack[-1] == 'i64':
+                self.emit("i32.wrap_i64", indent)
+                self.type_stack[-1] = 'i32'
             self.emit("call $file_close", indent)
             if self.type_stack:
                 self.type_stack.pop()
