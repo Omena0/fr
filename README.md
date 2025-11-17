@@ -3,8 +3,8 @@
 
 [![Build](https://github.com/Omena0/fr/actions/workflows/publish.yaml/badge.svg)](https://github.com/Omena0/fr/actions/workflows/publish.yaml)
 ![Tests](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
+![LoC](https://img.shields.io/badge/Lines%20Of%20Code-56.7K-red?logo=code)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
-![AI Code](https://img.shields.io/badge/AI_code-59%25-red?logo=Github%20copilot)
 
 Simple bytecode compiled C-style scripting language.
 
@@ -23,6 +23,7 @@ pip install frscript
 - **Aggressive optimization** - Bytecode-level optimizations. Faster than python.
 - **Stack-based VM** - Fast and memory efficient.
 - **Readable bytecode** - Optimize hot code manually
+- **WASM Backend** - Run sandboxed code in web browsers.
 
 ## Benchmarks:
 

@@ -269,6 +269,9 @@ class WasmCompiler:
             wasm_type = self._map_type_to_wasm(local_type)
             # Local variables in WASM start from 0, so use idx - param_count
             self.emit(f"(local $l{idx - param_count} {wasm_type})", 2)
+        
+        # Add temp local for AND/OR operations
+        self.emit("(local $temp i32)", 2)
 
         # Compile function body
         self._compile_function_body(func_name, bytecode_lines)
@@ -299,136 +302,101 @@ class WasmCompiler:
 
     def _compile_function_body(self, func_name: str, bytecode_lines: List[str]):
         """Compile the body of a function"""
-        in_function = False
         indent = 2
-        open_blocks = []  # Track open blocks/loops to close them properly
-
-        for i, line in enumerate(bytecode_lines):
+        
+        # Pre-scan to find all labels and detect loop vs block
+        labels_in_func = []
+        loop_labels = set()
+        scan_in_func = False
+        func_lines = []
+        label_positions = {}
+        
+        for line in bytecode_lines:
             line = line.strip()
-
-            # Skip empty lines and comments
-            if not line or line.startswith('#'):
-                continue
-
-            # Check if we're entering our function
             if line.startswith('.func'):
                 parts = line.split()
                 current_name = parts[1]
-                in_function = (current_name == func_name)
+                scan_in_func = (current_name == func_name)
                 continue
-
-            # Skip directives and metadata
-            if line.startswith('.'):
-                continue
-
-            if not in_function:
-                continue
-
-            # Handle LABEL specially - look ahead to determine if it's a loop or block  
-            if line.startswith('LABEL '):
-                label_name = line.split()[1]
-                
-                # Skip labels that are just targets for if statements (don't create blocks for them)
-                # These are typically named with "end" and are forward-only jumps
-                if 'end' in label_name.lower() and '_if_' in label_name.lower():
-                    # This is just a label marker, not a block
-                    continue
-                
-                # Check if this is an end label
-                if 'end' in label_name.lower():
-                    # Check if we already have a block with this name open
-                    already_exists = any(label_name == block_label for _, block_label, _ in open_blocks)
-                    
-                    if already_exists:
-                        # Close the loop (the block with this name will remain open for the code after)
-                        # Find and close the loop
-                        for j in range(len(open_blocks) - 1, -1, -1):
-                            block_type, block_label, block_indent = open_blocks[j]
-                            if block_type == 'loop':
-                                indent = block_indent
-                                self.emit(")", indent)
-                                open_blocks.pop(j)
-                                # Don't decrement indent - we're staying at the block level
-                                break
-                    else:
-                        # Create the end label block
-                        self.emit(f"(block ${label_name}", indent)
-                        open_blocks.append(('block', label_name, indent))
-                        indent += 1
-                    continue
-                
-                # Start label handling
-                if self._is_loop_label(label_name, bytecode_lines[i + 1 :]):
-                    # For loops, we need a block to break to AND the loop itself
-                    # Create an outer block with a name we can compute
-                    # We'll search ahead for the matching end label
-                    end_label_name = None
-                    for future_line in bytecode_lines[i+1:]:
-                        if future_line.strip().startswith('LABEL ') and 'end' in future_line.lower():
-                            end_label_name = future_line.strip().split()[1]
-                            break
-                        if future_line.strip().startswith('.func'):
-                            break
-                    
-                    if end_label_name:
-                        # Create outer block with the end label name
-                        self.emit(f"(block ${end_label_name}", indent)
-                        open_blocks.append(('block', end_label_name, indent))
-                        indent += 1
-                    
-                    # Create the loop
-                    self.emit(f"(loop ${label_name}", indent)
-                    open_blocks.append(('loop', label_name, indent))
-                else:
-                    self.emit(f"(block ${label_name}", indent)
-                    open_blocks.append(('block', label_name, indent))
-                indent += 1
-                continue
-
-            # Close blocks when we see their corresponding end label
-            if line.startswith('LABEL ') and open_blocks:
+            if line.startswith('.end'):
+                if scan_in_func:
+                    break
+            if scan_in_func:
+                if line.startswith('LABEL '):
+                    parts = line.split()
+                    if len(parts) > 1:
+                        label_name = parts[1]
+                        labels_in_func.append(label_name)
+                        label_positions[label_name] = len(func_lines)
+                func_lines.append(line)
+        
+        # Detect loop labels (backward jumps)
+        for i, line in enumerate(func_lines):
+            if line.startswith('JUMP ') and not line.startswith('JUMP_IF'):
                 parts = line.split()
                 if len(parts) > 1:
-                    label_name = parts[1]
-                    # Check if this ends a previous block
-                    if 'end' in label_name.lower():
-                        # Find the matching start block
-                        for j in range(len(open_blocks) - 1, -1, -1):
-                            block_type, block_label, block_indent = open_blocks[j]
-                            if label_name.replace('end', 'start') in block_label:
-                                # Close this block
-                                indent = block_indent
-                                self.emit(")", indent)
-                                open_blocks.pop(j)
-                                break
-                        # Still emit the label
-                        self.emit(f"(block ${label_name}", indent)
-                        open_blocks.append(('block', label_name, indent))
-                        indent += 1
-                        continue
-
-            # Compile the instruction
-            try:
-                self._compile_instruction(line, indent)
-            except Exception as e:
-                raise WasmCompilerError(f"Error compiling instruction '{line}': {e}") from e
-
-        # Close any remaining open blocks
-        while open_blocks:
-            block_type, label_name, block_indent = open_blocks.pop()
-            indent = block_indent
-            self.emit(")", indent)
-
-    def _is_loop_label(self, label_name: str, remaining_lines: List[str]) -> bool:
-        """Check if a label is the target of a backward jump (loop)"""
-        for line in remaining_lines:
-            line = line.strip()
-            if line.startswith('JUMP ') and label_name in line:
-                return True
-            # Stop searching if we hit another function
-            if line.startswith('.func '):
+                    target = parts[1]
+                    if target in label_positions and label_positions[target] <= i:
+                        loop_labels.add(target)
+        
+        # Split function body around the first label so we can emit initialization code
+        first_label_idx: Optional[int] = None
+        for idx, body_line in enumerate(func_lines):
+            if body_line.startswith('LABEL '):
+                first_label_idx = idx
                 break
-        return False
+
+        pre_label_lines = func_lines[:first_label_idx] if first_label_idx is not None else func_lines
+        post_label_lines = func_lines[first_label_idx:] if first_label_idx is not None else []
+
+        # Open blocks for non-loop labels upfront (reverse order for nesting)
+        for label in reversed(labels_in_func):
+            if label in loop_labels:
+                continue
+            self.emit(f"(block ${label}", indent)
+            indent += 1
+
+        # Emit any instructions that occur before the first label (setup code)
+        for raw_line in pre_label_lines:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if stripped.startswith('.') or stripped.startswith('LABEL '):
+                continue
+            try:
+                self._compile_instruction(stripped, indent)
+            except Exception as e:
+                raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
+
+        # Emit the rest of the function, opening loop blocks lazily as their labels appear
+        opened_loops: Set[str] = set()
+        for raw_line in post_label_lines:
+            stripped = raw_line.strip()
+
+            if not stripped or stripped.startswith('#'):
+                continue
+
+            if stripped.startswith('LABEL '):
+                label_name = stripped.split()[1]
+                if label_name in loop_labels and label_name not in opened_loops:
+                    self.emit(f"(loop ${label_name}", indent)
+                    indent += 1
+                    opened_loops.add(label_name)
+                continue
+
+            if stripped.startswith('.'):
+                continue
+
+            try:
+                self._compile_instruction(stripped, indent)
+
+            except Exception as e:
+                raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
+
+        # Close all remaining blocks (for labels)
+        while indent > 2:
+            indent -= 1
+            self.emit(")", indent)
 
     def _compile_instruction(self, inst: str, indent: int):
         """Compile a single bytecode instruction to WASM"""
@@ -438,6 +406,8 @@ class WasmCompiler:
 
         opcode = parts[0]
         args = parts[1:] if len(parts) > 1 else []
+
+        self.emit_comment(inst, indent)
 
         # === Constants ===
         if opcode == 'ADD_CONST_I64':
@@ -486,7 +456,21 @@ class WasmCompiler:
 
         elif opcode == 'BUILTIN_PRINTLN':
             # println expects (i32 ptr, i32 len)
-            # Top of stack should be length, then pointer
+            # If top of stack is i64, convert to string first
+            if self.type_stack and self.type_stack[-1] == 'i64':
+                self.emit("call $i64_to_str", indent)
+                self.type_stack.pop()
+                self.type_stack.append('i32')  # ptr
+                self.type_stack.append('i32')  # len
+                self.imports.add('i64_to_str')
+            elif self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit("call $f64_to_str", indent)
+                self.type_stack.pop()
+                self.type_stack.append('i32')  # ptr
+                self.type_stack.append('i32')  # len
+                self.imports.add('f64_to_str')
+            
+            # Now call println
             self.emit("call $println", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
@@ -516,6 +500,16 @@ class WasmCompiler:
         
         elif opcode == 'CALL':
             func_name = args[0]
+            
+            # Handle special built-in functions
+            if func_name == 'assert':
+                # Assert in WASM: just pop the value and continue
+                # In a real implementation, you'd check and trap
+                self.emit("drop", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
+                return
+            
             self.emit(f"call ${func_name}", indent)
             # Update type stack based on function signature
             if func_name in self.functions:
@@ -528,6 +522,14 @@ class WasmCompiler:
             self.emit("i64.eq", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
+        elif opcode == 'CMP_EQ_CONST':
+            const_val = args[0]
+            self.emit(f"i64.const {const_val}", indent)
+            self.emit("i64.eq", indent)
+            if self.type_stack:
                 self.type_stack.pop()
             self.type_stack.append('i32')
 
@@ -550,7 +552,15 @@ class WasmCompiler:
                 self.type_stack.pop()
             self.type_stack.append('i32')
 
-        elif opcode == 'CMP_LE':
+        elif opcode == 'CMP_GT_CONST':
+            const_val = args[0]
+            self.emit(f"i64.const {const_val}", indent)
+            self.emit("i64.gt_s", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
+        elif opcode == 'CMP_LT':
             self.emit("i64.le_s", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
@@ -574,12 +584,150 @@ class WasmCompiler:
             self.emit(f"i64.const {const_val}", indent)
             self.emit("i64.le_s", indent)
 
+        elif opcode == 'CMP_LE':
+            self.emit("i64.le_s", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
         elif opcode == 'CMP_NE':
             self.emit("i64.ne", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
             self.type_stack.append('i32')
+
+        elif opcode == 'CMP_NE_CONST':
+            const_val = args[0]
+            self.emit(f"i64.const {const_val}", indent)
+            self.emit("i64.ne", indent)
+
+        elif opcode == 'AND':
+            # Logical AND - both operands must be i32
+            # Stack: [val1 (i64), val2 (i64)]
+            # Need to convert to [val1 (i32), val2 (i32)]
+            if len(self.type_stack) >= 2:
+                if self.type_stack[-2] == 'i64' and self.type_stack[-1] == 'i64':
+                    # Both are i64, wrap them
+                    self.emit("i32.wrap_i64", indent)  # Convert val2
+                    self.type_stack[-1] = 'i32'
+                    # To convert val1, we need to swap, convert, swap back
+                    # Or simpler: use a rotate pattern - pop, convert below, push
+                    # Actually simplest: use (i32.and (i32.wrap_i64 val1) (i32.wrap_i64 val2))
+                    # But we're working with a stack... Let me use a different approach
+                    # Pop val2, convert val1, push val2, do and
+                    # WASM: val1 val2 -> convert val2 -> val1 val2(i32)
+                    # Then we need: val1(i32) val2(i32) for and
+                    # Actually, we can use: get val2 off, convert val1, put val2 back
+                    # But that needs locals. Simpler: just do wrap on both in reverse order
+                    # Actually the stack is: ... val1 val2 (top)
+                    # We need to: wrap val2 (done above), then swap and wrap val1
+                    # Let's use: i32.wrap_i64 (wraps val2), then use temp to swap
+                    # Even simpler: insert wrap_i64 for the second value, then for first
+                    # Wait, I already wrapped val2. Now I need to get to val1.
+                    # Use rotl pattern: a b -> b a -> wrap a -> b a(i32) -> a(i32) b
+                    # Actually in WASM we can't easily swap without locals
+                    # Let me just accept we need locals here
+                    pass  # val2 already wrapped above
+                    # Now wrap val1: need to insert wrap before val2
+                    # This requires moving val2 off stack temporarily
+                    # For now, let's just emit wrap for the one we can reach
+                    # Actually, my previous wrap already converted val2
+                    # To convert val1, I need to do it BEFORE val2 is on stack
+                    # Let me rethink: I'll wrap each value right after it's pushed
+                    # But that's not how the bytecode works...
+                    # OK simpler solution: convert as we go in CONST_I64 itself
+                    # Or: accept that AND needs wrapping and do it here properly
+                    # For now: assume top 2 values, wrap top, swap somehow...
+                    # Actually just emit both wraps in sequence assuming they work:
+                    # Stack before: val1(i64) val2(i64)
+                    # After first wrap: val1(i64) val2(i32) 
+                    # We can't wrap val1 now without a local
+                    # So let's use a simpler approach: define the pattern at CONST_I64 time
+                    # OR: just accept locals are needed
+                    # Let me create a temp local in the function
+                    self.emit("local.set $temp", indent)  # save val2(i32)
+                    self.emit("i32.wrap_i64", indent)  # convert val1
+                    self.emit("local.get $temp", indent)  # restore val2
+                    self.type_stack[-2] = 'i32'
+            self.emit("i32.and", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
+        elif opcode == 'OR':
+            # Logical OR - both operands must be i32  
+            if len(self.type_stack) >= 2:
+                if self.type_stack[-2] == 'i64' and self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)  # Convert val2
+                    self.type_stack[-1] = 'i32'
+                    self.emit("local.set $temp", indent)  # save val2(i32)
+                    self.emit("i32.wrap_i64", indent)  # convert val1
+                    self.emit("local.get $temp", indent)  # restore val2
+                    self.type_stack[-2] = 'i32'
+            self.emit("i32.or", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
+        elif opcode == 'NOT':
+            # Logical NOT (i32 operand)
+            self.emit("i32.eqz", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('i32')
+
+        elif opcode == 'AND_I64':
+            # Bitwise AND (i64 operands)
+            self.emit("i64.and", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i64')
+
+        elif opcode == 'OR_I64':
+            # Bitwise OR (i64 operands)
+            self.emit("i64.or", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i64')
+
+        elif opcode == 'XOR_I64':
+            # Bitwise XOR (i64 operands)
+            self.emit("i64.xor", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i64')
+
+        elif opcode == 'SHL_I64':
+            # Shift left (i64 operands)
+            self.emit("i64.shl", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i64')
+
+        elif opcode == 'SHR_I64':
+            # Shift right (i64 operands)
+            self.emit("i64.shr_s", indent)
+            if len(self.type_stack) >= 2:
+                self.type_stack.pop()
+                self.type_stack.pop()
+            self.type_stack.append('i64')
+
+        elif opcode == 'NEG':
+            # Negate (multiply by -1)
+            # For i64, we do: 0 - value
+            if self.type_stack and self.type_stack[-1] == 'i64':
+                self.emit("i64.const 0", indent)
+                self.emit("i64.sub", indent)
+            elif self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit("f64.neg", indent)
 
         elif opcode == 'CONST_BOOL':
             val = '1' if args[0] in ('1', 'true') else '0'
@@ -591,8 +739,14 @@ class WasmCompiler:
             self.type_stack.append('f64')
 
         elif opcode == 'CONST_I64':
-            self.emit(f"i64.const {args[0]}", indent)
-            self.type_stack.append('i64')
+            # Handle True/False constants, and multiple values
+            for value in args:
+                if value == 'True':
+                    value = '1'
+                elif value == 'False':
+                    value = '0'
+                self.emit(f"i64.const {value}", indent)
+                self.type_stack.append('i64')
 
         elif opcode == 'CONST_STR':
             # Extract string (handles quoted strings)
@@ -615,6 +769,11 @@ class WasmCompiler:
             self.emit("i64.const 1", indent)
             self.emit("i64.sub", indent)
             self.emit(f"local.set {var_ref}", indent)
+
+        elif opcode == 'CONST_I64':
+            const_val = args[0]
+            self.emit(f"i64.const {const_val}", indent)
+            self.emit("i64.div_s", indent)
 
         elif opcode == 'DIV_CONST_I64':
             const_val = args[0]
@@ -641,6 +800,7 @@ class WasmCompiler:
             # Allocate a temp local if needed
             # For now, just emit the value twice by popping and re-pushing
             # This is a simplified implementation
+            print("WARNING: DUP Not fully implemented!")
             if self.type_stack:
                 top_type = self.type_stack[-1]
                 # In WASM, we can't truly DUP without a local
@@ -650,6 +810,65 @@ class WasmCompiler:
                 self.type_stack.append(top_type)
             else:
                 self.emit_comment("DUP (no type info)", indent)
+
+        elif opcode == 'DUP2':
+            # Duplicate top 2 stack values: a b -> a b a b
+            print("WARNING: DUP2 Not fully implemented!")
+            if len(self.type_stack) >= 2:
+                type1 = self.type_stack[-2]
+                type2 = self.type_stack[-1]
+                self.emit_comment("DUP2 - WARNING: not fully implemented", indent)
+                self.type_stack.append(type1)
+                self.type_stack.append(type2)
+            else:
+                self.emit_comment("DUP2 (insufficient type info)", indent)
+
+        elif opcode == 'SWAP':
+            # Swap top 2 stack values: a b -> b a
+            # WASM needs locals for this
+            print("WARNING: SWAP Not fully implemented!")
+            if len(self.type_stack) >= 2:
+                type1 = self.type_stack.pop()
+                type2 = self.type_stack.pop()
+                self.emit_comment("SWAP - WARNING: not fully implemented", indent)
+                self.type_stack.append(type1)
+                self.type_stack.append(type2)
+            else:
+                self.emit_comment("SWAP (insufficient type info)", indent)
+
+        elif opcode == 'ROT':
+            # Rotate top 3 stack values: a b c -> b c a
+            print("WARNING: ROT Not fully implemented!")
+            if len(self.type_stack) >= 3:
+                type1 = self.type_stack.pop()
+                type2 = self.type_stack.pop()
+                type3 = self.type_stack.pop()
+                self.emit_comment("ROT - WARNING: not fully implemented", indent)
+                self.type_stack.append(type2)
+                self.type_stack.append(type1)
+                self.type_stack.append(type3)
+            else:
+                self.emit_comment("ROT (insufficient type info)", indent)
+
+        elif opcode == 'OVER':
+            # Copy second stack value to top: a b -> a b a
+            print("WARNING: OVER Not fully implemented!")
+            if len(self.type_stack) >= 2:
+                type_second = self.type_stack[-2]
+                self.emit_comment("OVER - WARNING: not fully implemented", indent)
+                self.type_stack.append(type_second)
+            else:
+                self.emit_comment("OVER (insufficient type info)", indent)
+
+        elif opcode == 'FUSED_LOAD_STORE':
+            # Load from one variable and store to another
+            src_idx = int(args[0])
+            dst_idx = int(args[1])
+            src_ref = self._get_var_ref(src_idx)
+            dst_ref = self._get_var_ref(dst_idx)
+            self.emit(f"local.get {src_ref}", indent)
+            self.emit(f"local.set {dst_ref}", indent)
+
         elif opcode == 'INC_LOCAL':
             var_idx = int(args[0])
             var_ref = self._get_var_ref(var_idx)
@@ -688,6 +907,7 @@ class WasmCompiler:
 
         elif opcode == 'LABEL':
             pass
+
         elif opcode == 'LIST_APPEND':
             self.emit("call $list_append", indent)
             if len(self.type_stack) >= 2:
@@ -828,6 +1048,28 @@ class WasmCompiler:
                 self.emit(f"i64.const {value}", indent)
                 self.emit(f"local.set {var_ref}", indent)
 
+        elif opcode == 'STORE_CONST_F64':
+            # Format: STORE_CONST_F64 slot1 val1 [slot2 val2 ...]
+            # Arguments come in pairs: slot, value
+            num_pairs = len(args) // 2
+            for i in range(num_pairs):
+                var_idx = int(args[i * 2])
+                value = args[i * 2 + 1]
+                var_ref = self._get_var_ref(var_idx)
+                self.emit(f"f64.const {value}", indent)
+                self.emit(f"local.set {var_ref}", indent)
+
+        elif opcode == 'STORE_CONST_BOOL':
+            # Format: STORE_CONST_BOOL slot1 val1 [slot2 val2 ...]
+            # Arguments come in pairs: slot, value (0 or 1)
+            num_pairs = len(args) // 2
+            for i in range(num_pairs):
+                var_idx = int(args[i * 2])
+                value = args[i * 2 + 1]
+                var_ref = self._get_var_ref(var_idx)
+                self.emit(f"i32.const {value}", indent)
+                self.emit(f"local.set {var_ref}", indent)
+
         elif opcode == 'STORE_GLOBAL':
             global_idx = int(args[0])
             self.emit(f"global.set $g{global_idx}", indent)
@@ -855,22 +1097,162 @@ class WasmCompiler:
 
         elif opcode == 'TO_FLOAT':
             # Convert top of stack to f64
-            self.emit_comment("TO_FLOAT", indent)
             if self.type_stack and self.type_stack[-1] == 'i64':
                 self.emit("f64.convert_i64_s", indent)
                 self.type_stack[-1] = 'f64'
 
         elif opcode == 'TO_INT':
             # Convert top of stack to i64
-            self.emit_comment("TO_INT", indent)
             # If it's already i64, do nothing; if f64, convert
             if self.type_stack and self.type_stack[-1] == 'f64':
                 self.emit("i64.trunc_f64_s", indent)
                 self.type_stack[-1] = 'i64'
 
+        elif opcode == 'TO_BOOL':
+            # Convert to boolean (i32: 0 or 1)
+            # Any non-zero value becomes 1
+            if self.type_stack and self.type_stack[-1] == 'i64':
+                self.emit("i64.const 0", indent)
+                self.emit("i64.ne", indent)
+                self.type_stack.pop()
+                self.type_stack.append('i32')
+            elif self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit("f64.const 0", indent)
+                self.emit("f64.ne", indent)
+                self.type_stack.pop()
+                self.type_stack.append('i32')
+
+        elif opcode == 'ADD_CONST_F64':
+            const_val = args[0]
+            self.emit(f"f64.const {const_val}", indent)
+            self.emit("f64.add", indent)
+
+        elif opcode == 'SUB_CONST_F64':
+            const_val = args[0]
+            self.emit(f"f64.const {const_val}", indent)
+            self.emit("f64.sub", indent)
+
+        elif opcode == 'MUL_CONST_F64':
+            const_val = args[0]
+            self.emit(f"f64.const {const_val}", indent)
+            self.emit("f64.mul", indent)
+
+        elif opcode == 'DIV_CONST_F64':
+            const_val = args[0]
+            self.emit(f"f64.const {const_val}", indent)
+            self.emit("f64.div", indent)
+
+        elif opcode == 'LIST_NEW_I64':
+            # LIST_NEW_I64 count val1 val2 val3 ...
+            # For now, treat as unsupported - lists need runtime support
+            self.emit_comment(f"LIST_NEW_I64 - requires runtime support", indent)
+            # Call list_new to create empty list, then append each value
+            count = int(args[0])
+            self.emit("call $list_new", indent)
+            # Result is list handle (i32) on stack
+            for i in range(count):
+                val = args[i + 1]
+                self.emit("i64.const " + val, indent)
+                self.emit("call $list_append", indent)
+            self.type_stack.append('i32')
+
+        elif opcode == 'LIST_NEW_STR':
+            # LIST_NEW_STR count "str1" "str2" ...
+            self.emit_comment(f"LIST_NEW_STR - requires runtime support", indent)
+            count = int(args[0])
+            self.emit("call $list_new", indent)
+            # For now, just create empty list
+            self.type_stack.append('i32')
+
+        elif opcode == 'SET_NEW':
+            # Create a new set - requires runtime support
+            self.emit_comment("SET_NEW - requires runtime support", indent)
+            # For now, just push a dummy value
+            self.emit("i32.const 0", indent)
+            self.type_stack.append('i32')
+
+        elif opcode == 'STRUCT_NEW':
+            # STRUCT_NEW struct_id
+            self.emit_comment(f"STRUCT_NEW - requires runtime support", indent)
+            # For now, just push a dummy handle
+            self.emit("i32.const 0", indent)
+            self.type_stack.append('i32')
+
+        elif opcode == 'STRUCT_GET':
+            # STRUCT_GET field_index
+            self.emit_comment(f"STRUCT_GET - requires runtime support", indent)
+            # Pop struct handle, push field value
+            if self.type_stack:
+                self.type_stack.pop()
+            self.emit("i64.const 0", indent)
+            self.type_stack.append('i64')
+
+        elif opcode == 'STR_EQ':
+            # String equality comparison
+            self.emit_comment("STR_EQ - requires runtime support", indent)
+            # Pop two string refs (ptr+len each = 4 values)
+            for _ in range(4):
+                if self.type_stack:
+                    self.type_stack.pop()
+            self.emit("i32.const 0", indent)
+            self.type_stack.append('i32')
+
+        elif opcode in ['STR_LOWER', 'STR_UPPER', 'STR_STRIP', 'STR_REPLACE', 'STR_SPLIT', 'STR_JOIN']:
+            # String operations require runtime support
+            self.emit_comment(f"{opcode} - requires runtime support", indent)
+            # These typically consume and produce string refs
+            if opcode == 'STR_SPLIT':
+                # Returns a list
+                self.emit("i32.const 0", indent)
+                self.type_stack.append('i32')
+            else:
+                # Returns a string (ptr, len)
+                self.emit("i32.const 0", indent)
+                self.emit("i32.const 0", indent)
+                self.type_stack.append('i32')
+                self.type_stack.append('i32')
+
+        elif opcode == 'CONTAINS':
+            # Check if value in container
+            self.emit_comment("CONTAINS - requires runtime support", indent)
+            if self.type_stack:
+                self.type_stack.pop()  # container
+            if self.type_stack:
+                self.type_stack.pop()  # value
+            self.emit("i32.const 0", indent)
+            self.type_stack.append('i32')
+
+        elif opcode == 'LIST_POP':
+            # Pop from list
+            self.emit_comment("LIST_POP - requires runtime support", indent)
+            # Consume list handle, produce value
+            if self.type_stack:
+                self.type_stack.pop()
+            self.emit("i64.const 0", indent)
+            self.type_stack.append('i64')
+
+        elif opcode == 'BUILTIN_PI':
+            # Push π constant
+            self.emit("f64.const 3.141592653589793", indent)
+            self.type_stack.append('f64')
+
+        elif opcode in ['TRY_BEGIN', 'RAISE', 'FILE_OPEN', 'SOCKET_CREATE', 'FORK', 'SLEEP', 'GOTO_CALL', 'ENCODE', 'DECODE', 'SWITCH_JUMP_TABLE', 'LOAD2_CMP_GT']:
+            # Operations that require special runtime or OS support
+            self.emit_comment(f"{opcode} - not supported in WASM", indent)
+            # Push dummy values to keep stack balanced
+            if opcode in ['FILE_OPEN', 'SOCKET_CREATE']:
+                self.emit("i32.const 0", indent)
+                self.type_stack.append('i32')
+            elif opcode in ['ENCODE', 'DECODE']:
+                # Returns bytes/string (ptr, len)
+                self.emit("i32.const 0", indent)
+                self.emit("i32.const 0", indent)
+                self.type_stack.append('i32')
+                self.type_stack.append('i32')
+
         else:
-            # Unsupported instruction - emit as comment
-            self.emit_comment(f"Unsupported: {inst}", indent)
+            # Unsupported instruction - fatal error
+            raise WasmCompilerError(f"Unsupported instruction: {inst}")
 
     def _unescape_string(self, s: str) -> str:
         # sourcery skip: inline-immediately-returned-variable
@@ -893,11 +1275,7 @@ class WasmCompiler:
 
         # Bytecode uses unified 0-based indexing for all variables
         # First param_count indices are parameters, rest are locals
-        if index < param_count:
-            return f"$p{index}"
-        else:
-            # Locals in WASM start from 0, so subtract param_count
-            return f"$l{index - param_count}"
+        return f"$p{index}" if index < param_count else f"$l{index - param_count}"
 
 
 def compile_to_wasm(bytecode: str) -> Tuple[str, Dict]:

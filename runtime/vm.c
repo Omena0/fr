@@ -1563,7 +1563,8 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
         // Get line number from line map based on PC
         // Note: PC has already been incremented by DISPATCH(), so we need PC-2 to get the current instruction
         int line = 1; // Default to line 1
-        int pc_index = vm->pc - 2;
+        int pc_index = vm->pc - 1;
+        if (pc_index < 0) pc_index = 0;
         if (vm->debug_line_map && pc_index >= 0 && pc_index < vm->debug_line_map_count) {
             line = vm->debug_line_map[pc_index];
         }
