@@ -816,6 +816,35 @@ class WasmCompiler:
                 # Check if this is a loop start label
                 if label_name in loop_structures:
                     end_label, continue_label = loop_structures[label_name]
+                    
+                    # Find labels that need blocks inside this loop
+                    loop_start_pos = label_positions[label_name]
+                    loop_end_pos = label_positions.get(end_label, len(func_lines))
+                    
+                    labels_in_this_loop = []
+                    for lbl in labels_needing_blocks_inside_loops:
+                        lbl_pos = label_positions[lbl]
+                        if loop_start_pos < lbl_pos < loop_end_pos:
+                            # Check if this label is inside a nested loop
+                            in_nested_loop = False
+                            for nested_loop_start in loop_structures:
+                                if nested_loop_start == label_name:
+                                    continue
+                                nested_start_pos = label_positions.get(nested_loop_start, -1)
+                                nested_end_label = loop_structures[nested_loop_start][0]
+                                nested_end_pos = label_positions.get(nested_end_label, len(func_lines))
+                                # Check if the nested loop is inside this loop and the label is inside the nested loop
+                                if loop_start_pos < nested_start_pos < nested_end_pos < loop_end_pos:
+                                    # nested loop is inside this loop
+                                    if nested_start_pos < lbl_pos < nested_end_pos:
+                                        # label is inside the nested loop, not directly in this loop
+                                        in_nested_loop = True
+                                        break
+                            if not in_nested_loop:
+                                labels_in_this_loop.append((lbl, lbl_pos))
+                    
+                    # Sort by position (innermost first for proper nesting)
+                    labels_in_this_loop.sort(key=lambda x: x[1], reverse=True)
 
                     # Open outer block for loop exit
                     self.emit(f"(block ${end_label}", indent)
@@ -825,8 +854,16 @@ class WasmCompiler:
                     self.emit(f"(loop ${label_name}", indent)
                     indent += 1
                     active_blocks.append((label_name, True, indent))
+                    
+                    # Open blocks for forward jump targets inside this loop
+                    # These will be closed when we encounter their labels
+                    for lbl, _ in labels_in_this_loop:
+                        self.emit(f"(block ${lbl}", indent)
+                        indent += 1
+                        active_blocks.append((lbl, False, indent))
+                    
                     # Push this loop onto the stack
-                    loop_stack.append((label_name, end_label, continue_label, []))
+                    loop_stack.append((label_name, end_label, continue_label, [lbl for lbl, _ in labels_in_this_loop]))
                     continue
 
                 # Check if this is a continue label - just a marker
