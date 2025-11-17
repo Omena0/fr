@@ -1953,10 +1953,14 @@ class WasmCompiler:
                     func_meta = self.functions.get(self.current_function, {})
                     param_count = len(func_meta.get('params', []))
                     if var_idx >= param_count:
-                        self.local_vars[var_idx - param_count] = stored_type
-                        # Track value type (list/set) if available
-                        if hasattr(self, '_last_i32_source') and stored_type == 'i32':
-                            self.local_value_types[var_idx] = self._last_i32_source
+                        rel_idx = var_idx - param_count
+                        # Don't override if local is already declared as a struct type
+                        existing_type = self.local_vars.get(rel_idx, None)
+                        if not (existing_type and existing_type.startswith('struct:')):
+                            self.local_vars[rel_idx] = stored_type
+                            # Track value type (list/set) if available
+                            if hasattr(self, '_last_i32_source') and stored_type == 'i32':
+                                self.local_value_types[var_idx] = self._last_i32_source
                 self.emit(f"local.set {var_ref}", indent)
                 if self.type_stack:
                     self.type_stack.pop()
