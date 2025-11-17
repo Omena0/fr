@@ -18,6 +18,7 @@ dist/
 
 # Runtime
 runtime/vm
+runtime/target
 
 # Output files
 *.bc
