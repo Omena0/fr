@@ -640,12 +640,15 @@ class WasmCompiler:
                         else:
                             type_stack_sim.append(final_type)
 
-        # Update local_vars with inferred types (but don't overwrite explicit types like 'str')
+        # Update local_vars with inferred types (but don't overwrite explicit types from bytecode)
         for idx, inferred_type in local_inferred_types.items():
             if idx >= param_count:
                 rel_idx = idx - param_count
-                # Only update if we don't already have an explicit type
-                if rel_idx not in self.local_vars or self.local_vars[rel_idx] == 'i64':
+                # Only update if we don't already have an explicit type from bytecode
+                # The bytecode parsing phase (lines 280-286) already stored explicit types
+                # We should trust those over inference
+                if rel_idx not in self.local_vars:
+                    # No explicit type from bytecode, use inferred type
                     self.local_vars[rel_idx] = inferred_type
 
         # Declare locals (indices from param_count to max_local_idx)
