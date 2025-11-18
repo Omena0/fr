@@ -1966,6 +1966,7 @@ class WasmCompiler:
                         self.local_vars[var_idx - param_count] = 'str'
             else:
                 # Regular value: single local.set
+                # Check if we need type conversion
                 if self.type_stack and self.current_function:
                     stored_type = self.type_stack[-1]
                     func_meta = self.functions.get(self.current_function, {})
@@ -1974,8 +1975,21 @@ class WasmCompiler:
                         rel_idx = var_idx - param_count
                         # Don't override if local is already declared as a struct type
                         existing_type = self.local_vars.get(rel_idx, None)
+                        
+                        # Check if we need type conversion
+                        if existing_type and existing_type != stored_type:
+                            if existing_type == 'i64' and stored_type == 'i32':
+                                # Converting i32 to i64 (e.g., set/list pointer to i64)
+                                self.emit("i64.extend_i32_u", indent)
+                                self.type_stack[-1] = 'i64'
+                            elif existing_type == 'i32' and stored_type == 'i64':
+                                # Converting i64 to i32
+                                self.emit("i32.wrap_i64", indent)
+                                self.type_stack[-1] = 'i32'
+                        
                         if not (existing_type and existing_type.startswith('struct:')):
-                            self.local_vars[rel_idx] = stored_type
+                            # Don't update type if bytecode already specified it
+                            pass
                             # Track value type (list/set) if available
                             if hasattr(self, '_last_i32_source') and stored_type == 'i32':
                                 self.local_value_types[var_idx] = self._last_i32_source
@@ -2453,6 +2467,15 @@ class WasmCompiler:
             self.type_stack.append('i32')
             self._last_i32_source = 'set'  # Track that this i32 is a set
             self.imports.add('set_new')
+            
+        elif opcode == 'LIST_NEW_LITERAL':
+            # Create list from literals
+            size = int(args[0]) if args else 0
+            self.emit(f"i32.const {size}", indent)
+            self.emit("call $list_new", indent)
+            self.type_stack.append('i32')
+            self._last_i32_source = 'list'  # Track that this i32 is a list
+            self.imports.add('list_new')
 
         elif opcode == 'SET_ADD':
             # Stack: set(i32) value(any) -> set(i32)
@@ -2592,6 +2615,10 @@ class WasmCompiler:
             # Push dummy values to keep stack balanced
             if opcode in ['SOCKET_CREATE', 'SOCKET_ACCEPT', 'FORK']:
                 # Return i64 for process/socket IDs
+                self.emit("i64.const 0", indent)
+                self.type_stack.append('i64')
+            elif opcode == 'GOTO_CALL':
+                # GOTO_CALL returns i64 (the return value from the goto label)
                 self.emit("i64.const 0", indent)
                 self.type_stack.append('i64')
             elif opcode in ['SOCKET_RECV', 'ENCODE', 'DECODE']:
