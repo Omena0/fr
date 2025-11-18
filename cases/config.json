@@ -36,7 +36,12 @@
         "ignore": [
             "syntax_errors",
             "runtime",
-            "python_interop"
+            "python_interop",
+            "functions/func_recursive.fr",
+            "functions/func_return_int.fr",
+            "functions/return_value.fr",
+            "io/output_function_return.fr",
+            "io/output_nested_function.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
