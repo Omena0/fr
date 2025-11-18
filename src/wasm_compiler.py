@@ -1122,9 +1122,14 @@ class WasmCompiler:
             self.imports.add('sqrt')
 
         elif opcode == 'BUILTIN_ROUND':
+            # Round and convert to i64
             self.emit("call $round_f64", indent)
+            # Convert f64 result to i64
+            self.emit("i64.trunc_f64_s", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('i64')
             self.imports.add('round_f64')
-            # Type stays as f64
 
         elif opcode == 'BUILTIN_FLOOR':
             self.emit("call $floor_f64", indent)
@@ -1507,8 +1512,13 @@ class WasmCompiler:
 
         elif opcode == 'DIV_CONST_I64':
             const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.div_s", indent)
+            # Check if we're dividing with f64
+            if self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.div", indent)
+            else:
+                self.emit(f"i64.const {const_val}", indent)
+                self.emit("i64.div_s", indent)
 
         elif opcode == 'DIV_F64':
             # Convert operands to f64 if needed
@@ -1901,8 +1911,13 @@ class WasmCompiler:
 
         elif opcode == 'MUL_CONST_I64':
             const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.mul", indent)
+            # Check if we're multiplying with f64
+            if self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.mul", indent)
+            else:
+                self.emit(f"i64.const {const_val}", indent)
+                self.emit("i64.mul", indent)
 
         elif opcode == 'MUL_F64':
             self.emit("f64.mul", indent)
@@ -2573,8 +2588,9 @@ class WasmCompiler:
             self.emit_comment(f"{opcode} - not supported in WASM", indent)
             # Push dummy values to keep stack balanced
             if opcode in ['SOCKET_CREATE', 'SOCKET_ACCEPT', 'FORK']:
-                self.emit("i32.const 0", indent)
-                self.type_stack.append('i32')
+                # Return i64 for process/socket IDs
+                self.emit("i64.const 0", indent)
+                self.type_stack.append('i64')
             elif opcode in ['SOCKET_RECV', 'ENCODE', 'DECODE']:
                 # Returns bytes/string (ptr, len)
                 self.emit("i32.const 0", indent)
