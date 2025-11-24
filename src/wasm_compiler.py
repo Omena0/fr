@@ -3076,15 +3076,25 @@ class WasmCompiler:
 
         # For n>1 we need to save higher stack values, wrap, then restore
         saved = []
-        for _ in range(n-1):
+        # Use multiple temps for multiple saved values (temp, temp2, temp_i64)
+        for i in range(n-1):
             t = self.type_stack.pop()
             saved.append(t)
             if t == 'i64':
-                self.emit("local.set $temp_i64", indent)
+                # prefer $temp_i64 for i64; if multiple i64 savings, use $temp_i64 for first then fallback to $temp
+                if i == 0:
+                    self.emit("local.set $temp_i64", indent)
+                else:
+                    self.emit("local.set $temp", indent)
             elif t == 'f64':
+                # Only a single f64 temp available
                 self.emit("local.set $temp_f64", indent)
             else:
-                self.emit("local.set $temp", indent)
+                # Use $temp for first i32 save, $temp2 for second
+                if i == 0:
+                    self.emit("local.set $temp", indent)
+                else:
+                    self.emit("local.set $temp2", indent)
 
         # Now top is the target value
         self.emit("i32.wrap_i64", indent)
@@ -3092,13 +3102,19 @@ class WasmCompiler:
         self.type_stack.append('i32')
 
         # Restore saved values in reverse order
-        for t in reversed(saved):
+        for i, t in enumerate(reversed(saved)):
+            # When restoring, pick corresponding temp in reverse order
             if t == 'i64':
+                # if only one i64 saved, was stored in $temp_i64
                 self.emit("local.get $temp_i64", indent)
             elif t == 'f64':
                 self.emit("local.get $temp_f64", indent)
             else:
-                self.emit("local.get $temp", indent)
+                # For i32 values, second saved used $temp2
+                if i == 0:
+                    self.emit("local.get $temp2", indent)
+                else:
+                    self.emit("local.get $temp", indent)
             self.type_stack.append(t)
 
     def _ensure_nth_from_top_is_i64(self, n: int, indent: int):
@@ -3122,29 +3138,39 @@ class WasmCompiler:
 
         # Save higher stack values
         saved = []
-        for _ in range(n-1):
+        # Use multiple temps to avoid overwriting ($temp, $temp2, $temp_i64)
+        for i in range(n-1):
             t = self.type_stack.pop()
             saved.append(t)
             if t == 'i64':
-                self.emit("local.set $temp_i64", indent)
+                if i == 0:
+                    self.emit("local.set $temp_i64", indent)
+                else:
+                    self.emit("local.set $temp", indent)
             elif t == 'f64':
                 self.emit("local.set $temp_f64", indent)
             else:
-                self.emit("local.set $temp", indent)
+                if i == 0:
+                    self.emit("local.set $temp", indent)
+                else:
+                    self.emit("local.set $temp2", indent)
 
         # Now perform extend on the target
         self.emit("i64.extend_i32_u", indent)
         # Update tracked type for that position to i64
         self.type_stack.append('i64')
 
-        # Restore saved values
-        for t in reversed(saved):
+        # Restore saved values in reverse order
+        for i, t in enumerate(reversed(saved)):
             if t == 'i64':
                 self.emit("local.get $temp_i64", indent)
             elif t == 'f64':
                 self.emit("local.get $temp_f64", indent)
             else:
-                self.emit("local.get $temp", indent)
+                if i == 0:
+                    self.emit("local.get $temp2", indent)
+                else:
+                    self.emit("local.get $temp", indent)
             self.type_stack.append(t)
 
     def _emit_call(self, name: str, indent: int):
