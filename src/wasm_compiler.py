@@ -1645,7 +1645,7 @@ class WasmCompiler:
                 if top_type == 'i64':
                     self.emit("local.tee $temp_i64", indent)
                     self.emit("local.get $temp_i64", indent)
-                    self.type_stack.append('i32')
+                    self.type_stack.append('i64')
                 elif top_type == 'i32':
                     self.emit("local.tee $temp", indent)
                     self.emit("local.get $temp", indent)
