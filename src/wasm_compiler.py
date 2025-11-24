@@ -585,13 +585,70 @@ class WasmCompiler:
             elif opcode == 'POP':
                 if type_stack_sim:
                     type_stack_sim.pop()
+            
+            elif opcode == 'TO_INT':
+                # Convert top of stack to i64
+                if type_stack_sim:
+                    if type_stack_sim[-1] == 'f64':
+                        type_stack_sim[-1] = 'i64'
+                    elif len(type_stack_sim) >= 2 and type_stack_sim[-1] == 'i32' and type_stack_sim[-2] == 'i32':
+                        # String (ptr, len) to int
+                        type_stack_sim.pop()  # len
+                        type_stack_sim.pop()  # ptr
+                        type_stack_sim.append('i64')
+            
+            elif opcode == 'TO_FLOAT':
+                # Convert to float
+                if type_stack_sim:
+                    if type_stack_sim[-1] == 'i64':
+                        type_stack_sim[-1] = 'f64'
+                    elif len(type_stack_sim) >= 2 and type_stack_sim[-1] == 'i32' and type_stack_sim[-2] == 'i32':
+                        # String to float
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                        type_stack_sim.append('f64')
+            
+            elif opcode == 'FILE_READ':
+                # FILE_READ consumes fd(i64), size(i64) and returns string (ptr, len) as two i32 values
+                if len(type_stack_sim) >= 2:
+                    type_stack_sim.pop()  # size
+                    type_stack_sim.pop()  # fd
+                type_stack_sim.append('i32')  # ptr
+                type_stack_sim.append('i32')  # len
+                value_type_tracker[len(type_stack_sim) - 2] = 'str'
+                value_type_tracker[len(type_stack_sim) - 1] = 'str'
+            
+            elif opcode == 'FUSED_LOAD_STORE':
+                # Handle type inference for FUSED_LOAD_STORE
+                # Pattern: src1 dst1 src2 dst2 ... [optional final_src]
+                for i in range(0, len(parts) - 1, 2):
+                    if i + 2 < len(parts) and parts[i + 1].isdigit() and parts[i + 2].isdigit():
+                        src_idx = int(parts[i + 1])
+                        dst_idx = int(parts[i + 2])
+                        # Copy type from source to destination
+                        if src_idx in local_inferred_types:
+                            local_inferred_types[dst_idx] = local_inferred_types[src_idx]
+                
+                # If odd number of args, final value is left on stack
+                if len(parts) % 2 == 0 and len(parts) > 1:  # has final LOAD
+                    final_idx = int(parts[-1])
+                    if final_idx in local_inferred_types:
+                        final_type = local_inferred_types[final_idx]
+                        if final_type == 'str':
+                            type_stack_sim.append('i32')
+                            type_stack_sim.append('i32')
+                        else:
+                            type_stack_sim.append(final_type)
 
-        # Update local_vars with inferred types (but don't overwrite explicit types like 'str')
+        # Update local_vars with inferred types (but don't overwrite explicit types from bytecode)
         for idx, inferred_type in local_inferred_types.items():
             if idx >= param_count:
                 rel_idx = idx - param_count
-                # Only update if we don't already have an explicit type
-                if rel_idx not in self.local_vars or self.local_vars[rel_idx] == 'i64':
+                # Only update if we don't already have an explicit type from bytecode
+                # The bytecode parsing phase (lines 280-286) already stored explicit types
+                # We should trust those over inference
+                if rel_idx not in self.local_vars:
+                    # No explicit type from bytecode, use inferred type
                     self.local_vars[rel_idx] = inferred_type
 
         # Declare locals (indices from param_count to max_local_idx)
@@ -680,6 +737,7 @@ class WasmCompiler:
         # Detect all jumps and classify them as forward or backward
         forward_jumps = {}  # Maps jump position -> target label (for forward jumps)
         backward_jumps = {}  # Maps jump position -> target label (for backward jumps)
+        switch_case_labels = set()  # Track all switch case labels that need blocks
 
         for i, line in enumerate(func_lines):
             target = None
@@ -695,6 +753,19 @@ class WasmCompiler:
                             forward_jumps[i] = target
                         elif target_pos <= i:
                             backward_jumps[i] = target
+            
+            # Also detect switch case labels from SWITCH_JUMP_TABLE
+            elif line.startswith('SWITCH_JUMP_TABLE '):
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Format: SWITCH_JUMP_TABLE min_val max_val label1 label2 ... labelN
+                    case_labels = parts[3:]  # All labels after min and max
+                    for target in case_labels:
+                        if target in label_positions:
+                            target_pos = label_positions[target]
+                            if target_pos > i:
+                                # Mark this as a switch case label
+                                switch_case_labels.add(target)
 
         # Identify loop structures by analyzing backward jumps and loop naming
         loop_structures = {}  # Maps loop_start -> (loop_end, loop_continue)
@@ -750,6 +821,15 @@ class WasmCompiler:
                     labels_needing_blocks_inside_loops.add(target)
                 else:
                     labels_needing_blocks_outside_loops.add(target)
+        
+        # Add switch case labels to blocks that need to be opened
+        for target in switch_case_labels:
+            if target not in loop_structures and target not in loop_end_labels:
+                target_pos = label_positions[target]
+                if is_inside_loop(target_pos):
+                    labels_needing_blocks_inside_loops.add(target)
+                else:
+                    labels_needing_blocks_outside_loops.add(target)
 
         # ===== PASS 2: Generate WASM code with proper block structure =====
 
@@ -786,8 +866,7 @@ class WasmCompiler:
             except Exception as e:
                 raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
 
-        current_loop = None
-        loop_internal_blocks = []  # Track blocks opened inside current loop
+        loop_stack = []  # Stack of (loop_start, loop_end, continue_label, internal_blocks)
 
         for i, raw_line in enumerate(post_label_lines):
             stripped = raw_line.strip()
@@ -802,10 +881,10 @@ class WasmCompiler:
             if stripped.startswith('LABEL '):
                 label_name = stripped.split()[1]
 
-                # Close any blocks that end at this label
+                # Close any blocks that end at this label (but not loops - they close at backward jumps)
                 blocks_to_close = []
                 for j, (lbl, is_loop, _) in enumerate(active_blocks):
-                    if lbl == label_name:
+                    if lbl == label_name and not is_loop:
                         blocks_to_close.append(j)
 
                 # Close in reverse order (from innermost to outermost)
@@ -813,32 +892,39 @@ class WasmCompiler:
                     lbl, is_loop, _ = active_blocks.pop(j)
                     indent -= 1
                     self.emit(")", indent)
-                    if is_loop:
-                        current_loop = None
-                        loop_internal_blocks = []
 
                 # Check if this is a loop start label
                 if label_name in loop_structures:
                     end_label, continue_label = loop_structures[label_name]
-
-                    # Open blocks for labels inside this loop first
+                    
+                    # Find labels that need blocks inside this loop
                     loop_start_pos = label_positions[label_name]
                     loop_end_pos = label_positions.get(end_label, len(func_lines))
-
-                    # Find labels inside this loop that need blocks
+                    
                     labels_in_this_loop = []
                     for lbl in labels_needing_blocks_inside_loops:
                         lbl_pos = label_positions[lbl]
                         if loop_start_pos < lbl_pos < loop_end_pos:
-                            labels_in_this_loop.append(lbl)
-
-                    # Open blocks for these labels (in reverse position order for proper nesting)
-                    labels_in_this_loop.sort(key=lambda x: label_positions[x], reverse=True)
-                    for lbl in labels_in_this_loop:
-                        self.emit(f"(block ${lbl}", indent)
-                        indent += 1
-                        active_blocks.append((lbl, False, indent))
-                        loop_internal_blocks.append(lbl)
+                            # Check if this label is inside a nested loop
+                            in_nested_loop = False
+                            for nested_loop_start in loop_structures:
+                                if nested_loop_start == label_name:
+                                    continue
+                                nested_start_pos = label_positions.get(nested_loop_start, -1)
+                                nested_end_label = loop_structures[nested_loop_start][0]
+                                nested_end_pos = label_positions.get(nested_end_label, len(func_lines))
+                                # Check if the nested loop is inside this loop and the label is inside the nested loop
+                                if loop_start_pos < nested_start_pos < nested_end_pos < loop_end_pos:
+                                    # nested loop is inside this loop
+                                    if nested_start_pos < lbl_pos < nested_end_pos:
+                                        # label is inside the nested loop, not directly in this loop
+                                        in_nested_loop = True
+                                        break
+                            if not in_nested_loop:
+                                labels_in_this_loop.append((lbl, lbl_pos))
+                    
+                    # Sort by position (innermost first for proper nesting)
+                    labels_in_this_loop.sort(key=lambda x: x[1], reverse=True)
 
                     # Open outer block for loop exit
                     self.emit(f"(block ${end_label}", indent)
@@ -848,47 +934,50 @@ class WasmCompiler:
                     self.emit(f"(loop ${label_name}", indent)
                     indent += 1
                     active_blocks.append((label_name, True, indent))
-                    current_loop = (label_name, end_label, continue_label)
-                    continue
-
-                # Check if this is a loop end label
-                if current_loop and label_name == current_loop[1]:
-                    # Close the loop block first
-                    for j in range(len(active_blocks) - 1, -1, -1):
-                        if active_blocks[j][0] == current_loop[0]:
-                            active_blocks.pop(j)
-                            indent -= 1
-                            self.emit(")", indent)
-                            break
-                    # Close the end block
-                    for j in range(len(active_blocks) - 1, -1, -1):
-                        if active_blocks[j][0] == label_name:
-                            active_blocks.pop(j)
-                            indent -= 1
-                            self.emit(")", indent)
-                            break
-                    # Close any loop internal blocks that are still open
-                    for lbl in loop_internal_blocks:
-                        for j in range(len(active_blocks) - 1, -1, -1):
-                            if active_blocks[j][0] == lbl:
-                                active_blocks.pop(j)
-                                indent -= 1
-                                self.emit(")", indent)
-                                break
-                    current_loop = None
-                    loop_internal_blocks = []
+                    
+                    # Open blocks for forward jump targets inside this loop
+                    # These will be closed when we encounter their labels
+                    for lbl, _ in labels_in_this_loop:
+                        self.emit(f"(block ${lbl}", indent)
+                        indent += 1
+                        active_blocks.append((lbl, False, indent))
+                    
+                    # Push this loop onto the stack
+                    loop_stack.append((label_name, end_label, continue_label, [lbl for lbl, _ in labels_in_this_loop]))
                     continue
 
                 # Check if this is a continue label - just a marker
-                if current_loop and label_name == current_loop[2]:
+                if loop_stack and label_name == loop_stack[-1][2]:
                     continue
 
                 continue
 
+            # Compile the instruction
             try:
                 self._compile_instruction(stripped, indent)
             except Exception as e:
                 raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
+            
+            # After compiling, check if this was a backward jump - if so, close the loop
+            # Check by examining the instruction directly
+            if stripped.startswith('JUMP '):
+                parts = stripped.split()
+                if len(parts) > 1:
+                    target_label = parts[1]
+                    # Check if this is a backward jump to a loop start
+                    for j in range(len(loop_stack) - 1, -1, -1):
+                        loop_start, loop_end, continue_label, internal_blocks = loop_stack[j]
+                        if loop_start == target_label:
+                            # Close the loop block
+                            for k in range(len(active_blocks) - 1, -1, -1):
+                                if active_blocks[k][0] == loop_start and active_blocks[k][1]:  # is_loop
+                                    active_blocks.pop(k)
+                                    indent -= 1
+                                    self.emit(")", indent)
+                                    break
+                            # Pop from loop stack
+                            loop_stack.pop(j)
+                            break
 
         # Close all remaining blocks
         while active_blocks:
@@ -1036,9 +1125,14 @@ class WasmCompiler:
             self.imports.add('sqrt')
 
         elif opcode == 'BUILTIN_ROUND':
+            # Round and convert to i64
             self.emit("call $round_f64", indent)
+            # Convert f64 result to i64
+            self.emit("i64.trunc_f64_s", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('i64')
             self.imports.add('round_f64')
-            # Type stays as f64
 
         elif opcode == 'BUILTIN_FLOOR':
             self.emit("call $floor_f64", indent)
@@ -1421,8 +1515,13 @@ class WasmCompiler:
 
         elif opcode == 'DIV_CONST_I64':
             const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.div_s", indent)
+            # Check if we're dividing with f64
+            if self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.div", indent)
+            else:
+                self.emit(f"i64.const {const_val}", indent)
+                self.emit("i64.div_s", indent)
 
         elif opcode == 'DIV_F64':
             # Convert operands to f64 if needed
@@ -1532,21 +1631,67 @@ class WasmCompiler:
             for i in range(0, len(args) - 1, 2):
                 src_idx = int(args[i])
                 dst_idx = int(args[i + 1])
+                
+                # Determine source type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if src_idx < param_count:
+                        src_type_fr = func_meta['params'][src_idx][1]
+                    else:
+                        src_type_fr = self.local_vars.get(src_idx - param_count, 'i64')
+                else:
+                    src_type_fr = 'i64'
+                
                 src_ref = self._get_var_ref(src_idx)
                 dst_ref = self._get_var_ref(dst_idx)
-                self.emit(f"local.get {src_ref}", indent)
-                self.emit(f"local.set {dst_ref}", indent)
+                
+                # Handle strings specially (need to copy both ptr and len)
+                if src_type_fr == 'str':
+                    self.emit(f"local.get {src_ref}", indent)
+                    self.emit(f"local.set {dst_ref}", indent)
+                    src_len_ref = f"{src_ref}_len"
+                    dst_len_ref = f"{dst_ref}_len"
+                    self.emit(f"local.get {src_len_ref}", indent)
+                    self.emit(f"local.set {dst_len_ref}", indent)
+                else:
+                    self.emit(f"local.get {src_ref}", indent)
+                    self.emit(f"local.set {dst_ref}", indent)
+                
                 # Update type tracking
-                src_type = self.local_vars.get(src_idx, 'i64')
-                self.local_vars[dst_idx] = src_type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if dst_idx >= param_count:
+                        self.local_vars[dst_idx - param_count] = src_type_fr
 
             # If odd number of args, there's a final LOAD
             if len(args) % 2 == 1:
                 final_idx = int(args[-1])
                 final_ref = self._get_var_ref(final_idx)
-                self.emit(f"local.get {final_ref}", indent)
-                local_type = self.local_vars.get(final_idx, 'i64')
-                self.type_stack.append(self._map_type_to_wasm(local_type))
+                
+                # Determine type
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    param_count = len(func_meta.get('params', []))
+                    if final_idx < param_count:
+                        local_type_fr = func_meta['params'][final_idx][1]
+                    else:
+                        local_type_fr = self.local_vars.get(final_idx - param_count, 'i64')
+                else:
+                    local_type_fr = 'i64'
+                
+                # Handle strings specially
+                if local_type_fr == 'str':
+                    self.emit(f"local.get {final_ref}", indent)
+                    self.type_stack.append('i32')
+                    len_ref = f"{final_ref}_len"
+                    self.emit(f"local.get {len_ref}", indent)
+                    self.type_stack.append('i32')
+                else:
+                    self.emit(f"local.get {final_ref}", indent)
+                    local_type = self._map_type_to_wasm(local_type_fr)
+                    self.type_stack.append(local_type)
 
         elif opcode == 'INC_LOCAL':
             var_idx = int(args[0])
@@ -1769,8 +1914,13 @@ class WasmCompiler:
 
         elif opcode == 'MUL_CONST_I64':
             const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.mul", indent)
+            # Check if we're multiplying with f64
+            if self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.mul", indent)
+            else:
+                self.emit(f"i64.const {const_val}", indent)
+                self.emit("i64.mul", indent)
 
         elif opcode == 'MUL_F64':
             self.emit("f64.mul", indent)
@@ -1816,15 +1966,33 @@ class WasmCompiler:
                         self.local_vars[var_idx - param_count] = 'str'
             else:
                 # Regular value: single local.set
+                # Check if we need type conversion
                 if self.type_stack and self.current_function:
                     stored_type = self.type_stack[-1]
                     func_meta = self.functions.get(self.current_function, {})
                     param_count = len(func_meta.get('params', []))
                     if var_idx >= param_count:
-                        self.local_vars[var_idx - param_count] = stored_type
-                        # Track value type (list/set) if available
-                        if hasattr(self, '_last_i32_source') and stored_type == 'i32':
-                            self.local_value_types[var_idx] = self._last_i32_source
+                        rel_idx = var_idx - param_count
+                        # Don't override if local is already declared as a struct type
+                        existing_type = self.local_vars.get(rel_idx, None)
+                        
+                        # Check if we need type conversion
+                        if existing_type and existing_type != stored_type:
+                            if existing_type == 'i64' and stored_type == 'i32':
+                                # Converting i32 to i64 (e.g., set/list pointer to i64)
+                                self.emit("i64.extend_i32_u", indent)
+                                self.type_stack[-1] = 'i64'
+                            elif existing_type == 'i32' and stored_type == 'i64':
+                                # Converting i64 to i32
+                                self.emit("i32.wrap_i64", indent)
+                                self.type_stack[-1] = 'i32'
+                        
+                        if not (existing_type and existing_type.startswith('struct:')):
+                            # Don't update type if bytecode already specified it
+                            pass
+                            # Track value type (list/set) if available
+                            if hasattr(self, '_last_i32_source') and stored_type == 'i32':
+                                self.local_value_types[var_idx] = self._last_i32_source
                 self.emit(f"local.set {var_ref}", indent)
                 if self.type_stack:
                     self.type_stack.pop()
@@ -2065,9 +2233,17 @@ class WasmCompiler:
             # Push struct pointer back to stack
             self.emit("local.get $temp", indent)
 
-            # Update type stack
-            for _ in range(field_count):
-                self.pop_type()
+            # Update type stack - pop values based on actual stack consumption
+            # String fields consume 2 values (ptr, len), other fields consume 1
+            for i in range(field_count):
+                field_type = field_types[i]
+                if field_type == 'str':
+                    # String field consumes 2 stack values
+                    self.pop_type()  # len
+                    self.pop_type()  # ptr
+                else:
+                    # Other fields consume 1 stack value
+                    self.pop_type()
             self.push_type('i32', struct_id)
 
         elif opcode == 'STRUCT_GET':
@@ -2291,6 +2467,15 @@ class WasmCompiler:
             self.type_stack.append('i32')
             self._last_i32_source = 'set'  # Track that this i32 is a set
             self.imports.add('set_new')
+            
+        elif opcode == 'LIST_NEW_LITERAL':
+            # Create list from literals
+            size = int(args[0]) if args else 0
+            self.emit(f"i32.const {size}", indent)
+            self.emit("call $list_new", indent)
+            self.type_stack.append('i32')
+            self._last_i32_source = 'list'  # Track that this i32 is a list
+            self.imports.add('list_new')
 
         elif opcode == 'SET_ADD':
             # Stack: set(i32) value(any) -> set(i32)
@@ -2370,12 +2555,22 @@ class WasmCompiler:
             self.imports.add('file_open')
 
         elif opcode == 'FILE_READ':
-            # Stack: fd(i32) -> ptr(i32) len(i32)
+            # Stack: fd(i64) size(i64) -> ptr(i32) len(i32)
+            # Convert fd from i64 to i32
+            if len(self.type_stack) >= 2:
+                # Pop size (not used by runtime function, just consumed from stack)
+                if self.type_stack[-1] == 'i64':
+                    self.emit("drop", indent)
+                    self.type_stack.pop()
+                # Convert fd from i64 to i32
+                if self.type_stack and self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
             self.emit("call $file_read", indent)
             if self.type_stack:
-                self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
+                self.type_stack.pop()  # fd
+            self.type_stack.append('i32')  # ptr
+            self.type_stack.append('i32')  # len
             self.imports.add('file_read')
 
         elif opcode == 'FILE_WRITE':
@@ -2387,10 +2582,20 @@ class WasmCompiler:
             self.imports.add('file_write')
 
         elif opcode == 'FILE_CLOSE':
-            # Stack: fd(i32) -> (nothing)
-            self.emit("call $file_close", indent)
-            if self.type_stack:
-                self.type_stack.pop()
+            # Stack: fd(i64) -> (nothing) OR Stack: empty -> (nothing)
+            # Handle both cases: fd on stack or no fd on stack (bytecode inconsistency)
+            if self.type_stack and len(self.type_stack) > 0:
+                # Convert fd from i64 to i32
+                if self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
+                self.emit("call $file_close", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
+            else:
+                # No fd on stack - file is already closed or bytecode issue
+                # Just emit a comment and don't call file_close
+                self.emit_comment("FILE_CLOSE - no fd on stack, skipping", indent)
             self.imports.add('file_close')
 
         elif opcode == 'EXIT':
@@ -2409,8 +2614,13 @@ class WasmCompiler:
             self.emit_comment(f"{opcode} - not supported in WASM", indent)
             # Push dummy values to keep stack balanced
             if opcode in ['SOCKET_CREATE', 'SOCKET_ACCEPT', 'FORK']:
-                self.emit("i32.const 0", indent)
-                self.type_stack.append('i32')
+                # Return i64 for process/socket IDs
+                self.emit("i64.const 0", indent)
+                self.type_stack.append('i64')
+            elif opcode == 'GOTO_CALL':
+                # GOTO_CALL returns i64 (the return value from the goto label)
+                self.emit("i64.const 0", indent)
+                self.type_stack.append('i64')
             elif opcode in ['SOCKET_RECV', 'ENCODE', 'DECODE']:
                 # Returns bytes/string (ptr, len)
                 self.emit("i32.const 0", indent)
