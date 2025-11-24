@@ -1119,7 +1119,7 @@ class WasmCompiler:
                     self._emit_call('list_len', indent)
                 if self.type_stack:
                     self.type_stack.pop()
-                self.type_stack.append('i32')
+                self.type_stack.append('i64')
 
         elif opcode == 'BUILTIN_PRINT':
             # print expects (i32 ptr, i32 len)
@@ -2381,7 +2381,7 @@ class WasmCompiler:
                 # consume ptr i32 and push i64
                 if self.type_stack:
                     self.type_stack.pop()
-                self.type_stack.append('i32')
+                self.type_stack.append('i64')
                 self.emit("local.set $temp_i64", indent)
                 if self.type_stack:
                     self.type_stack.pop()
@@ -2393,7 +2393,7 @@ class WasmCompiler:
                 # consume len i32 and push len i64
                 if self.type_stack:
                     self.type_stack.pop()
-                self.type_stack.append('i32')
+                self.type_stack.append('i64')
                 self.emit("i64.const 32", indent)
                 self.emit("i64.shl", indent)
                 # combine with ptr (stored in temp_i64)
