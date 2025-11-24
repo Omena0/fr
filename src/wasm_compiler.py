@@ -2916,16 +2916,14 @@ class WasmCompiler:
 
         elif opcode == 'FILE_READ':
             # Stack: fd(i64) size(i64) -> ptr(i32) len(i32)
-            # Convert fd from i64 to i32
+            # Convert fd from i64 to i32 when necessary and drop size if needed
             if len(self.type_stack) >= 2:
-                # Pop size (not used by runtime function, just consumed from stack)
+                # Pop size if it was pre-pushed as i64
                 if self.type_stack[-1] == 'i64':
                     self.emit("drop", indent)
                     self.type_stack.pop()
-                # Convert fd from i64 to i32
-                if self.type_stack and self.type_stack[-1] == 'i64':
-                    self.emit("i32.wrap_i64", indent)
-                    self.type_stack[-1] = 'i32'
+                # Ensure the fd (second-from-top) is i32
+                self._ensure_nth_from_top_is_i32(2, indent)
             self._emit_call('file_read', indent)
             if self.type_stack:
                 self.type_stack.pop()  # fd
@@ -2935,6 +2933,9 @@ class WasmCompiler:
 
         elif opcode == 'FILE_WRITE':
             # Stack: fd(i32) ptr(i32) len(i32) -> (nothing)
+            # Ensure fd is i32 (third-from-top)
+            if len(self.type_stack) >= 3:
+                self._ensure_nth_from_top_is_i32(3, indent)
             self._emit_call('file_write', indent)
             for _ in range(3):
                 if self.type_stack:
