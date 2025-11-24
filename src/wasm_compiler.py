@@ -2170,7 +2170,7 @@ class WasmCompiler:
                 var_idx = int(args[i * 2])
                 value = args[i * 2 + 1]
                 var_ref = self._get_var_ref(var_idx)
-                self.emit(f"i32.const {value}", indent)
+                self.emit(f"i64.const {value}", indent)
                 self.emit(f"local.set {var_ref}", indent)
 
         elif opcode == 'STORE_CONST_F64':
@@ -2192,7 +2192,7 @@ class WasmCompiler:
                 var_idx = int(args[i * 2])
                 value = args[i * 2 + 1]
                 var_ref = self._get_var_ref(var_idx)
-                self.emit(f"i32.const {value}", indent)
+                self.emit(f"i64.const {value}", indent)
                 self.emit(f"local.set {var_ref}", indent)
 
         elif opcode == 'STORE_GLOBAL':
