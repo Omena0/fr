@@ -3133,8 +3133,8 @@ class WasmCompiler:
 
         # Now perform extend on the target
         self.emit("i64.extend_i32_u", indent)
-        # Update tracked type for that position
-        self.type_stack.append('i32')
+        # Update tracked type for that position to i64
+        self.type_stack.append('i64')
 
         # Restore saved values
         for t in reversed(saved):
