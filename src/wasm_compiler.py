@@ -3096,7 +3096,9 @@ class WasmCompiler:
                 else:
                     self.emit("local.set $temp2", indent)
 
-        # Now top is the target value
+        # Now top is the target value - pop it from our simulated stack
+        target_type = self.type_stack.pop()
+        # Emit the wrap to convert i64 -> i32
         self.emit("i32.wrap_i64", indent)
         # Update tracked type for that position (it becomes i32)
         self.type_stack.append('i32')
@@ -3155,7 +3157,8 @@ class WasmCompiler:
                 else:
                     self.emit("local.set $temp2", indent)
 
-        # Now perform extend on the target
+        # Pop the target from simulated stack and perform extend on it
+        target_type = self.type_stack.pop()
         self.emit("i64.extend_i32_u", indent)
         # Update tracked type for that position to i64
         self.type_stack.append('i64')
