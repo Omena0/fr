@@ -1547,8 +1547,8 @@ class WasmCompiler:
                     value = '1'
                 elif value == 'False':
                     value = '0'
-                self.emit(f"i32.const {value}", indent)
-                self.type_stack.append('i32')
+                self.emit(f"i64.const {value}", indent)
+                self.type_stack.append('i64')
         elif opcode == 'CONST_STR':
             # Extract strings (handles multiple quoted strings)
             rest = inst[len('CONST_STR'):].strip()
@@ -2310,7 +2310,7 @@ class WasmCompiler:
                     self.type_stack.append('i32')
                     # Push i64 constant value
                     self.emit("i64.const " + val, indent)
-                    self.type_stack.append('i32')
+                    self.type_stack.append('i64')
                     # Call append (consumes i32,i64 and returns i32)
                     # Direct call since we have precise arg types
                     self.emit('call $list_append', indent)  # Append (returns updated list)
