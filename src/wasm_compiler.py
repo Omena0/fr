@@ -35,7 +35,7 @@ class WasmCompiler:
         self.builtin_map = {
             'fopen': ('file_open', ['i32'], ['i32', 'i32', 'i32', 'i32']),
             'fread': ('file_read', ['i32', 'i32'], ['i32', 'i32']),
-            'fwrite': ('file_write', ['i32'], ['i32', 'i32', 'i32']),
+            'fwrite': ('file_write', [], ['i32', 'i32', 'i32']),
             'fclose': ('file_close', [], ['i32']),
         }
 
