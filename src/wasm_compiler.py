@@ -715,7 +715,11 @@ class WasmCompiler:
         # Declare locals (indices from param_count to max_local_idx)
         for idx in range(param_count, max_local_idx + 1):
             # Default to i64 type
-            local_type = self.local_vars.get(idx - param_count, 'i64')
+            # If we inferred a different type (local_inferred_types uses absolute index), prefer it.
+            if idx in local_inferred_types:
+                local_type = local_inferred_types[idx]
+            else:
+                local_type = self.local_vars.get(idx - param_count, 'i64')
             # Check if this is already a WASM type (from type inference)
             if local_type in ['i32', 'i64', 'f64']:
                 wasm_type = local_type
