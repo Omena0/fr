@@ -3229,9 +3229,44 @@ class WasmCompiler:
                     self._ensure_nth_from_top_is_i32(k, indent)
                 elif expected == 'i64' and actual == 'i32':
                     self._ensure_nth_from_top_is_i64(k, indent)
+            # After conversions, pop the function params from the type stack
+            for _ in params:
+                if self.type_stack:
+                    self.type_stack.pop()
 
-        # Finally emit the call
+        # Emit the call
         self.emit(f"call ${name}", indent)
+
+        # Push return types for known runtime imports
+        rets = {
+            'str_concat': ['i32','i32'],
+            'i64_to_str': ['i32','i32'],
+            'f64_to_str': ['i32','i32'],
+            'bool_to_str': ['i32','i32'],
+            'list_to_str': ['i32','i32'],
+            'set_to_str': ['i32','i32'],
+            'list_new': ['i32'],
+            'list_append': ['i32'],
+            'list_get': ['i64'],
+            'list_set': ['i32'],
+            'list_len': ['i64'],
+            'list_pop': ['i32','i64'],
+            'set_new': ['i32'],
+            'set_add': ['i32'],
+            'set_remove': ['i32'],
+            'set_contains': ['i32'],
+            'set_len': ['i64'],
+            'str_join': ['i32','i32'],
+            'str_split': ['i32'],
+            'str_get': ['i32','i32'],
+            'file_open': ['i32'],
+            'file_read': ['i32','i32'],
+            'file_write': [],
+            'file_close': [],
+        }
+        if name in rets:
+            for ret in rets[name]:
+                self.type_stack.append(ret)
 
     def _normalize_top_operand_to_string_pair(self, indent: int):
         """Ensure the top operand is a (i32 ptr, i32 len) pair.
