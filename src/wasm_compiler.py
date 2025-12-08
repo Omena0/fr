@@ -192,7 +192,7 @@ class WasmCompiler:
 
         # File I/O
         self.emit('(import "env" "file_open" (func $file_open (param i32 i32 i32 i32) (result i32)))', 1)
-        self.emit('(import "env" "file_read" (func $file_read (param i32 i32) (result i32 i32)))', 1)
+        self.emit('(import "env" "file_read" (func $file_read (param i32) (result i32 i32)))', 1)
         self.emit('(import "env" "file_write" (func $file_write (param i32 i32 i32)))', 1)
         self.emit('(import "env" "file_close" (func $file_close (param i32)))', 1)
 
@@ -643,6 +643,11 @@ class WasmCompiler:
                 if type_stack_sim:
                     type_stack_sim.pop()
 
+            elif opcode == 'DUP':
+                # Duplicate top value
+                if type_stack_sim:
+                    type_stack_sim.append(type_stack_sim[-1])
+
             elif opcode == 'TO_INT':
                 # Convert top of stack to i64
                 if type_stack_sim:
@@ -665,6 +670,45 @@ class WasmCompiler:
                         type_stack_sim.pop()
                         type_stack_sim.append('f64')
 
+            elif opcode.startswith('CMP_') or opcode in ['AND', 'OR', 'NOT']:
+                # Comparison and logical operators return i32 (boolean)
+                # CMP_* with CONST variant: consumes 1 value, produces 1 i32
+                # CMP_* without CONST: consumes 2 values, produces 1 i32
+                # AND/OR: consumes 2 values, produces 1 i32
+                # NOT: consumes 1 value, produces 1 i32
+                if 'CONST' in opcode:
+                    # CMP_*_CONST: pop 1, push 1
+                    if type_stack_sim:
+                        type_stack_sim.pop()
+                elif opcode == 'NOT':
+                    # NOT: pop 1, push 1
+                    if type_stack_sim:
+                        type_stack_sim.pop()
+                else:
+                    # CMP_*, AND, OR: pop 2, push 1
+                    if len(type_stack_sim) >= 2:
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                    elif type_stack_sim:
+                        type_stack_sim.pop()
+                type_stack_sim.append('i32')
+                value_type_tracker[len(type_stack_sim) - 1] = 'bool'
+
+            elif opcode == 'STORE_CONST_BOOL':
+                # STORE_CONST_BOOL slot val - directly stores bool (i32) to local
+                # Mark local as i32 type
+                for i in range(0, len(parts) - 1, 2):
+                    if i + 1 < len(parts):
+                        idx = int(parts[i + 1])
+                        local_inferred_types[idx] = 'i32'
+
+            elif opcode == 'FILE_OPEN':
+                # FILE_OPEN consumes path (ptr, len) and mode (ptr, len), returns fd (i32)
+                # Pop 4 values (2 strings)
+                for _ in range(min(4, len(type_stack_sim))):
+                    type_stack_sim.pop()
+                type_stack_sim.append('i32')  # fd
+
             elif opcode == 'FILE_READ':
                 # FILE_READ consumes fd(i64), size(i64) and returns string (ptr, len) as two i32 values
                 if len(type_stack_sim) >= 2:
@@ -674,6 +718,16 @@ class WasmCompiler:
                 type_stack_sim.append('i32')  # len
                 value_type_tracker[len(type_stack_sim) - 2] = 'str'
                 value_type_tracker[len(type_stack_sim) - 1] = 'str'
+
+            elif opcode == 'FILE_WRITE':
+                # FILE_WRITE consumes fd, ptr, len (3 values) and returns nothing
+                for _ in range(min(3, len(type_stack_sim))):
+                    type_stack_sim.pop()
+
+            elif opcode == 'FILE_CLOSE':
+                # FILE_CLOSE consumes fd (1 value) and returns nothing
+                if type_stack_sim:
+                    type_stack_sim.pop()
 
             elif opcode == 'FUSED_LOAD_STORE':
                 # Handle type inference for FUSED_LOAD_STORE
@@ -709,8 +763,9 @@ class WasmCompiler:
                     self.local_vars[rel_idx] = inferred_type
                 else:
                     existing = self.local_vars[rel_idx]
-                    if existing == 'i64' and inferred_type == 'i32':
-                        self.local_vars[rel_idx] = 'i32'
+                    # Override i64 with more specific types (i32, str, etc.)
+                    if existing == 'i64' and inferred_type in ['i32', 'str']:
+                        self.local_vars[rel_idx] = inferred_type
 
         # Declare locals (indices from param_count to max_local_idx)
         for idx in range(param_count, max_local_idx + 1):
@@ -1080,7 +1135,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'ADD_STR':
             # Ensure both operands are converted to (i32 ptr, i32 len) pairs
@@ -1110,7 +1165,7 @@ class WasmCompiler:
                 self.emit("i64.extend_i32_u", indent)  # convert to i64
                 self.type_stack.pop()  # remove i32 len
                 self.type_stack.pop()  # remove i32 ptr
-                self.type_stack.append('i32')  # push i64 len
+                self.type_stack.append('i64')  # push i64 len
             else:
                 # List or Set: check _last_i32_source to determine which
                 if hasattr(self, '_last_i32_source') and self._last_i32_source == 'set':
@@ -1598,11 +1653,6 @@ class WasmCompiler:
             self.emit("i64.sub", indent)
             self.emit(f"local.set {var_ref}", indent)
 
-        elif opcode == 'CONST_I64':
-            const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.div_s", indent)
-
         elif opcode == 'DIV_CONST_I64':
             const_val = args[0]
             # Check if we're dividing with f64
@@ -1638,7 +1688,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'DUP':
             # Duplicate the top stack value
@@ -1874,25 +1924,19 @@ class WasmCompiler:
             # Stack layout for string: ... ptr(i32) len(i32) index(i64)
             if len(self.type_stack) >= 3 and self.type_stack[-3] == 'i32' and self.type_stack[-2] == 'i32' and self.type_stack[-1] == 'i64':
                 # String indexing: (ptr, len, index) -> (ptr, len) of char
+                # _emit_call handles popping params and pushing result
                 self._emit_call('str_get', indent)
-                for _ in range(3):
-                    self.type_stack.pop()
-                self.type_stack.append('i32')  # char ptr
-                self.type_stack.append('i32')  # char len (always 1)
                 self.imports.add('str_get')
             else:
                 # List indexing - ensure list pointer (second-from-top) is i32
                 self._ensure_second_is_i32(indent)
+                # _emit_call handles popping params and pushing result
                 self._emit_call('list_get', indent)
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()
-                    self.type_stack.pop()
-                self.type_stack.append('i32')
                 self.imports.add('list_get')
 
         elif opcode == 'LIST_NEW':
             self._emit_call('list_new', indent)
-            self.type_stack.append('i32')
+            # _emit_call already pushes i32 return type
             self._last_i32_source = 'list'  # Track that this i32 is a list
             self.imports.add('list_new')
 
@@ -1929,11 +1973,7 @@ class WasmCompiler:
                 self._ensure_nth_from_top_is_i32(3, indent)
 
             self._emit_call('list_set', indent)
-            if len(self.type_stack) >= 3:
-                self.type_stack.pop()  # value
-                self.type_stack.pop()  # index
-                self.type_stack.pop()  # list pointer
-            self.type_stack.append('i32')  # list_set returns the list pointer
+            # _emit_call already handles popping params and pushing return type
             self._last_i32_source = 'list'
             self.imports.add('list_set')
 
@@ -2020,7 +2060,7 @@ class WasmCompiler:
             self.emit(f"local.get {var_ref1}", indent)
             self.emit(f"local.get {var_ref2}", indent)
             self.emit("i64.add", indent)
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'LOAD2_CMP_LT':
             # Load two variables and compare
@@ -2041,7 +2081,7 @@ class WasmCompiler:
             self.emit(f"local.get {var_ref1}", indent)
             self.emit(f"local.get {var_ref2}", indent)
             self.emit("i64.div_s", indent)
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'LOAD2_MUL_I64':
             var1 = int(args[0])
@@ -2051,7 +2091,7 @@ class WasmCompiler:
             self.emit(f"local.get {var_ref1}", indent)
             self.emit(f"local.get {var_ref2}", indent)
             self.emit("i64.mul", indent)
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'LOAD_GLOBAL':
             global_idx = int(args[0])
@@ -2093,7 +2133,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'POP':
             self.emit("drop", indent)
@@ -2191,12 +2231,13 @@ class WasmCompiler:
         elif opcode == 'STORE_CONST_BOOL':
             # Format: STORE_CONST_BOOL slot1 val1 [slot2 val2 ...]
             # Arguments come in pairs: slot, value (0 or 1)
+            # Bool locals are declared as i32, so use i32.const
             num_pairs = len(args) // 2
             for i in range(num_pairs):
                 var_idx = int(args[i * 2])
                 value = args[i * 2 + 1]
                 var_ref = self._get_var_ref(var_idx)
-                self.emit(f"i64.const {value}", indent)
+                self.emit(f"i32.const {value}", indent)
                 self.emit(f"local.set {var_ref}", indent)
 
         elif opcode == 'STORE_GLOBAL':
@@ -2222,7 +2263,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'TO_FLOAT':
             # Convert top of stack to f64
@@ -2294,8 +2335,7 @@ class WasmCompiler:
             count = int(args[0])
             # Create new list and keep type stack in sync
             self._emit_call('list_new', indent)
-            # list_new returns i32 (list pointer)
-            self.type_stack.append('i32')
+            # _emit_call already pushes i32 return type to type_stack
             # Result is list handle on stack; store it to temp (consumes it)
             if count > 0:
                 self.emit("local.set $temp", indent)  # Save list pointer
@@ -2311,18 +2351,9 @@ class WasmCompiler:
                     # Push i64 constant value
                     self.emit("i64.const " + val, indent)
                     self.type_stack.append('i64')
-                    # Call append (consumes i32,i64 and returns i32)
-                    # Direct call since we have precise arg types
-                    self.emit('call $list_append', indent)  # Append (returns updated list)
-                    # After call, adjust type stack: remove args and push result i32
-                    # Pop value and list pointer if present
-                    if self.type_stack:
-                        # _emit_call may have adjusted types; ensure two consumed
-                        # Remove up to two items that represent the call args
-                        for _ in range(min(2, len(self.type_stack))):
-                            self.type_stack.pop()
-                    # Push returned list pointer
-                    self.type_stack.append('i32')
+                    # Call append via _emit_call (handles type_stack automatically)
+                    self._emit_call('list_append', indent)
+                    # _emit_call pops [i32, i64] and pushes i32 result
                     # Save updated list pointer
                     self.emit("local.set $temp", indent)
                     # consume the returned list pointer
@@ -2344,8 +2375,7 @@ class WasmCompiler:
             count = int(args[0])
             # Create new list and keep type stack in sync
             self._emit_call('list_new', indent)
-            # list_new returns i32
-            self.type_stack.append('i32')
+            # _emit_call already pushes i32 return type
             # Save list pointer (consumes it)
             self.emit("local.set $temp", indent)
             if self.type_stack:
@@ -2719,10 +2749,7 @@ class WasmCompiler:
             # Pop from list - ensure list pointer (top) is i32, returns (list_ptr, value)
             self._ensure_top_is_i32(indent)
             self._emit_call('list_pop', indent)
-            if self.type_stack:
-                self.type_stack.pop()  # consume list pointer
-            self.type_stack.append('i32')  # list pointer
-            self.type_stack.append('i32')  # popped value
+            # _emit_call already handles popping params and pushing returns (i32, i64)
             self.imports.add('list_pop')
 
         elif opcode == 'BUILTIN_PI':
@@ -2763,7 +2790,7 @@ class WasmCompiler:
 
         elif opcode == 'SET_NEW':
             self._emit_call('set_new', indent)
-            self.type_stack.append('i32')
+            # _emit_call already pushes i32 return type
             self._last_i32_source = 'set'  # Track that this i32 is a set
             self.imports.add('set_new')
             
@@ -2772,7 +2799,7 @@ class WasmCompiler:
             size = int(args[0]) if args else 0
             self.emit(f"i32.const {size}", indent)
             self._emit_call('list_new', indent)
-            self.type_stack.append('i32')
+            # _emit_call already pushes i32 return type
             self._last_i32_source = 'list'  # Track that this i32 is a list
             self.imports.add('list_new')
 
@@ -2797,14 +2824,12 @@ class WasmCompiler:
                 self.emit("local.get $temp_i64", indent)
                 self.emit("i64.or", indent)
                 # Stack now: ... set_ptr combined_i64
+                # Manually track the packed i64 we just built
+                self.type_stack.append('i64')
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_add', indent)
-                # Clean type stack and push i32 set pointer
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()  # combined_i64
-                    self.type_stack.pop()  # set ptr
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'set'
                 self.imports.add('set_add')
             else:
@@ -2812,10 +2837,7 @@ class WasmCompiler:
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_add', indent)
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()  # value
-                    self.type_stack.pop()  # set
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'set'  # Track that this i32 is a set
                 self.imports.add('set_add')
 
@@ -2836,13 +2858,12 @@ class WasmCompiler:
                 self.emit("i64.shl", indent)
                 self.emit("local.get $temp_i64", indent)
                 self.emit("i64.or", indent)
+                # Manually track the packed i64 we just built
+                self.type_stack.append('i64')
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_remove', indent)
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()
-                    self.type_stack.pop()
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'set'
                 self.imports.add('set_remove')
             else:
@@ -2850,10 +2871,7 @@ class WasmCompiler:
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_remove', indent)
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()  # value
-                    self.type_stack.pop()  # set
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'set'  # Track that this i32 is a set
                 self.imports.add('set_remove')
 
@@ -2877,15 +2895,12 @@ class WasmCompiler:
                 self.emit("i64.shl", indent)
                 self.emit("local.get $temp_i64", indent)
                 self.emit("i64.or", indent)
-                # Stack now: ... set_ptr combined_i64
+                # Manually track the packed i64 we just built
+                self.type_stack.append('i64')
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_contains', indent)
-                # Clean type stack and push i32 result
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()  # combined_i64
-                    self.type_stack.pop()  # set ptr
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'bool'
                 self.imports.add('set_contains')
             else:
@@ -2893,10 +2908,7 @@ class WasmCompiler:
                 # Ensure set pointer is i32
                 self._ensure_second_is_i32(indent)
                 self._emit_call('set_contains', indent)
-                if len(self.type_stack) >= 2:
-                    self.type_stack.pop()  # value
-                    self.type_stack.pop()  # set
-                self.type_stack.append('i32')
+                # _emit_call handles type_stack
                 self._last_i32_source = 'bool'  # Track that this i32 is a bool
                 self.imports.add('set_contains')
 
@@ -2911,28 +2923,19 @@ class WasmCompiler:
 
         elif opcode == 'FILE_OPEN':
             # Stack: path_ptr(i32) path_len(i32) mode_ptr(i32) mode_len(i32) -> fd(i32)
+            # _emit_call handles popping params and pushing return value
             self._emit_call('file_open', indent)
-            for _ in range(4):
-                if self.type_stack:
-                    self.type_stack.pop()
-            self.type_stack.append('i32')
             self.imports.add('file_open')
 
         elif opcode == 'FILE_READ':
             # Stack: fd(i64) size(i64) -> ptr(i32) len(i32)
-            # Convert fd from i64 to i32 when necessary and drop size if needed
+            # Drop the size parameter (bytecode pushes it but runtime ignores it)
             if len(self.type_stack) >= 2:
-                # Pop size if it was pre-pushed as i64
-                if self.type_stack[-1] == 'i64':
-                    self.emit("drop", indent)
-                    self.type_stack.pop()
-                # Ensure the fd (second-from-top) is i32
-                self._ensure_nth_from_top_is_i32(2, indent)
+                self.emit("drop", indent)
+                self.type_stack.pop()
+            # Now we have just fd on stack - _emit_call will handle conversion
             self._emit_call('file_read', indent)
-            if self.type_stack:
-                self.type_stack.pop()  # fd
-            self.type_stack.append('i32')  # ptr
-            self.type_stack.append('i32')  # len
+            # _emit_call already pops fd and pushes ptr, len
             self.imports.add('file_read')
 
         elif opcode == 'FILE_WRITE':
@@ -2940,10 +2943,8 @@ class WasmCompiler:
             # Ensure fd is i32 (third-from-top)
             if len(self.type_stack) >= 3:
                 self._ensure_nth_from_top_is_i32(3, indent)
+            # _emit_call already handles popping params from type_stack
             self._emit_call('file_write', indent)
-            for _ in range(3):
-                if self.type_stack:
-                    self.type_stack.pop()
             self.imports.add('file_write')
 
         elif opcode == 'FILE_CLOSE':

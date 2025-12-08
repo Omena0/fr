@@ -469,10 +469,10 @@ def main():
     print("Test Results:")
     print("=" * 60)
 
-    print(f"Python Runtime: {python_passed}/{python_total} passed")
-    print(f"C VM Runtime:   {vm_passed}/{vm_total} passed")
-    print(f"Native Compiler: {native_passed}/{native_total} passed")
-    print(f"Wasm Command:   {wasm_passed}/{wasm_total} passed")
+    print(f"Python VM: {python_passed}/{python_total} passed")
+    print(f"C VM:   {vm_passed}/{vm_total} passed")
+    print(f"Native: {native_passed}/{native_total} passed")
+    print(f"Wasm:   {wasm_passed}/{wasm_total} passed")
 
     if mismatch_count > 0:
         print(f"⚠️  Runtime Mismatches: {mismatch_count}")
@@ -484,13 +484,13 @@ def main():
         return 0
     else:
         if python_passed < python_total:
-            print(f"❌ Python runtime has {python_total - python_passed} failure(s)")
+            print(f"❌ Python VM has {python_total - python_passed} failure(s)")
         if vm_passed < vm_total:
-            print(f"❌ C VM runtime has {vm_total - vm_passed} failure(s)")
+            print(f"❌ C VM has {vm_total - vm_passed} failure(s)")
         if native_passed < native_total:
-            print(f"❌ Native compiler has {native_total - native_passed} failure(s)")
+            print(f"❌ Native has {native_total - native_passed} failure(s)")
         if wasm_total > 0 and wasm_passed < wasm_total:
-            print(f"❌ Wasm command has {wasm_total - wasm_passed} failure(s)")
+            print(f"❌ Wasm has {wasm_total - wasm_passed} failure(s)")
         return 1
 
 if __name__ == '__main__':

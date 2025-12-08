@@ -1,8 +1,0 @@
-void main() {
-    list lst = []
-    println(str(lst))
-    lst = append(lst, 1)
-    println(str(lst))
-    lst = append(lst, 2)
-    println(str(lst))
-}
