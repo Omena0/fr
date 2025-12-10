@@ -1764,6 +1764,7 @@ class X86Compiler:
         self.emit(f"mov rax, [rbp - {offset1}]")
         self.emit(f"add rax, [rbp - {offset2}]")
         self.emit("push rax")
+        self.stack_types.append('i64')
 
     def _compile_load2_sub_i64(self, args: List[str]):
         """Fused: load var1, load var2, subtract"""
@@ -1772,6 +1773,7 @@ class X86Compiler:
         self.emit(f"mov rax, [rbp - {offset1}]")
         self.emit(f"sub rax, [rbp - {offset2}]")
         self.emit("push rax")
+        self.stack_types.append('i64')
 
     def _compile_load2_mul_i64(self, args: List[str]):
         """Fused: load var1, load var2, multiply"""

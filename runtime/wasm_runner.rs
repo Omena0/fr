@@ -304,16 +304,46 @@ fn main() -> Result<()> {
     });
 
     let offset_clone = string_offset.clone();
+    let lists_clone = lists.clone();
     let str_join = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, 
-                                                 _sep_ptr: i32, _sep_len: i32,
-                                                 _list_ptr: i32| -> (i32, i32) {
-        // Placeholder for list join - returns empty string for now
+                                                 sep_ptr: i32, sep_len: i32,
+                                                 list_id: i32| -> (i32, i32) {
         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+
+        let sep_slice = &data[sep_ptr as usize..(sep_ptr + sep_len) as usize];
+        let lists_lock = lists_clone.lock().unwrap();
+
+        let mut result: Vec<u8> = Vec::new();
+        if let Some(list_vec) = lists_lock.get(list_id as usize) {
+            for (idx, &packed) in list_vec.iter().enumerate() {
+                let ptr = (packed & 0xFFFF_FFFF) as i32;
+                let len = ((packed >> 32) & 0xFFFF_FFFF) as i32;
+
+                if ptr >= 0 && len > 0 {
+                    let start = ptr as usize;
+                    let end = (ptr + len) as usize;
+                    if end <= data.len() {
+                        result.extend_from_slice(&data[start..end]);
+                    }
+                }
+
+                if idx + 1 < list_vec.len() {
+                    result.extend_from_slice(sep_slice);
+                }
+            }
+        }
+
+        let len_out = result.len() as i32;
         let mut offset = offset_clone.lock().unwrap();
-        let ptr = *offset as i32;
-        *offset += 1;
-        mem.write(&mut caller, ptr as usize, b"").unwrap();
-        (ptr, 0)
+        let ptr_out = *offset as i32;
+        *offset += result.len();
+
+        if len_out > 0 {
+            mem.write(&mut caller, ptr_out as usize, &result).unwrap();
+        }
+
+        (ptr_out, len_out)
     });
 
     let str_split = Func::wrap(&mut store, |_caller: Caller<'_, ()>, 

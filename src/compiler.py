@@ -252,6 +252,8 @@ class BytecodeCompiler:
             'pyobj': 'i64',     # Alias for pyobject
             'dict': 'i64',      # Python dict stored as pyobject
             'any': 'i64',
+            'list': 'list',     # List type for WASM
+            'set': 'set',       # Set type for WASM
         }
 
         return type_map.get(type_str, 'i64')  # Default to i64
@@ -552,7 +554,8 @@ class BytecodeCompiler:
                 first_part = parts[0]
                 if is_formatted_value(first_part):
                     # FormattedValue - compile expression and convert to string
-                    self.compile_expr(first_part['value'], expr_type)
+                    # Don't pass expr_type here - let the expression determine its own type
+                    self.compile_expr(first_part['value'], None)
                     self.emit("BUILTIN_STR")
                 elif is_literal_value(first_part):
                     # Constant string part
@@ -565,7 +568,8 @@ class BytecodeCompiler:
                 for part in parts[1:]:
                     if is_formatted_value(part):
                         # FormattedValue - compile expression and convert to string
-                        self.compile_expr(part['value'], expr_type)
+                        # Don't pass expr_type here - let the expression determine its own type
+                        self.compile_expr(part['value'], None)
                         self.emit("BUILTIN_STR")
                     elif is_literal_value(part):
                         # Constant string part
