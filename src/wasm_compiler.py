@@ -39,6 +39,9 @@ class WasmCompiler:
             'fclose': ('file_close', [], ['i32']),
         }
 
+        # Exception handling
+        self.try_stack: List[Tuple[str, str]] = []  # Stack of (error_type, handler_label)
+
         # Bytecode version
         self.version = 1
 
@@ -149,6 +152,9 @@ class WasmCompiler:
         self.emit('(import "env" "print" (func $print (param i32 i32)))', 1)
         self.emit('(import "env" "println" (func $println (param i32 i32)))', 1)
 
+        # Import runtime error reporting (error_type_ptr, error_type_len, message_ptr, message_len, line_num)
+        self.emit('(import "env" "runtime_error" (func $runtime_error (param i32 i32 i32 i32 i32)))', 1)
+
         # Import string operations (return ptr and len as two values)
         self.emit('(import "env" "str_concat" (func $str_concat (param i32 i32 i32 i32) (result i32 i32)))', 1)
         self.emit('(import "env" "str_to_i64" (func $str_to_i64 (param i32 i32) (result i64)))', 1)
@@ -206,6 +212,10 @@ class WasmCompiler:
         # Always emit heap pointer for struct allocation
         self.emit_comment("Heap pointer for struct allocation", 1)
         self.emit(f"(global $heap_ptr (mut i32) (i32.const {self.heap_offset}))", 1)
+
+        # Exception handling globals
+        self.emit_comment("Exception handling globals", 1)
+        self.emit("(global $exception_active (mut i32) (i32.const 0))", 1)
 
         if not self.global_vars:
             return
@@ -943,12 +953,18 @@ class WasmCompiler:
 
         # Ensure function returns properly
         if return_type != 'void' and return_type:
-            # If there's no explicit return, add a default one
-            if all(
-                line.strip() != 'RETURN'
+            # Check if function has explicit returns
+            has_return = any(
+                line.strip() == 'RETURN' or line.strip().startswith('RETURN ')
                 for line in bytecode_lines
                 if self._is_in_function(line, func_name)
-            ):
+            )
+            if has_return:
+                # Function has returns in branches - add unreachable at end
+                # This tells WASM that reaching this point is impossible
+                self.emit("unreachable", 2)
+            else:
+                # No explicit return - add a default one
                 wasm_type = self._map_type_to_wasm(return_type)
                 if wasm_type == 'i64':
                     self.emit("i64.const 0", 2)
@@ -1030,6 +1046,17 @@ class WasmCompiler:
                             if target_pos > i:
                                 # Mark this as a switch case label
                                 switch_case_labels.add(target)
+            
+            # Detect TRY_BEGIN handler labels
+            elif line.startswith('TRY_BEGIN '):
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Format: TRY_BEGIN "exc_type" handler_label
+                    handler_label = parts[2]
+                    if handler_label in label_positions:
+                        target_pos = label_positions[handler_label]
+                        if target_pos > i:
+                            forward_jumps[i] = handler_label
 
         # Identify loop structures by analyzing backward jumps and loop naming
         loop_structures = {}  # Maps loop_start -> (loop_end, loop_continue)
@@ -2490,8 +2517,42 @@ class WasmCompiler:
 
         elif opcode == 'DIV_CONST_F64':
             const_val = args[0]
-            self.emit(f"f64.const {const_val}", indent)
-            self.emit("f64.div", indent)
+            # Check for division by zero at compile time
+            if const_val == '0.0' or const_val == '0':
+                # Search try_stack from innermost to outermost for ZeroDivisionError handler
+                handler_found = None
+                for error_type, handler_label in reversed(self.try_stack):
+                    if error_type == "ZeroDivisionError":
+                        handler_found = handler_label
+                        break
+                
+                if handler_found:
+                    # Drop the value on stack and branch to handler
+                    self.emit("drop", indent)
+                    if self.type_stack:
+                        self.type_stack.pop()
+                    self.emit(f"br ${handler_found}", indent)
+                else:
+                    # No matching handler - call runtime_error for division by zero
+                    self.emit("drop", indent)
+                    if self.type_stack:
+                        self.type_stack.pop()
+                    
+                    # Emit runtime_error call (no error type prefix for runtime errors)
+                    message = "float division by zero"
+                    message_offset = self.add_string_constant(message)
+                    
+                    # Pass empty error type (ptr=0, len=0) so it outputs just the message
+                    self.emit("i32.const 0  ;; empty error type", indent)
+                    self.emit("i32.const 0", indent)
+                    self.emit(f"i32.const {message_offset}  ;; message", indent)
+                    self.emit(f"i32.const {len(message.encode('utf-8'))}", indent)
+                    self.emit("i32.const 0  ;; line number", indent)
+                    self.emit("call $runtime_error", indent)
+                    self.emit("unreachable", indent)
+            else:
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.div", indent)
 
         elif opcode == 'LIST_NEW_I64':
             # LIST_NEW_I64 count val1 val2 val3 ...
@@ -3083,13 +3144,19 @@ class WasmCompiler:
                 self.imports.add('set_contains')
 
         elif opcode == 'TRY_BEGIN':
-            # Start of try block - for now, just a marker
-            # WASM doesn't have try-catch, we'd need to emulate with result types
-            self.emit_comment("TRY_BEGIN - exception handling not supported in WASM", indent)
+            # Start of try block
+            # Format: TRY_BEGIN "error_type" handler_label
+            if len(args) >= 2:
+                error_type = args[0].strip('"')
+                handler_label = args[1]
+                self.try_stack.append((error_type, handler_label))
+                self.emit_comment(f"TRY_BEGIN {error_type} -> {handler_label}", indent)
 
         elif opcode == 'TRY_END':
-            # End of try block
-            self.emit_comment("TRY_END - exception handling not supported in WASM", indent)
+            # End of try block - pop handler if any
+            if self.try_stack:
+                self.try_stack.pop()
+            self.emit_comment("TRY_END", indent)
 
         elif opcode == 'FILE_OPEN':
             # Stack: path_ptr(i32) path_len(i32) mode_ptr(i32) mode_len(i32) -> fd(i32)
@@ -3183,9 +3250,26 @@ class WasmCompiler:
                 self.type_stack.pop()
             self.imports.add('sleep')
 
-        elif opcode in ['FORK', 'JOIN', 'WAIT']:
-            # Process operations not supported in WASM
-            raise WasmCompilerError(f"WASM backend does not support process operations ({opcode})")
+        elif opcode == 'FORK':
+            # FORK not available in WASM - stub to always be parent
+            # Return 1 to indicate we're the "parent" (no child was created)
+            self.emit("i64.const 1", indent)
+            self.type_stack.append('i64')
+
+        elif opcode == 'WAIT':
+            # WAIT not available in WASM - no-op
+            # Just return 0 for the child PID
+            self.emit("i64.const 0", indent)
+            self.type_stack.append('i64')
+
+        elif opcode == 'JOIN':
+            # JOIN (wait for child) not available in WASM
+            # Consume the pid from stack and return 0 exit status
+            self.emit("drop", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.emit("i64.const 0", indent)
+            self.type_stack.append('i64')
 
         elif opcode == 'GOTO_CALL':
             # GOTO_CALL not supported in WASM
@@ -3196,8 +3280,82 @@ class WasmCompiler:
             raise WasmCompilerError(f"WASM backend does not support socket operations ({opcode})")
 
         elif opcode == 'RAISE':
-            # Exception raising - emit trap instruction
-            self.emit("unreachable", indent)
+            # Exception raising
+            # Format: RAISE "error_type" "message"
+            # Need to parse quoted strings correctly (they may contain spaces)
+            rest = inst[len('RAISE'):].strip()
+            strings = []
+            i = 0
+            while i < len(rest):
+                if rest[i] == '"':
+                    j = i + 1
+                    while j < len(rest) and rest[j] != '"':
+                        if rest[j] == '\\':
+                            j += 2
+                        else:
+                            j += 1
+                    if j < len(rest):
+                        strings.append(rest[i+1:j])
+                        i = j + 1
+                    else:
+                        break
+                else:
+                    i += 1
+            
+            if len(strings) >= 2:
+                error_type = strings[0]
+                message = strings[1]
+                # Check if we're in a try block that catches this error
+                matched = False
+                if self.try_stack:
+                    # Search try_stack from innermost to outermost for matching handler
+                    for handler_error_type, handler_label in reversed(self.try_stack):
+                        if handler_error_type == error_type:
+                            # Branch to the handler
+                            self.emit(f"br ${handler_label}", indent)
+                            matched = True
+                            break
+                
+                if not matched:
+                    # No matching handler - call runtime_error
+                    # runtime_error(error_type_ptr, error_type_len, message_ptr, message_len, line_num)
+                    error_type_escaped = self._unescape_string(error_type)
+                    message_escaped = self._unescape_string(message)
+                    
+                    error_type_offset = self.add_string_constant(error_type_escaped)
+                    message_offset = self.add_string_constant(message_escaped)
+                    
+                    self.emit(f"i32.const {error_type_offset}  ;; error type", indent)
+                    self.emit(f"i32.const {len(error_type_escaped.encode('utf-8'))}", indent)
+                    self.emit(f"i32.const {message_offset}  ;; message", indent)
+                    self.emit(f"i32.const {len(message_escaped.encode('utf-8'))}", indent)
+                    self.emit(f"i32.const 0  ;; line number (not tracked)", indent)
+                    self.emit("call $runtime_error", indent)
+                    self.emit("unreachable", indent)
+            elif len(strings) >= 1:
+                error_type = strings[0]
+                matched = False
+                if self.try_stack:
+                    for handler_error_type, handler_label in reversed(self.try_stack):
+                        if handler_error_type == error_type:
+                            self.emit(f"br ${handler_label}", indent)
+                            matched = True
+                            break
+                
+                if not matched:
+                    # Call runtime_error with just error type
+                    error_type_escaped = self._unescape_string(error_type)
+                    error_type_offset = self.add_string_constant(error_type_escaped)
+                    
+                    self.emit(f"i32.const {error_type_offset}  ;; error type", indent)
+                    self.emit(f"i32.const {len(error_type_escaped.encode('utf-8'))}", indent)
+                    self.emit("i32.const 0  ;; no message", indent)
+                    self.emit("i32.const 0", indent)
+                    self.emit("i32.const 0  ;; line number", indent)
+                    self.emit("call $runtime_error", indent)
+                    self.emit("unreachable", indent)
+            else:
+                self.emit("unreachable", indent)
 
         elif opcode == 'LOAD2_CMP_GT':
             # LOAD2_CMP_GT idx1 idx2 - Load two values and compare

@@ -211,6 +211,10 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
 
     def normalize_line_numbers(msg1, msg2):
         """Check if two error messages match, ignoring line/column numbers after ?"""
+        # Handle None values
+        msg1 = msg1 or ''
+        msg2 = msg2 or ''
+        
         # If expected (msg2) doesn't have line numbers, strip them from actual (msg1)
         if not msg2.startswith('?') and msg1.startswith('?'):
             # Extract just the message part from msg1
@@ -246,8 +250,8 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
     def matches_any_alternative(output, alternatives):
         """Check if output matches any of the expected alternatives"""
         if not alternatives:
-            return normalize_line_numbers(output or '', expect)
-        return any(normalize_line_numbers(output or '', alt) for alt in alternatives)
+            return normalize_line_numbers(output or '', expect or '')
+        return any(normalize_line_numbers(output or '', alt or '') for alt in alternatives)
 
     # Determine if tests passed
     if is_output_test:
@@ -258,12 +262,22 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
             py_passed = not py_skipped and matches_any_alternative(py_output, expect_alternatives)
             vm_passed = not vm_skipped and matches_any_alternative(vm_output, expect_alternatives)
             native_passed = not native_skipped and matches_any_alternative(native_output, expect_alternatives)
-            wasm_passed = not wasm_skipped and wasm_error is None and matches_any_alternative(wasm_output, expect_alternatives)
+            # For WASM with error-like expected output, accept error in stderr
+            if any((alt or '').startswith('?') for alt in expect_alternatives):
+                wasm_msg = wasm_error if wasm_error and wasm_error != 'SKIPPED' else wasm_output
+                wasm_passed = not wasm_skipped and matches_any_alternative(wasm_msg, expect_alternatives)
+            else:
+                wasm_passed = not wasm_skipped and wasm_error is None and matches_any_alternative(wasm_output, expect_alternatives)
         else:
-            py_passed = not py_skipped and normalize_line_numbers(py_output or '', expect)
-            vm_passed = not vm_skipped and normalize_line_numbers(vm_output or '', expect)
-            native_passed = not native_skipped and normalize_line_numbers(native_output or '', expect)
-            wasm_passed = not wasm_skipped and wasm_error is None and normalize_line_numbers(wasm_output or '', expect)
+            py_passed = not py_skipped and normalize_line_numbers(py_output or '', expect or '')
+            vm_passed = not vm_skipped and normalize_line_numbers(vm_output or '', expect or '')
+            native_passed = not native_skipped and normalize_line_numbers(native_output or '', expect or '')
+            # For WASM with error-like expected output, accept error in stderr
+            if (expect or '').startswith('?'):
+                wasm_msg = wasm_error if wasm_error and wasm_error != 'SKIPPED' else wasm_output
+                wasm_passed = not wasm_skipped and normalize_line_numbers(wasm_msg or '', expect or '')
+            else:
+                wasm_passed = not wasm_skipped and wasm_error is None and normalize_line_numbers(wasm_output or '', expect or '')
 
         # Helper to escape newlines for error display
         def escape_for_display(text):
@@ -281,7 +295,7 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
             'py_error': None if py_passed else f'Output "{escape_for_display(py_output)}" != expected "{escape_for_display(expect)}"',
             'vm_error': None if vm_passed else f'Output "{escape_for_display(vm_output)}" != expected "{escape_for_display(expect)}"',
             'native_error': None if native_passed else f'Output "{escape_for_display(native_output)}" != expected "{escape_for_display(expect)}"',
-            'wasm_error': wasm_error or (None if wasm_passed else f'Output "{escape_for_display(wasm_output)}" != expected "{escape_for_display(expect)}"'),
+            'wasm_error': None if wasm_passed else (wasm_error or f'Output "{escape_for_display(wasm_output)}" != expected "{escape_for_display(expect)}"'),
             'py_skipped': py_skipped,
             'vm_skipped': vm_skipped,
             'native_skipped': native_skipped,
@@ -317,7 +331,11 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
                 if wasm_output == 'Compiled (no runner)':
                     wasm_passed = not wasm_skipped and wasm_error is None
                 else:
-                    wasm_passed = not wasm_skipped and wasm_error is None and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
+                    # For error tests (any alternative starts with ?), allow wasm_error to contain the message
+                    if any((alt or '').startswith('?') for alt in expect_alternatives) and wasm_error and wasm_error != 'SKIPPED':
+                        wasm_passed = not wasm_skipped and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
+                    else:
+                        wasm_passed = not wasm_skipped and wasm_error is None and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
             else:
                 exp_msg = extract_msg(expect)
                 # Use normalized comparison for line numbers
@@ -330,7 +348,11 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
                 if wasm_output == 'Compiled (no runner)':
                     wasm_passed = not wasm_skipped and wasm_error is None
                 else:
-                    wasm_passed = not wasm_skipped and wasm_error is None and normalize_line_numbers(wasm_msg, exp_msg)
+                    # For error tests (expect starts with ?), allow wasm_error to contain the message
+                    if (expect or '').startswith('?') and wasm_error and wasm_error != 'SKIPPED':
+                        wasm_passed = not wasm_skipped and normalize_line_numbers(wasm_msg, exp_msg)
+                    else:
+                        wasm_passed = not wasm_skipped and wasm_error is None and normalize_line_numbers(wasm_msg, exp_msg)
 
         return {
             'file': test_file,
@@ -341,7 +363,7 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
             'py_error': None if py_passed else f'Error "{py_msg if "py_msg" in locals() else py_output}" != expected "{expect}"', # type: ignore
             'vm_error': None if vm_passed else f'Error "{vm_msg if "vm_msg" in locals() else vm_output}" != expected "{expect}"', # type: ignore
             'native_error': None if native_passed else f'Error "{native_msg if "native_msg" in locals() else native_output}" != expected "{expect}"', # type: ignore
-            'wasm_error': wasm_error or (None if wasm_passed else f'Error "{wasm_msg if "wasm_msg" in locals() else wasm_output}" != expected "{expect}"'), # type: ignore
+            'wasm_error': None if wasm_passed else (wasm_error or f'Error "{wasm_msg if "wasm_msg" in locals() else wasm_output}" != expected "{expect}"'), # type: ignore
             'py_skipped': py_skipped,
             'vm_skipped': vm_skipped,
             'native_skipped': native_skipped,

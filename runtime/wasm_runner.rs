@@ -43,6 +43,37 @@ fn main() -> Result<()> {
         println!("{}", s);
     });
 
+    // Runtime error function - prints error to stderr and exits
+    // Takes: error_type_ptr, error_type_len, message_ptr, message_len, line_num
+    let runtime_error = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, 
+        error_type_ptr: i32, error_type_len: i32,
+        message_ptr: i32, message_len: i32,
+        line_num: i32| {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        
+        let error_type = if error_type_len > 0 {
+            String::from_utf8_lossy(&data[error_type_ptr as usize..(error_type_ptr + error_type_len) as usize]).to_string()
+        } else {
+            "".to_string()
+        };
+        
+        let message = if message_len > 0 {
+            String::from_utf8_lossy(&data[message_ptr as usize..(message_ptr + message_len) as usize]).to_string()
+        } else {
+            "".to_string()
+        };
+        
+        // If error_type is provided, format as "[ErrorType] message"
+        // Otherwise just print the message
+        if !error_type.is_empty() {
+            eprintln!("?{}:[{}] {}", line_num, error_type, message);
+        } else {
+            eprintln!("?{}:{}", line_num, message);
+        }
+        std::process::exit(1);
+    });
+
     let offset_clone = string_offset.clone();
     let i64_to_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, value: i64| -> (i32, i32) {
         let s = value.to_string();
@@ -431,8 +462,13 @@ fn main() -> Result<()> {
             if actual_index >= 0 && (actual_index as usize) < list_vec.len() {
                 return list_vec[actual_index as usize];
             }
+            // Index out of range - print error and exit
+            eprintln!("?0,0:Index error: list index out of range: {} (length: {})", index, len);
+            std::process::exit(1);
         }
-        0
+        // Invalid list - print error and exit
+        eprintln!("?0,0:Index error: invalid list");
+        std::process::exit(1);
     });
     
     let lists_clone = lists.clone();
@@ -662,6 +698,7 @@ fn main() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker.define(&store, "env", "print", print)?;
     linker.define(&store, "env", "println", println)?;
+    linker.define(&store, "env", "runtime_error", runtime_error)?;
     linker.define(&store, "env", "i64_to_str", i64_to_str)?;
     linker.define(&store, "env", "f64_to_str", f64_to_str)?;
     linker.define(&store, "env", "bool_to_str", bool_to_str)?;
@@ -702,9 +739,16 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "sleep", sleep_fn)?;
 
     let instance = linker.instantiate(&mut store, &module)?;
-    let main = instance.get_typed_func::<(), ()>(&mut store, "main")?;
-
-    main.call(&mut store, ())?;
+    
+    // Try to get main with different signatures (void return or i64 return)
+    if let Ok(main) = instance.get_typed_func::<(), ()>(&mut store, "main") {
+        main.call(&mut store, ())?;
+    } else if let Ok(main) = instance.get_typed_func::<(), i64>(&mut store, "main") {
+        let _ = main.call(&mut store, ())?;
+    } else {
+        eprintln!("Error: main function not found with expected signature");
+        std::process::exit(1);
+    }
 
     Ok(())
 }

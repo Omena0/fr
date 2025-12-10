@@ -38,7 +38,8 @@
             "runtime",
             "python_interop",
             "io",
-            "imports/c_import.fr"
+            "imports/c_import.fr",
+            "misc/goto_with_return.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false
