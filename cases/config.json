@@ -37,7 +37,8 @@
             "syntax_errors",
             "runtime",
             "python_interop",
-            "io"
+            "io",
+            "imports/c_import.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

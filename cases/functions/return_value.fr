@@ -1,5 +1,5 @@
 // none
 
-int double(x) {
+int double(int x) {
     return x * 2
 }

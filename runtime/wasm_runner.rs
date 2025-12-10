@@ -19,8 +19,9 @@ fn main() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    // String memory management
-    let string_offset = Arc::new(Mutex::new(1024usize));
+    // String memory management - start at 64KB to avoid collision with WASM heap
+    // WASM heap_ptr starts at 1024, so we need to be well above that
+    let string_offset = Arc::new(Mutex::new(65536usize));
     
     // Shared storage for lists and sets
     let lists: Arc<Mutex<Vec<Vec<i64>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -303,6 +304,20 @@ fn main() -> Result<()> {
         if haystack.contains(needle.as_ref()) { 1 } else { 0 }
     });
 
+    let str_eq = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, 
+                                         ptr1: i32, len1: i32,
+                                         ptr2: i32, len2: i32| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        
+        if len1 != len2 {
+            return 0;
+        }
+        let slice1 = &data[ptr1 as usize..(ptr1 + len1) as usize];
+        let slice2 = &data[ptr2 as usize..(ptr2 + len2) as usize];
+        if slice1 == slice2 { 1 } else { 0 }
+    });
+
     let offset_clone = string_offset.clone();
     let lists_clone = lists.clone();
     let str_join = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, 
@@ -346,11 +361,46 @@ fn main() -> Result<()> {
         (ptr_out, len_out)
     });
 
-    let str_split = Func::wrap(&mut store, |_caller: Caller<'_, ()>, 
-                                             _str_ptr: i32, _str_len: i32,
-                                             _sep_ptr: i32, _sep_len: i32| -> i32 {
-        // Placeholder for string split - returns empty list for now
-        0
+    let lists_clone = lists.clone();
+    let offset_clone = string_offset.clone();
+    let str_split = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, 
+                                             str_ptr: i32, str_len: i32,
+                                             sep_ptr: i32, sep_len: i32| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        
+        let str_slice = &data[str_ptr as usize..(str_ptr + str_len) as usize];
+        let sep_slice = &data[sep_ptr as usize..(sep_ptr + sep_len) as usize];
+        
+        let s = String::from_utf8_lossy(str_slice).to_string();
+        let sep = String::from_utf8_lossy(sep_slice).to_string();
+        
+        // Create a new list for the split result
+        let mut lists_lock = lists_clone.lock().unwrap();
+        lists_lock.push(Vec::new());
+        let list_id = (lists_lock.len() - 1) as i32;
+        
+        // Split the string and add each part to the list
+        let parts: Vec<&str> = s.split(&sep).collect();
+        let mut offset = offset_clone.lock().unwrap();
+        
+        for part in parts {
+            let bytes = part.as_bytes();
+            let ptr = *offset as i32;
+            let len = bytes.len() as i32;
+            *offset += bytes.len();
+            
+            // Write string data to memory
+            mem.write(&mut caller, ptr as usize, bytes).unwrap();
+            
+            // Pack ptr and len into i64: (len << 32) | ptr
+            let packed: i64 = ((len as i64) << 32) | (ptr as i64);
+            if let Some(list_vec) = lists_lock.get_mut(list_id as usize) {
+                list_vec.push(packed);
+            }
+        }
+        
+        list_id
     });
 
     // List operations - using Vec stored in a shared state
@@ -376,8 +426,10 @@ fn main() -> Result<()> {
     let list_get = Func::wrap(&mut store, move |_: Caller<'_, ()>, list: i32, index: i64| -> i64 {
         let lists_lock = lists_clone.lock().unwrap();
         if let Some(list_vec) = lists_lock.get(list as usize) {
-            if (index as usize) < list_vec.len() {
-                return list_vec[index as usize];
+            let len = list_vec.len() as i64;
+            let actual_index = if index < 0 { len + index } else { index };
+            if actual_index >= 0 && (actual_index as usize) < list_vec.len() {
+                return list_vec[actual_index as usize];
             }
         }
         0
@@ -420,8 +472,28 @@ fn main() -> Result<()> {
     let sets_clone = sets.clone();
     let set_to_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, set_id: i32| -> (i32, i32) {
         let sets_lock = sets_clone.lock().unwrap();
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        
         let s = if let Some(set_ref) = sets_lock.get(set_id as usize) {
-            let mut elements: Vec<String> = set_ref.iter().map(|v| v.to_string()).collect();
+            let mut elements: Vec<String> = set_ref.iter().map(|&v| {
+                // Try to decode as packed string (len << 32 | ptr)
+                let ptr = (v & 0xFFFF_FFFF) as i32;
+                let len = ((v >> 32) & 0xFFFF_FFFF) as i32;
+                
+                // Check if it looks like a valid string pointer
+                if ptr >= 0 && len > 0 && len < 10000 && (ptr as usize + len as usize) <= data.len() {
+                    let start = ptr as usize;
+                    let end = (ptr + len) as usize;
+                    let slice = &data[start..end];
+                    // Only treat as string if it's valid UTF-8
+                    if let Ok(s) = std::str::from_utf8(slice) {
+                        return s.to_string();
+                    }
+                }
+                // Otherwise treat as integer
+                v.to_string()
+            }).collect();
             elements.sort();
             format!("{{{}}}", elements.join(", "))
         } else {
@@ -431,7 +503,6 @@ fn main() -> Result<()> {
         let bytes = s.as_bytes();
         let len = bytes.len() as i32;
 
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
         let mut offset = offset_clone.lock().unwrap();
         let ptr = *offset as i32;
         *offset += bytes.len();
@@ -582,6 +653,12 @@ fn main() -> Result<()> {
         std::process::exit(code);
     });
 
+    // Sleep function
+    let sleep_fn = Func::wrap(&mut store, |_: Caller<'_, ()>, seconds: f64| {
+        let duration = std::time::Duration::from_secs_f64(seconds);
+        std::thread::sleep(duration);
+    });
+
     let mut linker = Linker::new(&engine);
     linker.define(&store, "env", "print", print)?;
     linker.define(&store, "env", "println", println)?;
@@ -600,6 +677,7 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "str_replace", str_replace)?;
     linker.define(&store, "env", "str_get", str_get)?;
     linker.define(&store, "env", "str_contains", str_contains)?;
+    linker.define(&store, "env", "str_eq", str_eq)?;
     linker.define(&store, "env", "str_join", str_join)?;
     linker.define(&store, "env", "str_split", str_split)?;
     linker.define(&store, "env", "list_new", list_new)?;
@@ -621,6 +699,7 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "file_write", file_write)?;
     linker.define(&store, "env", "file_close", file_close)?;
     linker.define(&store, "env", "exit_process", exit_process)?;
+    linker.define(&store, "env", "sleep", sleep_fn)?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     let main = instance.get_typed_func::<(), ()>(&mut store, "main")?;

@@ -554,6 +554,7 @@ def main():
                 native_output = None
 
     # Run Wasm emission command (unless skipped)
+    from pathlib import Path as _Path
     wasm_error = None
     wasm_output = None
     if skip_wasm:
@@ -561,9 +562,9 @@ def main():
     else:
         wasm_dir = tempfile.mkdtemp(prefix='fr-wasm-')
         os.makedirs(wasm_dir, exist_ok=True)
-        wasm_dest = Path(wasm_dir) / 'output.wasm'
+        wasm_dest = _Path(wasm_dir) / 'output.wasm'
         wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', test_filename, '-o', str(wasm_dest)]
-        repo_root = Path(__file__).parent.parent
+        repo_root = _Path(__file__).parent.parent
         try:
             # Compile to WASM
             result = subprocess.run(
