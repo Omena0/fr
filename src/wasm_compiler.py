@@ -631,6 +631,7 @@ class WasmCompiler:
         # Second pass: track stack operations to infer types
         type_stack_sim = []
         value_type_tracker = {}  # Track what type of value each stack position/local holds
+        explicit_const_locals = set()  # Track locals that have been assigned via STORE_CONST_*
         for line in bytecode_lines:
             line = line.strip()
             if line.startswith('.func'):
@@ -792,17 +793,25 @@ class WasmCompiler:
                         type_stack_sim[-1] == 'i32' and type_stack_sim[-2] == 'i32' and
                         len(type_stack_sim) - 1 in value_type_tracker and value_type_tracker[len(type_stack_sim) - 1] == 'str'):
                         # String: mark local as str type
-                        local_inferred_types[idx] = 'str'
+                        # Only overwrite if not explicitly assigned via STORE_CONST
+                        if idx not in explicit_const_locals:
+                            local_inferred_types[idx] = 'str'
                         type_stack_sim.pop()  # len
 
                     else:
-                        local_inferred_types[idx] = type_stack_sim[-1]
-                        # Track the value type (set, list, bool, etc.)
-                        stack_pos = len(type_stack_sim) - 1
-                        if stack_pos in value_type_tracker:
-                            self.local_value_types[idx] = value_type_tracker[stack_pos]
-                        elif type_stack_sim[-1] == 'i32':
-                            self.local_value_types[idx] = 'bool'
+                        # Only infer type if the local hasn't been explicitly declared or STORE_CONST assigned
+                        # Explicit declarations in .local should be trusted
+                        # Also respect STORE_CONST_* assignments which are explicit
+                        if (idx not in self.functions.get(self.current_function, {}).get('locals', {}) and
+                            idx not in explicit_const_locals):
+                            inferred_type = type_stack_sim[-1]
+                            local_inferred_types[idx] = inferred_type
+                            # Track the value type (set, list, bool, etc.)
+                            stack_pos = len(type_stack_sim) - 1
+                            if stack_pos in value_type_tracker:
+                                self.local_value_types[idx] = value_type_tracker[stack_pos]
+                            elif type_stack_sim[-1] == 'i32':
+                                self.local_value_types[idx] = 'bool'
 
                     type_stack_sim.pop()  # ptr
 
@@ -963,13 +972,32 @@ class WasmCompiler:
                 type_stack_sim.append('i32')
                 value_type_tracker[len(type_stack_sim) - 1] = 'bool'
 
+            elif opcode == 'STORE_CONST_I64':
+                # STORE_CONST_I64 slot1 val1 [slot2 val2 ...] - directly stores i64 to local(s)
+                # Mark local as i64 type and track as explicitly assigned
+                for i in range(0, len(parts) - 1, 2):
+                    if i + 1 < len(parts) and parts[i + 1].isdigit():
+                        idx = int(parts[i + 1])
+                        local_inferred_types[idx] = 'i64'
+                        explicit_const_locals.add(idx)
+
+            elif opcode == 'STORE_CONST_F64':
+                # STORE_CONST_F64 slot val - directly stores f64 to local
+                # Mark local as f64 type and track as explicitly assigned
+                for i in range(0, len(parts) - 1, 2):
+                    if i + 1 < len(parts) and parts[i + 1].isdigit():
+                        idx = int(parts[i + 1])
+                        local_inferred_types[idx] = 'f64'
+                        explicit_const_locals.add(idx)
+
             elif opcode == 'STORE_CONST_BOOL':
                 # STORE_CONST_BOOL slot val - directly stores bool (i32) to local
-                # Mark local as i32 type
+                # Mark local as i32 type and track as explicitly assigned
                 for i in range(0, len(parts) - 1, 2):
                     if i + 1 < len(parts):
                         idx = int(parts[i + 1])
                         local_inferred_types[idx] = 'i32'
+                        explicit_const_locals.add(idx)
 
             elif opcode == 'TO_BOOL':
                 # TO_BOOL converts any value to boolean (i32)
@@ -1123,6 +1151,87 @@ class WasmCompiler:
                             type_stack_sim.append('i32')
                         else:
                             type_stack_sim.append(final_type)
+
+            # Binary arithmetic operations
+            elif opcode in ['ADD_CONST_I64', 'ADD_I64', 'ADD_F64']:
+                # ADD_CONST_I64: pop 1, push 1
+                # ADD_I64: pop 2, push 1
+                # ADD_F64: pop 2, push 1
+                if opcode == 'ADD_CONST_I64':
+                    if type_stack_sim:
+                        if type_stack_sim[-1] == 'f64':
+                            type_stack_sim[-1] = 'f64'
+                        else:
+                            type_stack_sim[-1] = 'i64'
+                else:
+                    # ADD_I64 or ADD_F64
+                    if len(type_stack_sim) >= 2:
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                    type_stack_sim.append('f64' if opcode == 'ADD_F64' else 'i64')
+
+            elif opcode in ['SUB_CONST_I64', 'SUB_I64', 'SUB_F64']:
+                if len(type_stack_sim) >= 2:
+                    type_stack_sim.pop()
+                    type_stack_sim.pop()
+                type_stack_sim.append('f64' if 'F64' in opcode else 'i64')
+
+            elif opcode in ['MUL_CONST_I64', 'MUL_I64', 'MUL_F64']:
+                # Check if multiplying with f64
+                if type_stack_sim and type_stack_sim[-1] == 'f64':
+                    type_stack_sim[-1] = 'f64'
+                elif len(type_stack_sim) >= 2:
+                    type_stack_sim.pop()
+                    type_stack_sim.pop()
+                    type_stack_sim.append('f64' if 'F64' in opcode else 'i64')
+                else:
+                    type_stack_sim.append('f64' if 'F64' in opcode else 'i64')
+
+            elif opcode in ['DIV_CONST_I64', 'DIV_I64', 'DIV_F64']:
+                # For DIV_I64: division of two i64s returns f64 (Python-style true division)
+                # For DIV_F64: f64 division returns f64
+                # For DIV_CONST_I64: same as DIV_I64 but with a constant
+                if opcode == 'DIV_I64':
+                    # Pop 2 operands, push f64
+                    if len(type_stack_sim) >= 2:
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                    type_stack_sim.append('f64')
+                elif opcode == 'DIV_CONST_I64':
+                    # Pop 1 operand, push f64
+                    if len(type_stack_sim) >= 1:
+                        type_stack_sim.pop()
+                    type_stack_sim.append('f64')
+                elif opcode == 'DIV_F64':
+                    # Pop 2 operands, push f64
+                    if len(type_stack_sim) >= 2:
+                        type_stack_sim.pop()
+                        type_stack_sim.pop()
+                    type_stack_sim.append('f64')
+
+            elif opcode in ['MOD_CONST_I64', 'MOD_I64']:
+                # Modulo always returns i64
+                if type_stack_sim:
+                    type_stack_sim.pop()
+                if len(type_stack_sim) >= 1 and opcode == 'MOD_I64':
+                    type_stack_sim.pop()
+                type_stack_sim.append('i64')
+
+            elif opcode == 'ADD_STR':
+                # String concatenation: pop 4 i32s (2 strings), push 2 i32s (string)
+                for _ in range(min(4, len(type_stack_sim))):
+                    type_stack_sim.pop()
+                type_stack_sim.append('i32')  # ptr
+                type_stack_sim.append('i32')  # len
+                value_type_tracker[len(type_stack_sim) - 2] = 'str'
+                value_type_tracker[len(type_stack_sim) - 1] = 'str'
+
+            elif opcode in ['LOAD2_ADD_I64', 'LOAD2_MUL_I64', 'LOAD2_DIV_I64']:
+                # These load 2 vars, perform operation, push result
+                type_stack_sim.append('f64' if 'DIV' in opcode else 'i64')
+
+            elif opcode == 'LOAD2_CMP_LT':
+                type_stack_sim.append('i32')
 
         # Update local_vars with inferred types (but don't overwrite explicit types from bytecode)
         for idx, inferred_type in local_inferred_types.items():
@@ -1510,8 +1619,19 @@ class WasmCompiler:
         # === Constants ===
         if opcode == 'ADD_CONST_I64':
             const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.add", indent)
+            # Ensure the top of stack is i64 before adding
+            if self.type_stack and self.type_stack[-1] == 'f64':
+                self.emit(f"f64.const {const_val}", indent)
+                self.emit("f64.add", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
+                self.type_stack.append('f64')
+            else:
+                self.emit(f"i64.const {const_val}", indent)
+                self.emit("i64.add", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
+                self.type_stack.append('i64')
 
         elif opcode == 'ADD_F64':
             self.emit("f64.add", indent)
@@ -1521,6 +1641,20 @@ class WasmCompiler:
             self.type_stack.append('f64')
 
         elif opcode == 'ADD_I64':
+            # Check if operands are f64 and convert if needed
+            if len(self.type_stack) >= 2:
+                # Top is second operand, below is first
+                if self.type_stack[-1] == 'f64':
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                if self.type_stack[-2] == 'f64':
+                    # Save result, convert bottom operand, restore result
+                    self.emit("local.set $temp_i64", indent)
+                    self.type_stack.pop()
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                    self.emit("local.get $temp_i64", indent)
+                    self.type_stack.append('i64')
             self.emit("i64.add", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
@@ -2195,6 +2329,9 @@ class WasmCompiler:
                 self.type_stack[-1] = 'f64'
             self.emit(f"f64.const {const_val}", indent)
             self.emit("f64.div", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('f64')
 
         elif opcode == 'DIV_F64':
             # Convert operands to f64 if needed
@@ -2217,11 +2354,26 @@ class WasmCompiler:
             self.type_stack.append('f64')
 
         elif opcode == 'DIV_I64':
-            self.emit("i64.div_s", indent)
+            # Integer division in fr returns float (Python-style true division)
+            # Convert both operands to f64, perform f64 division
+            if len(self.type_stack) >= 2:
+                # Top operand
+                if self.type_stack[-1] == 'i64':
+                    self.emit("f64.convert_i64_s", indent)
+                    self.type_stack[-1] = 'f64'
+                # Bottom operand
+                if self.type_stack[-2] == 'i64':
+                    self.emit("local.set $temp_f64", indent)
+                    self.type_stack.pop()
+                    self.emit("f64.convert_i64_s", indent)
+                    self.type_stack[-1] = 'f64'
+                    self.emit("local.get $temp_f64", indent)
+                    self.type_stack.append('f64')
+            self.emit("f64.div", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i64')
+            self.type_stack.append('f64')
 
         elif opcode == 'DUP':
             # Duplicate the top stack value
@@ -2610,8 +2762,13 @@ class WasmCompiler:
             var_ref2 = self._get_var_ref(var2)
             self.emit(f"local.get {var_ref1}", indent)
             self.emit(f"local.get {var_ref2}", indent)
-            self.emit("i64.div_s", indent)
-            self.type_stack.append('i64')
+            # Integer division in fr returns float (Python-style true division)
+            self.emit("f64.convert_i64_s", indent)
+            self.emit("local.set $temp_f64", indent)
+            self.emit("f64.convert_i64_s", indent)
+            self.emit("local.get $temp_f64", indent)
+            self.emit("f64.div", indent)
+            self.type_stack.append('f64')
 
         elif opcode == 'LOAD2_MUL_I64':
             var1 = int(args[0])
@@ -2645,13 +2802,28 @@ class WasmCompiler:
             const_val = args[0]
             self.emit(f"i64.const {const_val}", indent)
             self.emit("i64.rem_s", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+            self.type_stack.append('i64')
 
         elif opcode == 'MOD_I64':
+            # Ensure both operands are i64, converting f64 if needed
+            if len(self.type_stack) >= 2:
+                if self.type_stack[-1] == 'f64':
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                if self.type_stack[-2] == 'f64':
+                    self.emit("local.set $temp_i64", indent)
+                    self.type_stack.pop()
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                    self.emit("local.get $temp_i64", indent)
+                    self.type_stack.append('i64')
             self.emit("i64.rem_s", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'MUL_CONST_I64':
             const_val = args[0]
@@ -2671,6 +2843,18 @@ class WasmCompiler:
             self.type_stack.append('f64')
 
         elif opcode == 'MUL_I64':
+            # Ensure both operands are i64, converting f64 if needed
+            if len(self.type_stack) >= 2:
+                if self.type_stack[-1] == 'f64':
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                if self.type_stack[-2] == 'f64':
+                    self.emit("local.set $temp_i64", indent)
+                    self.type_stack.pop()
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                    self.emit("local.get $temp_i64", indent)
+                    self.type_stack.append('i64')
             self.emit("i64.mul", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
@@ -2736,6 +2920,14 @@ class WasmCompiler:
                                 # Converting i64 to i32
                                 self.emit("i32.wrap_i64", indent)
                                 self.type_stack[-1] = 'i32'
+                            elif existing_type == 'i64' and stored_type == 'f64':
+                                # Converting f64 to i64
+                                self.emit("i64.trunc_f64_s", indent)
+                                self.type_stack[-1] = 'i64'
+                            elif existing_type == 'f64' and stored_type == 'i64':
+                                # Converting i64 to f64 (python-style true division targets float locals)
+                                self.emit("f64.convert_i64_s", indent)
+                                self.type_stack[-1] = 'f64'
                         
                         if not (existing_type and existing_type.startswith('struct:')):
                             # Don't update type if bytecode already specified it
@@ -2817,6 +3009,18 @@ class WasmCompiler:
             self.type_stack.append('f64')
 
         elif opcode == 'SUB_I64':
+            # Ensure both operands are i64, converting f64 if needed
+            if len(self.type_stack) >= 2:
+                if self.type_stack[-1] == 'f64':
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                if self.type_stack[-2] == 'f64':
+                    self.emit("local.set $temp_i64", indent)
+                    self.type_stack.pop()
+                    self.emit("i64.trunc_f64_s", indent)
+                    self.type_stack[-1] = 'i64'
+                    self.emit("local.get $temp_i64", indent)
+                    self.type_stack.append('i64')
             self.emit("i64.sub", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
