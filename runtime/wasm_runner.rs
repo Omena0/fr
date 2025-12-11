@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     });
 
     let offset_clone = string_offset.clone();
-    let bool_to_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, value: i32| -> (i32, i32) {
+    let bool_to_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, value: i64| -> (i32, i32) {
         let s = if value != 0 { "true" } else { "false" };
         let bytes = s.as_bytes();
         let len = bytes.len() as i32;

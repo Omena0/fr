@@ -37,16 +37,33 @@ class WasmCompiler:
             'fread': ('file_read', ['i32', 'i32'], ['i32', 'i32']),
             'fwrite': ('file_write', [], ['i32', 'i32', 'i32']),
             'fclose': ('file_close', [], ['i32']),
+            # Web/WASM Functions - DOM
+            'dom_create': ('dom_create', ['i32'], ['i32', 'i32']),
+            'dom_set_text': ('dom_set_text', [], ['i32', 'i32', 'i32']),
+            'dom_get_text': ('dom_get_text', ['i32', 'i32'], ['i32']),
+            'dom_query': ('dom_query', ['i32'], ['i32', 'i32']),
+            # Web/WASM Functions - Timers (variadic - accept variable args to pass to callback)
+            'set_timeout': ('set_timeout', ['i32'], []),  # Returns i32, params handled specially
+            'set_interval': ('set_interval', ['i32'], []),
+            'clear_timeout': ('clear_timeout', [], ['i32']),
+            'clear_interval': ('clear_interval', [], ['i32']),
         }
 
         # Exception handling
         self.try_stack: List[Tuple[str, str]] = []  # Stack of (error_type, handler_label)
+        self.global_str_bases: Set[int] = set()  # Base indices for string globals (ptr, len)
 
         # Bytecode version
         self.version = 1
 
         # Allocate memory for struct storage (start after string constants)
         self.heap_offset = 1024  # Start heap at 1KB
+        
+        # Track function references for callbacks
+        self.callback_functions: Set[str] = set()  # Functions used as callbacks
+        
+        # Track timer function signatures (variadic)
+        self.timer_signatures: Dict[str, str] = {}  # Maps timer func name to param signature
 
     def push_type(self, wasm_type: str, struct_id: Optional[int] = None):
         """Push a type onto the type stack and track struct ID if applicable"""
@@ -109,6 +126,12 @@ class WasmCompiler:
 
         # Parse bytecode and build function metadata
         self._parse_bytecode_structure(lines)
+        
+        # Detect which imports are actually used
+        self._collect_imports_used(lines)
+        
+        # Pre-pass to determine timer function signatures (variadic)
+        self._analyze_timer_signatures(lines)
 
         # Generate WAT module
         self.emit("(module", 0)
@@ -116,8 +139,8 @@ class WasmCompiler:
         # Import memory management functions (for string/list operations)
         self._emit_imports()
 
-        # Define memory (start with 1 page = 64KB, max 100 pages)
-        self.emit("(memory (export \"memory\") 16 100)", 1)  # 16 pages = 1MB initial memory
+        # Define memory (start with 64KB * 64 = 4MB, allow growth up to 1024 pages ~64MB)
+        self.emit("(memory (export \"memory\") 64 1024)", 1)
 
         # Define globals
         self._emit_globals()
@@ -139,14 +162,119 @@ class WasmCompiler:
             "entry_point": "main" if "main" in self.functions else None,
             "imports": list(self.imports),
             "memory_size": self.memory_offset,
-            "string_constants": self.string_constants
+            "string_constants": self.string_constants,
+            "callbacks": list(self.callback_functions)
         }
 
         return '\n'.join(self.output), metadata
 
+    def _collect_imports_used(self, lines: List[str]):
+        """Scan bytecode to determine which imports are actually used"""
+        for line in lines:
+            line = line.strip()
+            
+            # Check for FUNC_REF markers to track callback functions
+            if line.startswith('# FUNC_REF '):
+                parts = line.split()
+                if len(parts) >= 3:
+                    func_name = parts[2]
+                    self.callback_functions.add(func_name)
+                continue
+            
+            if not line or line.startswith('#'):
+                continue
+            
+            # Check for CALL instructions that use builtin functions
+            if line.startswith('CALL '):
+                parts = line.split()
+                if len(parts) >= 2:
+                    func_name = parts[1]
+                    # Check if this is a builtin function in our map
+                    if func_name in self.builtin_map:
+                        self.imports.add(func_name)
+    
+    def _analyze_timer_signatures(self, lines: List[str]):
+        """Pre-pass to determine variadic timer function signatures"""
+        # Build a simple type stack to track what's on stack at each CALL
+        type_stack = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('.'):
+                continue
+            
+            parts = line.split()
+            if not parts:
+                continue
+            
+            opcode = parts[0]
+            
+            # Track constants being pushed
+            if opcode == 'CONST_I64':
+                # Can have multiple values: CONST_I64 0 10 pushes two i64 values
+                for _ in parts[1:]:
+                    type_stack.append('i64')
+            elif opcode == 'CONST_F64':
+                type_stack.append('f64')
+            elif opcode == 'LOAD' or opcode == 'LOAD_GLOBAL':
+                # Could be any type, assume i64 for simplicity
+                type_stack.append('i64')
+            elif opcode in ('ADD', 'SUB', 'MUL', 'DIV', 'MOD'):
+                # Binary ops pop 2, push 1
+                if len(type_stack) >= 2:
+                    type_stack.pop()
+                    type_stack.pop()
+                type_stack.append('i64')
+            elif opcode == 'CALL':
+                func_name = parts[1]
+                arg_count = int(parts[2]) if len(parts) > 2 else 0
+                
+                # Check if it's a timer function
+                if func_name in ('set_timeout', 'set_interval'):
+                    # Determine signature from stack
+                    if len(type_stack) >= arg_count:
+                        # Timer functions: (callback_idx: i32, ms: i32, ...args: i32)
+                        # All callback args are i32 (will be converted at call site if needed)
+                        param_types = ['i32'] * arg_count
+                        sig_parts = ' '.join(f'(param {t})' for t in param_types)
+                        self.timer_signatures[func_name] = sig_parts
+                
+                # Pop args and push result (simplified)
+                for _ in range(min(arg_count, len(type_stack))):
+                    type_stack.pop()
+                type_stack.append('i32')  # Most functions return i32
+            elif opcode == 'POP':
+                if type_stack:
+                    type_stack.pop()
+            elif opcode in ('STORE', 'STORE_GLOBAL'):
+                if type_stack:
+                    type_stack.pop()
+
     def _emit_imports(self):
         """Emit import declarations for runtime functions"""
         self.emit_comment("Runtime imports for complex operations", 1)
+
+        # DOM/Web functions (only emit if used)
+        if 'dom_create' in self.imports:
+            self.emit('(import "env" "dom_create" (func $dom_create (param i32 i32) (result i32)))', 1)
+        if 'dom_set_text' in self.imports:
+            self.emit('(import "env" "dom_set_text" (func $dom_set_text (param i32 i32 i32)))', 1)
+        if 'dom_get_text' in self.imports:
+            self.emit('(import "env" "dom_get_text" (func $dom_get_text (param i32) (result i32 i32)))', 1)
+        if 'dom_query' in self.imports:
+            self.emit('(import "env" "dom_query" (func $dom_query (param i32 i32) (result i32)))', 1)
+
+        # Timer functions (only emit if used) - signatures determined dynamically
+        if 'set_timeout' in self.imports:
+            sig = self.timer_signatures.get('set_timeout', '(param i32 i32)')
+            self.emit(f'(import "env" "set_timeout" (func $set_timeout {sig} (result i32)))', 1)
+        if 'set_interval' in self.imports:
+            sig = self.timer_signatures.get('set_interval', '(param i32 i32)')
+            self.emit(f'(import "env" "set_interval" (func $set_interval {sig} (result i32)))', 1)
+        if 'clear_timeout' in self.imports:
+            self.emit('(import "env" "clear_timeout" (func $clear_timeout (param i32)))', 1)
+        if 'clear_interval' in self.imports:
+            self.emit('(import "env" "clear_interval" (func $clear_interval (param i32)))', 1)
 
         # Import console output
         self.emit('(import "env" "print" (func $print (param i32 i32)))', 1)
@@ -161,7 +289,7 @@ class WasmCompiler:
         self.emit('(import "env" "str_to_f64" (func $str_to_f64 (param i32 i32) (result f64)))', 1)
         self.emit('(import "env" "i64_to_str" (func $i64_to_str (param i64) (result i32 i32)))', 1)
         self.emit('(import "env" "f64_to_str" (func $f64_to_str (param f64) (result i32 i32)))', 1)
-        self.emit('(import "env" "bool_to_str" (func $bool_to_str (param i32) (result i32 i32)))', 1)
+        self.emit('(import "env" "bool_to_str" (func $bool_to_str (param i64) (result i32 i32)))', 1)
         self.emit('(import "env" "list_to_str" (func $list_to_str (param i32) (result i32 i32)))', 1)
         self.emit('(import "env" "set_to_str" (func $set_to_str (param i32) (result i32 i32)))', 1)
         self.emit('(import "env" "str_upper" (func $str_upper (param i32 i32) (result i32 i32)))', 1)
@@ -229,6 +357,8 @@ class WasmCompiler:
     def _parse_bytecode_structure(self, lines: List[str]):
         """Parse bytecode to extract function metadata"""
         current_func = None
+        global_count = 0
+        referenced_globals: Set[int] = set()
 
         for line in lines:
             line = line.strip()
@@ -267,6 +397,25 @@ class WasmCompiler:
                     self.struct_defs[struct_id]['name'] = struct_name
                 continue
 
+            # Global variable declaration: .global <name> <type>
+            if line.startswith('.global '):
+                parts = line.split()
+                if len(parts) >= 3:
+                    fr_type = parts[2]
+                else:
+                    fr_type = 'i64'
+                if fr_type == 'str':
+                    # Allocate two globals: base for ptr, base+1 for len
+                    self.global_vars[global_count] = 'i32'
+                    self.global_vars[global_count + 1] = 'i32'
+                    self.global_str_bases.add(global_count)
+                    global_count += 2
+                else:
+                    wasm_type = self._map_type_to_wasm(fr_type)
+                    self.global_vars[global_count] = wasm_type
+                    global_count += 1
+                continue
+
             # Function definition
             if line.startswith('.func'):
                 parts = line.split()
@@ -303,8 +452,24 @@ class WasmCompiler:
                 self.functions[current_func]['locals'][local_idx] = local_type
                 continue
 
+            # Track referenced globals to backfill missing declarations
+            if line.startswith('LOAD_GLOBAL ') or line.startswith('STORE_GLOBAL '):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    referenced_globals.add(int(parts[1]))
+
+        # Ensure we declare globals for any referenced indices not explicitly declared
+        if referenced_globals:
+            max_idx = max(referenced_globals)
+            for idx in range(max_idx + 1):
+                if idx not in self.global_vars:
+                    # Default to i64 to safely hold packed values
+                    self.global_vars[idx] = 'i64'
+
     def _map_type_to_wasm(self, fr_type: str) -> str:
         """Map fr type to WASM type"""
+        if fr_type in ('i32', 'i64', 'f64'):
+            return fr_type
         type_map = {
             'i64': 'i64',
             'f64': 'f64',
@@ -340,7 +505,13 @@ class WasmCompiler:
         param_count = len(func_meta['params'])
 
         # Start function definition
-        export_attr = ' (export "main")' if func_name == "main" else ""
+        export_attr = ''
+        if func_name == "main":
+            export_attr = ' (export "main")'
+        elif func_name in self.callback_functions:
+            # Export callback functions so they can be called from JavaScript
+            export_attr = f' (export "{func_name}")'
+        
         params_str = ""
 
         # Add parameters
@@ -408,13 +579,41 @@ class WasmCompiler:
         # where list literals are stored directly into locals (common in tests).
         scan_in_func = False
         lines = [l.strip() for l in bytecode_lines]
+        last_load_idx = None
         for i, line in enumerate(lines):
             if line.startswith('.func'):
                 parts = line.split()
                 scan_in_func = (parts[1] == func_name)
+                last_load_idx = None
                 continue
             if not scan_in_func:
                 continue
+
+            if line.startswith('LOAD ') and len(line.split()) == 2 and line.split()[1].isdigit():
+                last_load_idx = int(line.split()[1])
+
+            # DOM element handles are i32; if dom_create/dom_query result is stored, mark it
+            if line.startswith('CALL dom_create') or line.startswith('CALL dom_query'):
+                j = i + 1
+                while j < len(lines) and (lines[j] == '' or lines[j].startswith('#') or lines[j].startswith('.line')):
+                    j += 1
+                if j < len(lines) and lines[j].startswith('STORE '):
+                    parts = lines[j].split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        idx = int(parts[1])
+                        local_inferred_types[idx] = 'i32'
+                        rel_idx = idx - param_count
+                        if rel_idx >= 0:
+                            self.local_vars[rel_idx] = 'i32'
+
+            # If we call dom_set_text/dom_set_html after a single LOAD, treat that LOAD as dom handle
+            if line.startswith('CALL dom_set_text') or line.startswith('CALL dom_set_html'):
+                if last_load_idx is not None:
+                    local_inferred_types[last_load_idx] = 'i32'
+                    rel_idx = last_load_idx - param_count
+                    if rel_idx >= 0:
+                        self.local_vars[rel_idx] = 'i32'
+
             if line.startswith('LIST_NEW') or line.startswith('LIST_NEW_I64') or line.startswith('LIST_NEW_STR'):
                 # Look ahead for next non-empty, non-comment line
                 j = i + 1
@@ -860,8 +1059,29 @@ class WasmCompiler:
                 # Parse: CALL func_name arg_count
                 if len(parts) >= 2:
                     call_func_name = parts[1]
-                    # Look up return type
-                    if call_func_name in self.functions:
+
+                    # Handle builtin imports first so stack simulation matches real emission
+                    if call_func_name in self.builtin_map:
+                        _, return_types, param_types = self.builtin_map[call_func_name]
+
+                        # Pop arguments according to the builtin signature
+                        for _ in param_types:
+                            if type_stack_sim:
+                                type_stack_sim.pop()
+
+                        # Push return values according to the signature
+                        if return_types == ['i32', 'i32']:
+                            # Treat double i32 return as string (ptr, len)
+                            type_stack_sim.append('i32')
+                            type_stack_sim.append('i32')
+                            value_type_tracker[len(type_stack_sim) - 2] = 'str'
+                            value_type_tracker[len(type_stack_sim) - 1] = 'str'
+                        else:
+                            for ret_type in return_types:
+                                type_stack_sim.append(ret_type)
+
+                    # Handle user-defined functions
+                    elif call_func_name in self.functions:
                         return_type = self.functions[call_func_name].get('return_type', 'void')
                         param_count_call = len(self.functions[call_func_name].get('params', []))
                         # Pop arguments from type_stack_sim
@@ -1482,6 +1702,7 @@ class WasmCompiler:
 
         elif opcode == 'CALL':
             func_name = args[0]
+            arg_count = int(args[1]) if len(args) > 1 else 0
 
             # Handle special built-in functions
             if func_name == 'assert':
@@ -1497,22 +1718,110 @@ class WasmCompiler:
 
             if func_name in builtin_map:
                 import_name, return_types, param_types = builtin_map[func_name]
+                
+                # Special handling for variadic timer functions
+                if func_name in ('set_timeout', 'set_interval') and len(param_types) == 0:
+                    # Variadic function - all parameters are i32
+                    # Format: callback_idx (i32), milliseconds (i32), ...callback_args (all i32)
+                    param_types = ['i32'] * arg_count
+                    # Store the signature for import generation
+                    sig_parts = ' '.join(f'(param {t})' for t in param_types)
+                    self.timer_signatures[func_name] = sig_parts
+                
+                arg_count_to_use = len(param_types)
                 # Ensure args match expected WASM widths; convert on stack if needed
-                for param_type in reversed(param_types):
-                    if not self.type_stack:
-                        break
-                    actual = self.type_stack[-1]
-                    # Convert i64 -> i32 for imports expecting i32
+                # We must perform conversions against the correct runtime stack value.
+                # The value stack currently contains all call arguments in order of push
+                # (first arg at lower index, last arg at top). We'll examine the
+                # top-N slice and perform conversions from last->first, saving
+                # intermediate top values into temps when converting non-top args.
+                arg_count = len(param_types)
+                # Snapshot the argument types (bottom..top within the args)
+                # IMPORTANT: Make a COPY so we don't mutate during iteration
+                if len(self.type_stack) >= arg_count:
+                    arg_types_snapshot = list(self.type_stack[-arg_count:])
+                else:
+                    arg_types_snapshot = list(self.type_stack[:])
+
+                # Helper to allocate temp local names for saves (i32 and i64 variants)
+                temp_names_i32 = ["$temp", "$temp2"]
+                temp_names_i64 = ["$temp_i64"]
+
+                # Track what's actually on the stack as we convert (start with snapshot)
+                current_stack_types = list(arg_types_snapshot)
+
+                # Process parameters in reversed order (last param -> first)
+                for idx_rev, param_type in enumerate(reversed(param_types)):
+                    # idx_rev==0 -> top of stack
+                    pos_from_top = idx_rev
+                    # Determine actual type from current stack state
+                    if pos_from_top < len(current_stack_types):
+                        actual = current_stack_types[-1 - pos_from_top]
+                    else:
+                        actual = None
+
+                    if actual is None:
+                        continue
+
+                    # If conversion is needed for this argument
                     if param_type == 'i32' and actual == 'i64':
-                        self.emit("i32.wrap_i64", indent)
-                        self.type_stack[-1] = 'i32'
-                    # Convert i32 -> i64 when lib expects i64
+                        # If it's the top argument, emit conversion directly
+                        if pos_from_top == 0:
+                            self.emit("i32.wrap_i64", indent)
+                        else:
+                            # Save top `pos_from_top` values into temps so we can
+                            # expose the target value, convert it, then restore.
+                            saves = []
+                            for s in range(pos_from_top):
+                                save_type = current_stack_types[-1 - s]
+                                # Use appropriate temp based on type
+                                if save_type == 'i64':
+                                    temp_idx = min(s, len(temp_names_i64) - 1)
+                                    temp = temp_names_i64[temp_idx]
+                                else:
+                                    temp_idx = min(s, len(temp_names_i32) - 1)
+                                    temp = temp_names_i32[temp_idx]
+                                self.emit(f"local.set {temp}", indent)
+                                saves.append((temp, save_type))
+                            # Now the target is at top; emit conversion
+                            self.emit("i32.wrap_i64", indent)
+                            # Restore saved values (in reverse of saving)
+                            for temp, save_type in reversed(saves):
+                                self.emit(f"local.get {temp}", indent)
+
+                        # Update current stack tracking
+                        current_stack_types[-1 - pos_from_top] = 'i32'
+                        if self.type_stack:
+                            # Update the real stack top mapping accordingly
+                            self.type_stack[-1 - pos_from_top] = 'i32'
+
                     elif param_type == 'i64' and actual == 'i32':
-                        self.emit("i64.extend_i32_u", indent)
-                        self.type_stack[-1] = 'i64'
-                    # Pop the consumed param from the stack (call consumes params)
-                    if self.type_stack:
-                        self.type_stack.pop()
+                        if pos_from_top == 0:
+                            self.emit("i64.extend_i32_u", indent)
+                        else:
+                            saves = []
+                            for s in range(pos_from_top):
+                                save_type = current_stack_types[-1 - s]
+                                # Use appropriate temp based on type
+                                if save_type == 'i64':
+                                    temp_idx = min(s, len(temp_names_i64) - 1)
+                                    temp = temp_names_i64[temp_idx]
+                                else:
+                                    temp_idx = min(s, len(temp_names_i32) - 1)
+                                    temp = temp_names_i32[temp_idx]
+                                self.emit(f"local.set {temp}", indent)
+                                saves.append((temp, save_type))
+                            self.emit("i64.extend_i32_u", indent)
+                            for temp, save_type in reversed(saves):
+                                self.emit(f"local.get {temp}", indent)
+
+                        current_stack_types[-1 - pos_from_top] = 'i64'
+                        if self.type_stack:
+                            self.type_stack[-1 - pos_from_top] = 'i64'
+
+                # Pop the consumed params from the simulated type stack
+                for _ in range(min(arg_count_to_use, len(self.type_stack))):
+                    self.type_stack.pop()
                 # Emit call and push return types
                 self.emit(f"call ${import_name}", indent)
                 for ret_type in return_types:
@@ -1523,6 +1832,34 @@ class WasmCompiler:
                 func_meta = self.functions[func_name]
                 param_count = len(func_meta['params'])
                 return_type = func_meta['return_type']
+                
+                # Convert parameters to match expected types
+                # Walk through params from last to first (stack is LIFO)
+                for i in range(param_count - 1, -1, -1):
+                    param_name, param_type = func_meta['params'][i]
+                    if i < len(self.type_stack):
+                        actual_type = self.type_stack[-(param_count - i)]  # Get the correct stack position
+                        
+                        if param_type == 'str':
+                            # Expect (i32, i32) for string
+                            # If actual is not a string pair, this is an error
+                            pass
+                        else:
+                            expected_wasm = self._map_type_to_wasm(param_type)
+                            if actual_type != expected_wasm:
+                                # Need conversion
+                                if expected_wasm == 'i64' and actual_type == 'i32':
+                                    # Extend i32 to i64
+                                    # We need to apply this at the right stack position
+                                    # For now, assume conversions happen at top of stack
+                                    if param_count - i == 1:  # This is the top parameter
+                                        self.emit("i64.extend_i32_u", indent)
+                                        self.type_stack[-1] = 'i64'
+                                elif expected_wasm == 'i32' and actual_type == 'i64':
+                                    # Wrap i64 to i32
+                                    if param_count - i == 1:
+                                        self.emit("i32.wrap_i64", indent)
+                                        self.type_stack[-1] = 'i32'
                 
                 # Pop params from type stack (consumed by call)
                 for i, (param_name, param_type) in enumerate(func_meta['params']):
@@ -2288,9 +2625,21 @@ class WasmCompiler:
 
         elif opcode == 'LOAD_GLOBAL':
             global_idx = int(args[0])
-            self.emit(f"global.get $g{global_idx}", indent)
-            global_type = self.global_vars.get(global_idx, 'i64')
-            self.type_stack.append(self._map_type_to_wasm(global_type))
+            # If this index belongs to a string global, load ptr and len
+            base_idx = None
+            for b in self.global_str_bases:
+                if global_idx == b or global_idx == b + 1:
+                    base_idx = b
+                    break
+            if base_idx is not None:
+                self.emit(f"global.get $g{base_idx}", indent)
+                self.emit(f"global.get $g{base_idx + 1}", indent)
+                self.type_stack.append('i32')  # ptr
+                self.type_stack.append('i32')  # len
+            else:
+                self.emit(f"global.get $g{global_idx}", indent)
+                global_type = self.global_vars.get(global_idx, 'i64')
+                self.type_stack.append(self._map_type_to_wasm(global_type))
 
         elif opcode == 'MOD_CONST_I64':
             const_val = args[0]
@@ -2435,9 +2784,25 @@ class WasmCompiler:
 
         elif opcode == 'STORE_GLOBAL':
             global_idx = int(args[0])
-            self.emit(f"global.set $g{global_idx}", indent)
-            if self.type_stack:
-                self.type_stack.pop()
+            base_idx = None
+            for b in self.global_str_bases:
+                if global_idx == b or global_idx == b + 1:
+                    base_idx = b
+                    break
+
+            if base_idx is not None:
+                # Stack: ... ptr len (len on top)
+                # Store len first (pops from top), then ptr
+                self.emit(f"global.set $g{base_idx + 1}", indent)  # len (pops len)
+                self.emit(f"global.set $g{base_idx}", indent)      # ptr (pops ptr)
+                if self.type_stack:
+                    self.type_stack.pop()
+                if self.type_stack:
+                    self.type_stack.pop()
+            else:
+                self.emit(f"global.set $g{global_idx}", indent)
+                if self.type_stack:
+                    self.type_stack.pop()
 
         elif opcode == 'SUB_CONST_I64':
             const_val = args[0]
@@ -3564,7 +3929,7 @@ class WasmCompiler:
             'str_concat': ['i32','i32','i32','i32'],
             'i64_to_str': ['i64'],
             'f64_to_str': ['f64'],
-            'bool_to_str': ['i32'],
+            'bool_to_str': ['i64'],
             'list_to_str': ['i32'],
             'set_to_str': ['i32'],
             'list_append': ['i32','i64'],

@@ -940,9 +940,40 @@ class BytecodeCompiler:
                     self.emit(f"STRUCT_NEW {struct_def['id']}")
                     return
 
+                # Determine expression type hint for arguments
+                arg_expr_type = None if func_name == 'str' else expr_type
+
                 # Compile arguments (push to stack in order)
-                for arg in args:
-                    self.compile_expr(arg, expr_type)
+                # Special handling for callback-based functions (set_timeout, set_interval)
+                if func_name in ('set_timeout', 'set_interval') and len(args) >= 1:
+                    # First arg should be a function reference (callback)
+                    first_arg = args[0]
+                    callback_name = None
+                    
+                    # Check if it's a function reference (just a name/id)
+                    if isinstance(first_arg, dict) and 'id' in first_arg:
+                        callback_name = first_arg['id']
+                    elif isinstance(first_arg, str):
+                        callback_name = first_arg
+                    
+                    # If we have a function name and it's not a variable
+                    if callback_name and callback_name not in self.var_mapping:
+                        # For WASM: push a marker comment
+                        self.emit(f"# FUNC_REF {callback_name}")
+                        # Push a placeholder value (will be handled specially in WASM)
+                        self.emit(f"CONST_I64 0")
+                        
+                        # Compile remaining args (delay and callback arguments)
+                        for arg in args[1:]:
+                            self.compile_expr(arg, arg_expr_type)
+                    else:
+                        # Fallback: compile all args normally
+                        for arg in args:
+                            self.compile_expr(arg, arg_expr_type)
+                else:
+                    # Normal function call: compile all args
+                    for arg in args:
+                        self.compile_expr(arg, arg_expr_type)
 
                 # Add default arguments for certain functions
                 if func_name == 'fopen' and len(args) == 1:

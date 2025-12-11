@@ -16,7 +16,7 @@ JS_RUNTIME_FUNCTIONS = {
         'signature': '(ptr, len) => {}',
         'implementation': '''(ptr, len) => {
             const text = readString(ptr, len);
-            outputBuffer += text;
+            console.log(text)
         }''',
         'wasm_signature': '(param i32 i32)',
     },
@@ -24,8 +24,7 @@ JS_RUNTIME_FUNCTIONS = {
         'signature': '(ptr, len) => {}',
         'implementation': '''(ptr, len) => {
             const text = readString(ptr, len);
-            outputBuffer += text + '\\n';
-            if (config.autoFlush) flushOutput();
+            console.log(text)
         }''',
         'wasm_signature': '(param i32 i32)',
     },
@@ -49,6 +48,8 @@ JS_RUNTIME_FUNCTIONS = {
             if (len <= 0) return 0n;
             const s = readString(ptr, len);
             const f = parseFloat(s);
+            // Guard against NaN/Infinity before converting to BigInt
+            if (!Number.isFinite(f)) return 0n;
             return BigInt(Math.trunc(f)) || 0n;
         }''',
         'wasm_signature': '(param i32 i32) (result i64)',
@@ -81,9 +82,10 @@ JS_RUNTIME_FUNCTIONS = {
     'bool_to_str': {
         'signature': '(value) => [ptr, len]',
         'implementation': '''(value) => {
-            return allocString(value ? 'true' : 'false');
+            const truthy = (typeof value === 'bigint') ? (value !== 0n) : !!value;
+            return allocString(truthy ? 'true' : 'false');
         }''',
-        'wasm_signature': '(param i32) (result i32 i32)',
+        'wasm_signature': '(param i64) (result i32 i32)',
     },
     'str_upper': {
         'signature': '(ptr, len) => [ptr, len]',
@@ -345,13 +347,14 @@ JS_RUNTIME_FUNCTIONS = {
 
     # Error handling
     'runtime_error': {
-        'signature': '(msgPtr, msgLen, linePtr, lineLen) => {}',
-        'implementation': '''(msgPtr, msgLen, linePtr, lineLen) => {
-            const msg = readString(msgPtr, msgLen);
-            const line = readString(linePtr, lineLen);
-            throw new FrRuntimeError(msg + ' at ' + line);
+        'signature': '(typePtr, typeLen, msgPtr, msgLen, lineNum) => {}',
+        'implementation': '''(typePtr, typeLen, msgPtr, msgLen, lineNum) => {
+            const type = readString(typePtr, typeLen) || 'Error';
+            const msg = readString(msgPtr, msgLen) || '';
+            const line = Number(lineNum) || 0;
+            throw new FrRuntimeError(`${type}: ${msg}` + (line ? ` (line ${line})` : ''));
         }''',
-        'wasm_signature': '(param i32 i32 i32 i32)',
+        'wasm_signature': '(param i32 i32 i32 i32 i32)',
     },
     'index_error': {
         'signature': '(typePtr, typeLen, index, length) => {}',
@@ -365,6 +368,49 @@ JS_RUNTIME_FUNCTIONS = {
         'signature': '(code) => {}',
         'implementation': '''(code) => {
             throw new FrExitError(code);
+        }''',
+        'wasm_signature': '(param i32)',
+    },
+
+    # Sleep (blocking emulation)
+    'sleep': {
+        'signature': '(seconds) => {}',
+        'implementation': '''(seconds) => {
+            const ms = Math.max(0, Number(seconds) * 1000);
+            const end = performance.now() + ms;
+            while (performance.now() < end) {}
+        }''',
+        'wasm_signature': '(param f64)',
+    },
+
+    # File I/O stubs (not supported in browser, but satisfy imports)
+    'file_open': {
+        'signature': '(pathPtr, pathLen, modePtr, modeLen) => i32',
+        'implementation': '''(pathPtr, pathLen, modePtr, modeLen) => {
+            console.error('file_open is not supported in WebAssembly JS glue');
+            return -1;
+        }''',
+        'wasm_signature': '(param i32 i32 i32 i32) (result i32)',
+    },
+    'file_read': {
+        'signature': '(fd) => [ptr, len]',
+        'implementation': '''(fd) => {
+            console.error('file_read is not supported in WebAssembly JS glue');
+            return [0, 0];
+        }''',
+        'wasm_signature': '(param i32) (result i32 i32)',
+    },
+    'file_write': {
+        'signature': '(fd, ptr, len) => {}',
+        'implementation': '''(fd, ptr, len) => {
+            console.error('file_write is not supported in WebAssembly JS glue');
+        }''',
+        'wasm_signature': '(param i32 i32 i32)',
+    },
+    'file_close': {
+        'signature': '(fd) => {}',
+        'implementation': '''(fd) => {
+            console.error('file_close is not supported in WebAssembly JS glue');
         }''',
         'wasm_signature': '(param i32)',
     },
@@ -420,6 +466,10 @@ JS_WEB_FUNCTIONS = {
         'implementation': '''(tagPtr, tagLen) => {
             const tag = readString(tagPtr, tagLen);
             const elem = document.createElement(tag);
+            // Auto-attach to document body so elements become visible by default
+            if (document.body) {
+                document.body.appendChild(elem);
+            }
             const id = domElements.size + 1;
             domElements.set(id, elem);
             return id;
@@ -767,27 +817,82 @@ JS_WEB_FUNCTIONS = {
 
     # Timers
     'set_timeout': {
-        'signature': '(callbackId, ms) => timerId',
-        'implementation': '''(callbackId, ms) => {
+        'signature': '(callbackIdx, ms, ...args) => timerId',
+        'implementation': '''(callbackIdx, ms, ...args) => {
+            // Get the callback function name from metadata
+            const callbacks = metadata.callbacks || [];
+            if (callbacks.length === 0) return 0;
+            
+            const funcName = callbacks[0];
+            const func = wasmInstance.exports[funcName];
+            if (!func) return 0;
+            
+            // Convert i32 args to BigInt for i64 WASM parameters
+            // (WASM functions with i64 parameters expect BigInt)
+            const convertedArgs = args.map(arg => 
+                typeof arg === 'number' ? BigInt(arg) : arg
+            );
+            
+            // Call the callback with converted arguments
             return setTimeout(() => {
-                if (wasmInstance.exports['__callback_' + callbackId]) {
-                    wasmInstance.exports['__callback_' + callbackId]();
+                try {
+                    func(...convertedArgs);
+                } catch (e) {
+                    console.error("Callback error:", e);
                 }
             }, ms);
         }''',
-        'wasm_signature': '(param i32 i32) (result i32)',
+        'wasm_signature': 'variadic',  # Special marker for variadic functions
         'category': 'timer',
     },
     'set_interval': {
-        'signature': '(callbackId, ms) => timerId',
-        'implementation': '''(callbackId, ms) => {
-            return setInterval(() => {
-                if (wasmInstance.exports['__callback_' + callbackId]) {
-                    wasmInstance.exports['__callback_' + callbackId]();
+        'signature': '(callbackIdx, ms, ...args) => timerId',
+        'implementation': '''(callbackIdx, ms, ...args) => {
+            // Get the callback function name from metadata
+            const callbacks = metadata.callbacks || [];
+            if (callbacks.length === 0) return 0;
+            
+            const funcName = callbacks[0];
+            const func = wasmInstance.exports[funcName];
+            if (!func) return 0;
+            
+            // Convert i32 args to BigInt for i64 WASM parameters
+            // (WASM functions with i64 parameters expect BigInt)
+            const convertedArgs = args.map(arg => 
+                typeof arg === 'number' ? BigInt(arg) : arg
+            );
+
+            const intervalMs = Math.max(0, Number(ms));
+            // Use a sub-millisecond target so high frequencies (e.g. 100k/s) still schedule.
+            const targetInterval = intervalMs > 0 ? intervalMs : 0.01;
+            // Drive the catch-up loop frequently without starving the event loop.
+            const driverInterval = Math.max(1, Math.min(16, targetInterval));
+            let next = performance.now() + targetInterval;
+            
+            const handler = () => {
+                const now = performance.now();
+                let iterations = 0;
+                const maxIterations = 1000; // Safety cap so a stalled tab can't freeze the UI
+                while (now >= next && iterations < maxIterations) {
+                    try {
+                        func(...convertedArgs);
+                    } catch (e) {
+                        console.error("Callback error:", e);
+                        break;
+                    }
+                    next += targetInterval;
+                    iterations += 1;
                 }
-            }, ms);
+                if (iterations === maxIterations) {
+                    // If we hit the cap, resync to avoid an infinite catch-up loop.
+                    next = performance.now() + targetInterval;
+                }
+            };
+
+            const timerId = setInterval(handler, driverInterval);
+            return timerId;
         }''',
-        'wasm_signature': '(param i32 i32) (result i32)',
+        'wasm_signature': 'variadic',  # Special marker for variadic functions
         'category': 'timer',
     },
     'clear_timeout': {
@@ -1029,7 +1134,8 @@ JS_WEB_FUNCTIONS = {
 def generate_js_glue(
         used_imports: Set[str],
         js_imports: Optional[Dict[str, str]] = None,
-        output_element_id: Optional[str] = None
+        output_element_id: Optional[str] = None,
+        for_inline: bool = False
     ) -> str:
     """
     Generate JavaScript glue code for a Fr WASM module.
@@ -1042,12 +1148,13 @@ def generate_js_glue(
     Returns:
         JavaScript module code as a string
     """
-    # Combine all available functions
-    all_functions = {**JS_RUNTIME_FUNCTIONS, **JS_WEB_FUNCTIONS}
+    # Always include core runtime functions because the WASM module imports them unconditionally
+    used_functions = {**JS_RUNTIME_FUNCTIONS}
 
-    # Filter to only used functions
-    used_functions = {name: func for name, func in all_functions.items()
-                      if name in used_imports}
+    # Add only the web-specific functions that the module actually needs
+    for name, func in JS_WEB_FUNCTIONS.items():
+        if name in used_imports:
+            used_functions[name] = func
 
     # Check which categories are used
     uses_dom = any(f.get('category') == 'dom' for f in used_functions.values())
@@ -1082,8 +1189,10 @@ def generate_js_glue(
         '// Runtime state',
         'let memory = null;',
         'let wasmInstance = null;',
+        'let metadata = null;',
         'let stringOffset = 1024;',
         'let outputBuffer = "";',
+        'const functionCallStack = [];',  # Track function calls and their arguments
     ]
 
     if uses_lists:
@@ -1167,13 +1276,17 @@ def generate_js_glue(
             '',
         ])
 
-    # Main loader function
+    # Main loader functions
     js_lines.extend([
-        '// Load and run Fr WASM module',
+        '// Load and run Fr WASM module from file',
         'async function loadFrModule(wasmPath, options = {}) {',
         '    const response = await fetch(wasmPath);',
         '    const wasmBytes = await response.arrayBuffer();',
-        '    ',
+        '    return loadFrModuleFromBytes(wasmBytes, options);',
+        '}',
+        '',
+        '// Load and run Fr WASM module from bytes',
+        'async function loadFrModuleFromBytes(wasmBytes, options = {}) {',
         '    Object.assign(config, options);',
         '    ',
         '    const imports = buildImports();',
@@ -1215,45 +1328,80 @@ def generate_js_glue(
         '    };',
         '}',
         '',
-        '// Export for ES modules',
-        'export { loadFrModule, FrRuntimeError, FrExitError, config };',
-        '',
-        '// Also support CommonJS',
-        'if (typeof module !== "undefined" && module.exports) {',
-        '    module.exports = { loadFrModule, FrRuntimeError, FrExitError, config };',
-        '}',
     ])
+
+    # Only add exports if not inline
+    if not for_inline:
+        js_lines.extend([
+            '// Export for ES modules',
+            'export { loadFrModule, FrRuntimeError, FrExitError, config };',
+            '',
+            '// Also support CommonJS',
+            'if (typeof module !== "undefined" && module.exports) {',
+            '    module.exports = { loadFrModule, FrRuntimeError, FrExitError, config };',
+            '}',
+        ])
 
     return '\n'.join(js_lines)
 
-def generate_html_template(wasm_filename: str, title: str = "") -> str:
-    """Generate a minimal HTML file to load and run the WASM module."""
+def generate_html_template(wasm_filename: str, js_glue_code: str, wasm_base64: str = "", title: str = "", metadata: dict = None) -> str:
+    """Generate an HTML file with inlined JavaScript glue code and optionally embedded WASM."""
+    # Serialize metadata as JSON
+    metadata_json = json.dumps(metadata) if metadata else '{}'
+    
+    # If WASM is provided as base64, use it; otherwise load from file
+    if wasm_base64:
+        wasm_loader = f'''            const wasmBase64 = '{wasm_base64}';
+            const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
+            const wasmBuffer = wasmBytes.buffer;
+            const wasmPath = null; // Not needed since we have bytes
+            
+            // Set metadata before loading module
+            metadata = {metadata_json};
+            
+            const fr = await loadFrModuleFromBytes(wasmBuffer, {{
+                outputElementId: 'output',
+                autoFlush: true
+            }});'''
+    else:
+        wasm_loader = f'''            const wasmPath = './{wasm_filename}';
+            
+            // Set metadata before loading module
+            metadata = {metadata_json};
+            
+            const fr = await loadFrModule(wasmPath, {{
+                outputElementId: 'output',
+                autoFlush: true
+            }});'''
+
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body>
-    <script type="module">
-        import {{ loadFrModule }} from './{wasm_filename.replace(".wasm", ".js")}';
+<body id="body">
+    <div id="output"></div>
+    <script>
+// Fr WASM Runtime - Auto-generated JavaScript glue
+// Only includes functions used by this specific module
+{js_glue_code}
 
-        const output = document.getElementById('output');
+// Load and run Fr WASM module
+(async function() {{
+    const output = document.getElementById('body');
+    try {{
+{wasm_loader}
 
-        try {{
-            const fr = await loadFrModule('./{wasm_filename}', {{
-                outputElementId: 'output',
-                autoFlush: true
-            }});
-
-            const result = fr.run();
-            if (!result.success) {{
-                output.innerHTML += '<span class="error">\\nProgram exited with code ' + result.exitCode + '</span>';
-            }}
-        }} catch (e) {{
-            output.innerHTML += '<span class="error">Error: ' + e.message + '</span>';
-            console.error(e);
+        const result = fr.run();
+        if (!result.success) {{
+            output.innerHTML += '<span class="error">\\nProgram exited with code ' + result.exitCode + '</span>';
         }}
+    }} catch (e) {{
+        output.innerHTML += '<span class="error">Error: ' + e.message + '</span>';
+        console.error(e);
+    }}
+}})();
     </script>
 </body>
 </html>

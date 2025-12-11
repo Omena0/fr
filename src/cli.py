@@ -570,12 +570,13 @@ def native_cmd(args):
 
 def wasm_cmd(args):
     if len(args) < 1:
-        print("Usage: fr wasm <file.fr|ast.json|ast.bin> [-d] [-o output.wasm] [-r|--run]")
+        print("Usage: fr wasm <file.fr|ast.json|ast.bin> [-d] [-o output.wasm] [-r|--run] [-w|--web]")
         sys.exit(1)
 
     input_file = args[0]
     output_path = Path('out.wasm')
     run_after = '-r' in args or '--run' in args
+    web_mode = '-w' in args or '--web' in args
     if '-o' in args:
         idx = args.index('-o')
         if idx + 1 >= len(args):
@@ -669,6 +670,46 @@ def wasm_cmd(args):
             os.remove(wat_path)
             os.remove(metadata_path)
 
+    # Generate web bundle if -w/--web specified
+    if web_mode:
+        if not metadata.get('wasm_binary'):
+            print("Error: Web mode requires a compiled WASM binary", file=sys.stderr)
+            sys.exit(1)
+
+        # Generate JS glue code
+        try:
+            import base64
+            from wasm_js_glue import generate_js_glue, generate_html_template
+            
+            # Use imports that are actually used by the WASM binary
+            used_imports = set(metadata.get('imports', []))
+            js_glue = generate_js_glue(used_imports, for_inline=True)
+            
+            # Read WASM binary and encode as base64
+            with open(output_path, 'rb') as f:
+                wasm_bytes = f.read()
+            wasm_base64 = base64.b64encode(wasm_bytes).decode('ascii')
+            
+            # Determine output filenames
+            wasm_filename = output_path.name
+            html_filename = output_path.with_suffix('.html').name
+            
+            # Write HTML file with embedded WASM
+            html_path = output_path.with_name(html_filename)
+            html_content = generate_html_template(wasm_filename, js_glue, wasm_base64, metadata=metadata)
+            with open(html_path, 'w') as f:
+                f.write(html_content)
+            print(f"Generated HTML: {html_path}")
+            
+        except ImportError as e:
+            print(f"Error: Could not import WASM JS glue generator: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error generating web bundle: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+
     # Run the WASM file if -r/--run specified
     if run_after and metadata.get('wasm_binary'):
         runner_path = Path(__file__).parent.parent / 'runtime' / 'target' / 'release' / 'fr-wasm'
@@ -694,7 +735,7 @@ def main():
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file> [-o out.bc] - Compile to bytecode")
         print("  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary")
-        print("  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] - Compile typed module to Wasm")
+        print("  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] [-w|--web] - Compile typed module to Wasm")
         sys.exit(1)
 
     cmd = sys.argv[1]

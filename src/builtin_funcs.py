@@ -1130,5 +1130,400 @@ funcs:dict[ # Holy type annotations
         "return_type": "any",
         "can_eval": False,
         "variadic": True
+    },
+
+    # Web/WASM Functions - DOM Query
+    'dom_query': {
+        "type": "builtin",
+        "args": {"selector": "string"},
+        "func": lambda selector: 0,  # Placeholder - runs only in WASM
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_query_all': {
+        "type": "builtin",
+        "args": {"selector": "string"},
+        "func": lambda selector: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_create': {
+        "type": "builtin",
+        "args": {"tag": "string"},
+        "func": lambda tag: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_get_body': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_get_document': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - DOM Manipulation
+    'dom_set_text': {
+        "type": "builtin",
+        "args": {"elemId": "int", "text": "string"},
+        "func": lambda elemId, text: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_get_text': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'dom_set_html': {
+        "type": "builtin",
+        "args": {"elemId": "int", "html": "string"},
+        "func": lambda elemId, html: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_get_html': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'dom_set_attr': {
+        "type": "builtin",
+        "args": {"elemId": "int", "name": "string", "value": "string"},
+        "func": lambda elemId, name, value: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_get_attr': {
+        "type": "builtin",
+        "args": {"elemId": "int", "name": "string"},
+        "func": lambda elemId, name: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'dom_remove_attr': {
+        "type": "builtin",
+        "args": {"elemId": "int", "name": "string"},
+        "func": lambda elemId, name: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - DOM Tree
+    'dom_append': {
+        "type": "builtin",
+        "args": {"parentId": "int", "childId": "int"},
+        "func": lambda parentId, childId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_prepend': {
+        "type": "builtin",
+        "args": {"parentId": "int", "childId": "int"},
+        "func": lambda parentId, childId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_remove': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_clone': {
+        "type": "builtin",
+        "args": {"elemId": "int", "deep": "bool"},
+        "func": lambda elemId, deep: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_parent': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'dom_children': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - CSS/Style
+    'dom_add_class': {
+        "type": "builtin",
+        "args": {"elemId": "int", "class": "string"},
+        "func": lambda elemId, cls: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_remove_class': {
+        "type": "builtin",
+        "args": {"elemId": "int", "class": "string"},
+        "func": lambda elemId, cls: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_toggle_class': {
+        "type": "builtin",
+        "args": {"elemId": "int", "class": "string"},
+        "func": lambda elemId, cls: False,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'dom_has_class': {
+        "type": "builtin",
+        "args": {"elemId": "int", "class": "string"},
+        "func": lambda elemId, cls: False,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'dom_set_style': {
+        "type": "builtin",
+        "args": {"elemId": "int", "prop": "string", "value": "string"},
+        "func": lambda elemId, prop, value: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_get_style': {
+        "type": "builtin",
+        "args": {"elemId": "int", "prop": "string"},
+        "func": lambda elemId, prop: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Form Elements
+    'dom_get_value': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'dom_set_value': {
+        "type": "builtin",
+        "args": {"elemId": "int", "value": "string"},
+        "func": lambda elemId, value: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_focus': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_blur': {
+        "type": "builtin",
+        "args": {"elemId": "int"},
+        "func": lambda elemId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Events
+    'dom_on': {
+        "type": "builtin",
+        "args": {"elemId": "int", "event": "string", "callbackId": "int"},
+        "func": lambda elemId, event, callbackId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'dom_off': {
+        "type": "builtin",
+        "args": {"callbackId": "int"},
+        "func": lambda callbackId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'event_prevent_default': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'event_stop_propagation': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'event_target': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Timers
+    'set_timeout': {
+        "type": "builtin",
+        "args": {"callbackId": "int", "ms": "int"},
+        "func": lambda callbackId, ms: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'set_interval': {
+        "type": "builtin",
+        "args": {"callbackId": "int", "ms": "int"},
+        "func": lambda callbackId, ms: 0,
+        "return_type": "int",
+        "can_eval": False
+    },
+    'clear_timeout': {
+        "type": "builtin",
+        "args": {"timerId": "int"},
+        "func": lambda timerId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'clear_interval': {
+        "type": "builtin",
+        "args": {"timerId": "int"},
+        "func": lambda timerId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Console
+    'console_log': {
+        "type": "builtin",
+        "args": {"text": "string"},
+        "func": lambda text: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'console_error': {
+        "type": "builtin",
+        "args": {"text": "string"},
+        "func": lambda text: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'console_warn': {
+        "type": "builtin",
+        "args": {"text": "string"},
+        "func": lambda text: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Browser APIs
+    'alert': {
+        "type": "builtin",
+        "args": {"text": "string"},
+        "func": lambda text: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'confirm': {
+        "type": "builtin",
+        "args": {"text": "string"},
+        "func": lambda text: False,
+        "return_type": "bool",
+        "can_eval": False
+    },
+    'prompt': {
+        "type": "builtin",
+        "args": {"msg": "string", "default": "string"},
+        "func": lambda msg, default: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'get_location_href': {
+        "type": "builtin",
+        "args": {},
+        "func": lambda: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'set_location_href': {
+        "type": "builtin",
+        "args": {"url": "string"},
+        "func": lambda url: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Storage
+    'get_local_storage': {
+        "type": "builtin",
+        "args": {"key": "string"},
+        "func": lambda key: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'set_local_storage': {
+        "type": "builtin",
+        "args": {"key": "string", "value": "string"},
+        "func": lambda key, value: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'remove_local_storage': {
+        "type": "builtin",
+        "args": {"key": "string"},
+        "func": lambda key: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - Fetch API
+    'fetch_text': {
+        "type": "builtin",
+        "args": {"url": "string", "callbackId": "int"},
+        "func": lambda url, callbackId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+    'fetch_json': {
+        "type": "builtin",
+        "args": {"url": "string", "callbackId": "int"},
+        "func": lambda url, callbackId: None,
+        "return_type": "void",
+        "can_eval": False
+    },
+
+    # Web/WASM Functions - JS Interop
+    'js_call': {
+        "type": "builtin",
+        "args": {"funcName": "string", "argsJson": "string"},
+        "func": lambda funcName, argsJson: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'js_eval': {
+        "type": "builtin",
+        "args": {"code": "string"},
+        "func": lambda code: "",
+        "return_type": "string",
+        "can_eval": False
+    },
+    'js_get_global': {
+        "type": "builtin",
+        "args": {"name": "string"},
+        "func": lambda name: "",
+        "return_type": "string",
+        "can_eval": False
     }
 }
