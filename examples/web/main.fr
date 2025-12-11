@@ -1,0 +1,11 @@
+import weblib
+
+void main() {
+    Element div = element(
+        'div',
+        'Div 1',
+        [
+            element('h1', 'h1')
+        ]
+    )
+}

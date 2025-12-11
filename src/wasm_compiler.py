@@ -39,9 +39,38 @@ class WasmCompiler:
             'fclose': ('file_close', [], ['i32']),
             # Web/WASM Functions - DOM
             'dom_create': ('dom_create', ['i32'], ['i32', 'i32']),
+            'dom_get_body': ('dom_get_body', ['i32'], []),
+            'dom_get_document': ('dom_get_document', ['i32'], []),
             'dom_set_text': ('dom_set_text', [], ['i32', 'i32', 'i32']),
             'dom_get_text': ('dom_get_text', ['i32', 'i32'], ['i32']),
+            'dom_set_html': ('dom_set_html', [], ['i32', 'i32', 'i32']),
+            'dom_get_html': ('dom_get_html', ['i32', 'i32'], ['i32']),
+            'dom_set_attr': ('dom_set_attr', [], ['i32', 'i32', 'i32']),
+            'dom_get_attr': ('dom_get_attr', ['i32', 'i32'], ['i32', 'i32', 'i32']),
+            'dom_remove_attr': ('dom_remove_attr', [], ['i32', 'i32', 'i32']),
+            'dom_append': ('dom_append', [], ['i32', 'i32']),
+            'dom_prepend': ('dom_prepend', [], ['i32', 'i32']),
+            'dom_remove': ('dom_remove', [], ['i32']),
+            'dom_clone': ('dom_clone', ['i32'], ['i32', 'i32']),
+            'dom_parent': ('dom_parent', ['i32'], ['i32']),
+            'dom_children': ('dom_children', ['i32'], ['i32']),
+            'dom_add_class': ('dom_add_class', [], ['i32', 'i32', 'i32']),
+            'dom_remove_class': ('dom_remove_class', [], ['i32', 'i32', 'i32']),
+            'dom_toggle_class': ('dom_toggle_class', [], ['i32', 'i32', 'i32']),
+            'dom_has_class': ('dom_has_class', ['i32'], ['i32', 'i32', 'i32']),
+            'dom_set_style': ('dom_set_style', [], ['i32', 'i32', 'i32', 'i32', 'i32']),
+            'dom_get_style': ('dom_get_style', ['i32', 'i32'], ['i32', 'i32', 'i32']),
+            'dom_get_value': ('dom_get_value', ['i32', 'i32'], ['i32']),
+            'dom_set_value': ('dom_set_value', [], ['i32', 'i32', 'i32']),
+            'dom_focus': ('dom_focus', [], ['i32']),
+            'dom_blur': ('dom_blur', [], ['i32']),
             'dom_query': ('dom_query', ['i32'], ['i32', 'i32']),
+            'dom_query_all': ('dom_query_all', ['i32'], ['i32', 'i32']),
+            'dom_on': ('dom_on', [], ['i32', 'i32', 'i32', 'i32']),
+            'dom_off': ('dom_off', [], ['i32']),
+            'event_prevent_default': ('event_prevent_default', [], []),
+            'event_stop_propagation': ('event_stop_propagation', [], []),
+            'event_target': ('event_target', ['i32'], []),
             # Web/WASM Functions - Timers (variadic - accept variable args to pass to callback)
             'set_timeout': ('set_timeout', ['i32'], []),  # Returns i32, params handled specially
             'set_interval': ('set_interval', ['i32'], []),
@@ -197,18 +226,18 @@ class WasmCompiler:
         """Pre-pass to determine variadic timer function signatures"""
         # Build a simple type stack to track what's on stack at each CALL
         type_stack = []
-        
+
         for line in lines:
             line = line.strip()
             if not line or line.startswith('#') or line.startswith('.'):
                 continue
-            
+
             parts = line.split()
             if not parts:
                 continue
-            
+
             opcode = parts[0]
-            
+
             # Track constants being pushed
             if opcode == 'CONST_I64':
                 # Can have multiple values: CONST_I64 0 10 pushes two i64 values
@@ -228,7 +257,7 @@ class WasmCompiler:
             elif opcode == 'CALL':
                 func_name = parts[1]
                 arg_count = int(parts[2]) if len(parts) > 2 else 0
-                
+
                 # Check if it's a timer function
                 if func_name in ('set_timeout', 'set_interval'):
                     # Determine signature from stack
@@ -238,7 +267,7 @@ class WasmCompiler:
                         param_types = ['i32'] * arg_count
                         sig_parts = ' '.join(f'(param {t})' for t in param_types)
                         self.timer_signatures[func_name] = sig_parts
-                
+
                 # Pop args and push result (simplified)
                 for _ in range(min(arg_count, len(type_stack))):
                     type_stack.pop()
@@ -257,12 +286,70 @@ class WasmCompiler:
         # DOM/Web functions (only emit if used)
         if 'dom_create' in self.imports:
             self.emit('(import "env" "dom_create" (func $dom_create (param i32 i32) (result i32)))', 1)
+        if 'dom_get_body' in self.imports:
+            self.emit('(import "env" "dom_get_body" (func $dom_get_body (result i32)))', 1)
+        if 'dom_get_document' in self.imports:
+            self.emit('(import "env" "dom_get_document" (func $dom_get_document (result i32)))', 1)
         if 'dom_set_text' in self.imports:
             self.emit('(import "env" "dom_set_text" (func $dom_set_text (param i32 i32 i32)))', 1)
         if 'dom_get_text' in self.imports:
             self.emit('(import "env" "dom_get_text" (func $dom_get_text (param i32) (result i32 i32)))', 1)
+        if 'dom_set_html' in self.imports:
+            self.emit('(import "env" "dom_set_html" (func $dom_set_html (param i32 i32 i32)))', 1)
+        if 'dom_get_html' in self.imports:
+            self.emit('(import "env" "dom_get_html" (func $dom_get_html (param i32) (result i32 i32)))', 1)
+        if 'dom_set_attr' in self.imports:
+            self.emit('(import "env" "dom_set_attr" (func $dom_set_attr (param i32 i32 i32)))', 1)
+        if 'dom_get_attr' in self.imports:
+            self.emit('(import "env" "dom_get_attr" (func $dom_get_attr (param i32 i32 i32) (result i32 i32)))', 1)
+        if 'dom_remove_attr' in self.imports:
+            self.emit('(import "env" "dom_remove_attr" (func $dom_remove_attr (param i32 i32 i32)))', 1)
+        if 'dom_append' in self.imports:
+            self.emit('(import "env" "dom_append" (func $dom_append (param i32 i32)))', 1)
+        if 'dom_prepend' in self.imports:
+            self.emit('(import "env" "dom_prepend" (func $dom_prepend (param i32 i32)))', 1)
+        if 'dom_remove' in self.imports:
+            self.emit('(import "env" "dom_remove" (func $dom_remove (param i32)))', 1)
+        if 'dom_clone' in self.imports:
+            self.emit('(import "env" "dom_clone" (func $dom_clone (param i32 i32) (result i32)))', 1)
+        if 'dom_parent' in self.imports:
+            self.emit('(import "env" "dom_parent" (func $dom_parent (param i32) (result i32)))', 1)
+        if 'dom_children' in self.imports:
+            self.emit('(import "env" "dom_children" (func $dom_children (param i32) (result i32)))', 1)
+        if 'dom_add_class' in self.imports:
+            self.emit('(import "env" "dom_add_class" (func $dom_add_class (param i32 i32 i32)))', 1)
+        if 'dom_remove_class' in self.imports:
+            self.emit('(import "env" "dom_remove_class" (func $dom_remove_class (param i32 i32 i32)))', 1)
+        if 'dom_toggle_class' in self.imports:
+            self.emit('(import "env" "dom_toggle_class" (func $dom_toggle_class (param i32 i32 i32)))', 1)
+        if 'dom_has_class' in self.imports:
+            self.emit('(import "env" "dom_has_class" (func $dom_has_class (param i32 i32 i32) (result i32)))', 1)
+        if 'dom_set_style' in self.imports:
+            self.emit('(import "env" "dom_set_style" (func $dom_set_style (param i32 i32 i32 i32 i32)))', 1)
+        if 'dom_get_style' in self.imports:
+            self.emit('(import "env" "dom_get_style" (func $dom_get_style (param i32 i32 i32) (result i32 i32)))', 1)
+        if 'dom_get_value' in self.imports:
+            self.emit('(import "env" "dom_get_value" (func $dom_get_value (param i32) (result i32 i32)))', 1)
+        if 'dom_set_value' in self.imports:
+            self.emit('(import "env" "dom_set_value" (func $dom_set_value (param i32 i32 i32)))', 1)
+        if 'dom_focus' in self.imports:
+            self.emit('(import "env" "dom_focus" (func $dom_focus (param i32)))', 1)
+        if 'dom_blur' in self.imports:
+            self.emit('(import "env" "dom_blur" (func $dom_blur (param i32)))', 1)
         if 'dom_query' in self.imports:
             self.emit('(import "env" "dom_query" (func $dom_query (param i32 i32) (result i32)))', 1)
+        if 'dom_query_all' in self.imports:
+            self.emit('(import "env" "dom_query_all" (func $dom_query_all (param i32 i32) (result i32)))', 1)
+        if 'dom_on' in self.imports:
+            self.emit('(import "env" "dom_on" (func $dom_on (param i32 i32 i32 i32)))', 1)
+        if 'dom_off' in self.imports:
+            self.emit('(import "env" "dom_off" (func $dom_off (param i32)))', 1)
+        if 'event_prevent_default' in self.imports:
+            self.emit('(import "env" "event_prevent_default" (func $event_prevent_default))', 1)
+        if 'event_stop_propagation' in self.imports:
+            self.emit('(import "env" "event_stop_propagation" (func $event_stop_propagation))', 1)
+        if 'event_target' in self.imports:
+            self.emit('(import "env" "event_target" (func $event_target (result i32)))', 1)
 
         # Timer functions (only emit if used) - signatures determined dynamically
         if 'set_timeout' in self.imports:
@@ -1863,6 +1950,28 @@ class WasmCompiler:
                     self.timer_signatures[func_name] = sig_parts
                 
                 arg_count_to_use = len(param_types)
+
+                # If a packed string (i64) was provided as a single argument but
+                # the builtin expects a (ptr,len) pair, expand it into two i32s.
+                if (
+                    arg_count == 1
+                    and arg_count_to_use >= 2
+                    and param_types[0] == 'i32'
+                    and param_types[1] == 'i32'
+                    and self.type_stack
+                    and self.type_stack[-1] == 'i64'
+                ):
+                    # Split packed i64 string into ptr (lower 32) and len (upper 32)
+                    self.emit("local.set $temp_i64", indent)
+                    self.emit("local.get $temp_i64", indent)
+                    self.emit("i32.wrap_i64", indent)  # ptr
+                    self.emit("local.get $temp_i64", indent)
+                    self.emit("i64.const 32", indent)
+                    self.emit("i64.shr_u", indent)
+                    self.emit("i32.wrap_i64", indent)  # len
+                    self.pop_type()
+                    self.push_type('i32')
+                    self.push_type('i32')
                 # Ensure args match expected WASM widths; convert on stack if needed
                 # We must perform conversions against the correct runtime stack value.
                 # The value stack currently contains all call arguments in order of push
@@ -2561,7 +2670,11 @@ class WasmCompiler:
         elif opcode == 'LIST_APPEND':
             # Handle append where value may be a string (ptr,len) or a single i64
             # Stack for string value: ... list_ptr ptr len
-            if len(self.type_stack) >= 3 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32' and self.type_stack[-3] == 'i32':
+            # Only treat as string packing when the stack tail exactly matches the expected trio.
+            if (len(self.type_stack) == 3
+                and self.type_stack[-1] == 'i32'
+                and self.type_stack[-2] == 'i32'
+                and self.type_stack[-3] == 'i32'):
                 # Pack (ptr,len) into i64: (len << 32) | ptr
                 # Stack: ... list_ptr ptr len
                 # Save len
@@ -3295,11 +3408,26 @@ class WasmCompiler:
                     # Convert back to f64 for f64.store
                     self.emit("f64.reinterpret_i64", indent)
                     self.emit(f"f64.store offset={i * 8}", indent)
+                    self.pop_type()
                 elif field_type == 'str':
                     # String is (ptr, len) = two i32 values on stack
                     # Top of stack is len, below is ptr
                     # Combine into one i64: (len << 32) | ptr
                     # Stack: ... ptr(i32) len(i32)
+                    # If the value is a packed i64 string (len<<32 | ptr), unpack it first
+                    if self.type_stack and self.type_stack[-1] == 'i64':
+                        self.emit("local.set $temp_i64", indent)
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i32.wrap_i64", indent)  # ptr
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i64.const 32", indent)
+                        self.emit("i64.shr_u", indent)
+                        self.emit("i32.wrap_i64", indent)  # len
+                        self.pop_type()
+                        self.push_type('i32')
+                        self.push_type('i32')
+                    self._ensure_top_is_i32(indent)
+                    self._ensure_second_is_i32(indent)
                     self.emit("i64.extend_i32_u", indent)  # len(i32) -> len(i64)
                     # Stack: ... ptr(i32) len(i64)
                     self.emit("i64.const 32", indent)
@@ -3317,41 +3445,45 @@ class WasmCompiler:
                     self.emit("local.get $temp", indent)
                     self.emit("local.get $temp_i64", indent)
                     self.emit(f"i64.store offset={i * 8}", indent)
+                    self.pop_type()
+                    self.pop_type()
                 elif field_type == 'bool':
                     # Bool is i32, extend to i64
+                    self._ensure_top_is_i32(indent)
                     self.emit("i64.extend_i32_u", indent)
                     self.emit("local.set $temp_i64", indent)
                     self.emit("local.get $temp", indent)
                     self.emit("local.get $temp_i64", indent)
                     self.emit(f"i64.store offset={i * 8}", indent)
+                    self.pop_type()
                 elif field_type.startswith('struct:') or self._is_struct_name(field_type):
                     # Nested struct pointer is i32, extend to i64 for storage
+                    self._ensure_top_is_i32(indent)
                     self.emit("i64.extend_i32_u", indent)
                     self.emit("local.set $temp_i64", indent)
                     self.emit("local.get $temp", indent)
                     self.emit("local.get $temp_i64", indent)
                     self.emit(f"i64.store offset={i * 8}", indent)
+                    self.pop_type()
+                elif field_type in ('int', 'list', 'set'):
+                    # These are stored as 64-bit values; widen i32 handles first
+                    self._ensure_top_is_i32(indent)
+                    self.emit("i64.extend_i32_u", indent)
+                    self.emit("local.set $temp_i64", indent)
+                    self.emit("local.get $temp", indent)
+                    self.emit("local.get $temp_i64", indent)
+                    self.emit(f"i64.store offset={i * 8}", indent)
+                    self.pop_type()
                 else:  # int or any other type
                     # Already i64, just store
                     self.emit("local.set $temp_i64", indent)
                     self.emit("local.get $temp", indent)
                     self.emit("local.get $temp_i64", indent)
                     self.emit(f"i64.store offset={i * 8}", indent)
+                    self.pop_type()
 
             # Push struct pointer back to stack
             self.emit("local.get $temp", indent)
-
-            # Update type stack - pop values based on actual stack consumption
-            # String fields consume 2 values (ptr, len), other fields consume 1
-            for i in range(field_count):
-                field_type = field_types[i]
-                if field_type == 'str':
-                    # String field consumes 2 stack values
-                    self.pop_type()  # len
-                    self.pop_type()  # ptr
-                else:
-                    # Other fields consume 1 stack value
-                    self.pop_type()
             self.push_type('i32', struct_id)
 
         elif opcode == 'STRUCT_GET':
@@ -4158,6 +4290,39 @@ class WasmCompiler:
             'round_f64': ['f64'],
             'floor_f64': ['f64'],
             'ceil_f64': ['f64'],
+            'dom_create': ['i32','i32'],
+            'dom_set_text': ['i32','i32','i32'],
+            'dom_get_text': ['i32'],
+            'dom_set_html': ['i32','i32','i32'],
+            'dom_get_html': ['i32'],
+            'dom_set_attr': ['i32','i32','i32'],
+            'dom_get_attr': ['i32','i32','i32'],
+            'dom_remove_attr': ['i32','i32','i32'],
+            'dom_append': ['i32','i32'],
+            'dom_prepend': ['i32','i32'],
+            'dom_remove': ['i32'],
+            'dom_clone': ['i32','i32'],
+            'dom_parent': ['i32'],
+            'dom_children': ['i32'],
+            'dom_add_class': ['i32','i32','i32'],
+            'dom_remove_class': ['i32','i32','i32'],
+            'dom_toggle_class': ['i32','i32','i32'],
+            'dom_has_class': ['i32','i32','i32'],
+            'dom_set_style': ['i32','i32','i32','i32','i32'],
+            'dom_get_style': ['i32','i32','i32'],
+            'dom_get_value': ['i32'],
+            'dom_set_value': ['i32','i32','i32'],
+            'dom_focus': ['i32'],
+            'dom_blur': ['i32'],
+            'dom_get_body': [],
+            'dom_get_document': [],
+            'dom_query': ['i32','i32'],
+            'dom_query_all': ['i32','i32'],
+            'dom_on': ['i32','i32','i32','i32'],
+            'dom_off': ['i32'],
+            'event_prevent_default': [],
+            'event_stop_propagation': [],
+            'event_target': [],
         }
 
         if params := sig.get(name):

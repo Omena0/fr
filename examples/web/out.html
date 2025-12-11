@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body id="body">
+    <div id="output"></div>
+    <script>
+// Fr WASM Runtime - Auto-generated JavaScript glue
+// Only includes functions used by this specific module
+// Fr WASM Runtime - Auto-generated JavaScript glue
+// Only includes functions used by this specific module
+
+// Error classes
+class FrRuntimeError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = "FrRuntimeError";
+    }
+}
+
+class FrExitError extends Error {
+    constructor(code) {
+        super(`Program exited with code ${code}`);
+        this.name = "FrExitError";
+        this.code = code;
+    }
+}
+
+// Runtime state
+let memory = null;
+let wasmInstance = null;
+let metadata = null;
+let stringOffset = 1024;
+let outputBuffer = "";
+const functionCallStack = [];
+const lists = new Map();
+const sets = new Map();
+const domElements = new Map();
+const eventHandlers = new Map();
+let currentEvent = null;
+const jsImports = {};
+
+// Configuration
+const config = {
+    outputElementId: null,
+    autoFlush: true,
+};
+
+// Memory helpers
+function readString(ptr, len) {
+    if (len <= 0 || ptr < 0) return "";
+    const bytes = new Uint8Array(memory.buffer, ptr, len);
+    return new TextDecoder().decode(bytes);
+}
+
+function allocString(s) {
+    const bytes = new TextEncoder().encode(s);
+    const ptr = stringOffset;
+    stringOffset += bytes.length;
+    // Grow memory if needed
+    const needed = stringOffset;
+    const currentSize = memory.buffer.byteLength;
+    if (needed > currentSize) {
+        const pages = Math.ceil((needed - currentSize) / 65536);
+        memory.grow(pages);
+    }
+    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    return [ptr, bytes.length];
+}
+
+function flushOutput() {
+    if (config.outputElementId) {
+        const elem = document.getElementById(config.outputElementId);
+        if (elem) {
+            elem.textContent += outputBuffer;
+        }
+    }
+    outputBuffer = "";
+}
+
+// Build import object with only used functions
+function buildImports() {
+    return {
+        env: {
+            bool_to_str: (value) => {
+            const truthy = (typeof value === 'bigint') ? (value !== 0n) : !!value;
+            return allocString(truthy ? 'true' : 'false');
+        },
+            ceil_f64: (value) => Math.ceil(value),
+            dom_append: (parentId, childId) => {
+            const parent = domElements.get(parentId);
+            const child = domElements.get(childId);
+            if (parent && child) parent.appendChild(child);
+        },
+            dom_create: (tagPtr, tagLen) => {
+            const tag = readString(tagPtr, tagLen);
+            const elem = document.createElement(tag);
+            // Auto-attach to document body so elements become visible by default
+            if (document.body) {
+                document.body.appendChild(elem);
+            }
+            const id = domElements.size + 1;
+            domElements.set(id, elem);
+            return id;
+        },
+            dom_set_text: (elemId, textPtr, textLen) => {
+            const elem = domElements.get(elemId);
+            if (elem) elem.textContent = readString(textPtr, textLen);
+        },
+            exit_process: (code) => {
+            throw new FrExitError(code);
+        },
+            f64_to_str: (value) => {
+            const s = Number.isInteger(value) ? value.toFixed(1) : value.toString();
+            return allocString(s);
+        },
+            file_close: (fd) => {
+            console.error('file_close is not supported in WebAssembly JS glue');
+        },
+            file_open: (pathPtr, pathLen, modePtr, modeLen) => {
+            console.error('file_open is not supported in WebAssembly JS glue');
+            return -1;
+        },
+            file_read: (fd) => {
+            console.error('file_read is not supported in WebAssembly JS glue');
+            return [0, 0];
+        },
+            file_write: (fd, ptr, len) => {
+            console.error('file_write is not supported in WebAssembly JS glue');
+        },
+            floor_f64: (value) => Math.floor(value),
+            i64_to_str: (value) => {
+            const s = value.toString();
+            return allocString(s);
+        },
+            index_error: (typePtr, typeLen, index, length) => {
+            const type = readString(typePtr, typeLen);
+            throw new FrRuntimeError(`Index ${index} out of bounds for ${type} of length ${length}`);
+        },
+            list_append: (listId, value) => {
+            const list = lists.get(listId);
+            if (list) list.push(value);
+            return listId;
+        },
+            list_get: (listId, index) => {
+            const list = lists.get(listId);
+            if (!list) return 0n;
+            const idx = Number(index);
+            if (idx < 0 || idx >= list.length) return 0n;
+            return list[idx];
+        },
+            list_len: (listId) => {
+            const list = lists.get(listId);
+            return BigInt(list ? list.length : 0);
+        },
+            list_new: () => {
+            const id = lists.size;
+            lists.set(id, []);
+            return id;
+        },
+            list_pop: (listId) => {
+            const list = lists.get(listId);
+            if (!list || list.length === 0) return [listId, 0n];
+            const value = list.pop();
+            return [listId, value];
+        },
+            list_set: (listId, index, value) => {
+            const list = lists.get(listId);
+            if (list) {
+                const idx = Number(index);
+                if (idx >= 0 && idx < list.length) {
+                    list[idx] = value;
+                }
+            }
+            return listId;
+        },
+            list_to_str: (listId) => {
+            const list = lists.get(listId) || [];
+            const elements = list.map(v => {
+                const packed = BigInt(v);
+                const len = Number(packed >> 32n);
+                const ptr = Number(packed & 0xffffffffn);
+                if (len > 0) return readString(ptr, len);
+                return v.toString();
+            });
+            return allocString('[' + elements.join(', ') + ']');
+        },
+            pow: (base, exp) => Math.pow(base, exp),
+            print: (ptr, len) => {
+            const text = readString(ptr, len);
+            console.log(text)
+        },
+            println: (ptr, len) => {
+            const text = readString(ptr, len);
+            console.log(text)
+        },
+            round_f64: (value) => Math.round(value),
+            runtime_error: (typePtr, typeLen, msgPtr, msgLen, lineNum) => {
+            const type = readString(typePtr, typeLen) || 'Error';
+            const msg = readString(msgPtr, msgLen) || '';
+            const line = Number(lineNum) || 0;
+            throw new FrRuntimeError(`${type}: ${msg}` + (line ? ` (line ${line})` : ''));
+        },
+            set_add: (setId, value) => {
+            const set = sets.get(setId);
+            if (set) set.add(value);
+            return setId;
+        },
+            set_contains: (setId, value) => {
+            const set = sets.get(setId);
+            return (set && set.has(value)) ? 1 : 0;
+        },
+            set_len: (setId) => {
+            const set = sets.get(setId);
+            return BigInt(set ? set.size : 0);
+        },
+            set_new: () => {
+            const id = sets.size;
+            sets.set(id, new Set());
+            return id;
+        },
+            set_remove: (setId, value) => {
+            const set = sets.get(setId);
+            if (set) set.delete(value);
+            return setId;
+        },
+            set_to_str: (setId) => {
+            const set = sets.get(setId);
+            if (!set) return allocString('{}');
+            const elements = [...set].map(v => v.toString());
+            return allocString('{' + elements.join(', ') + '}');
+        },
+            sleep: (seconds) => {
+            const ms = Math.max(0, Number(seconds) * 1000);
+            const end = performance.now() + ms;
+            while (performance.now() < end) {}
+        },
+            sqrt: (value) => Math.sqrt(value),
+            str_concat: (ptr1, len1, ptr2, len2) => {
+            if (len1 === 0 && len2 === 0) return [0, 0];
+            if (len1 === 0) return [ptr2, len2];
+            if (len2 === 0) return [ptr1, len1];
+            const s1 = readString(ptr1, len1);
+            const s2 = readString(ptr2, len2);
+            return allocString(s1 + s2);
+        },
+            str_contains: (ptr1, len1, ptr2, len2) => {
+            const s1 = readString(ptr1, len1);
+            const s2 = readString(ptr2, len2);
+            return s1.includes(s2) ? 1 : 0;
+        },
+            str_decref: (ptr, len) => {},
+            str_eq: (ptr1, len1, ptr2, len2) => {
+            if (len1 !== len2) return 0;
+            const s1 = readString(ptr1, len1);
+            const s2 = readString(ptr2, len2);
+            return s1 === s2 ? 1 : 0;
+        },
+            str_get: (ptr, len, index) => {
+            const s = readString(ptr, len);
+            const idx = Number(index);
+            if (idx < 0 || idx >= s.length) return [0, 0];
+            return allocString(s[idx]);
+        },
+            str_incref: (ptr, len) => {},
+            str_join: (sepPtr, sepLen, listId) => {
+            const sep = readString(sepPtr, sepLen);
+            const list = lists.get(listId) || [];
+            const parts = list.map(v => {
+                const packed = BigInt(v);
+                const len = Number(packed >> 32n);
+                const ptr = Number(packed & 0xffffffffn);
+                if (len > 0) return readString(ptr, len);
+                return v.toString();
+            });
+            return allocString(parts.join(sep));
+        },
+            str_lower: (ptr, len) => {
+            const s = readString(ptr, len);
+            return allocString(s.toLowerCase());
+        },
+            str_replace: (ptr, len, oldPtr, oldLen, newPtr, newLen) => {
+            const s = readString(ptr, len);
+            const oldStr = readString(oldPtr, oldLen);
+            const newStr = readString(newPtr, newLen);
+            return allocString(s.split(oldStr).join(newStr));
+        },
+            str_split: (strPtr, strLen, sepPtr, sepLen) => {
+            const s = readString(strPtr, strLen);
+            const sep = readString(sepPtr, sepLen);
+            const parts = sep === '' ? [...s] : s.split(sep);
+            const listId = lists.size;
+            const list = [];
+            for (const part of parts) {
+                const [ptr, len] = allocString(part);
+                const packed = (BigInt(len) << 32n) | BigInt(ptr);
+                list.push(packed);
+            }
+            lists.set(listId, list);
+            return listId;
+        },
+            str_strip: (ptr, len) => {
+            const s = readString(ptr, len);
+            return allocString(s.trim());
+        },
+            str_to_f64: (ptr, len) => {
+            if (len <= 0) return 0.0;
+            const s = readString(ptr, len);
+            return parseFloat(s) || 0.0;
+        },
+            str_to_i64: (ptr, len) => {
+            if (len <= 0) return 0n;
+            const s = readString(ptr, len);
+            const f = parseFloat(s);
+            // Guard against NaN/Infinity before converting to BigInt
+            if (!Number.isFinite(f)) return 0n;
+            return BigInt(Math.trunc(f)) || 0n;
+        },
+            str_upper: (ptr, len) => {
+            const s = readString(ptr, len);
+            return allocString(s.toUpperCase());
+        },
+        }
+    };
+}
+
+// Load and run Fr WASM module from file
+async function loadFrModule(wasmPath, options = {}) {
+    const response = await fetch(wasmPath);
+    const wasmBytes = await response.arrayBuffer();
+    return loadFrModuleFromBytes(wasmBytes, options);
+}
+
+// Load and run Fr WASM module from bytes
+async function loadFrModuleFromBytes(wasmBytes, options = {}) {
+    Object.assign(config, options);
+    
+    const imports = buildImports();
+    const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+    
+    wasmInstance = instance;
+    memory = instance.exports.memory;
+    
+    return {
+        instance,
+        run: () => {
+            try {
+                if (instance.exports.main) {
+                    instance.exports.main();
+                }
+                flushOutput();
+                return { success: true, output: outputBuffer };
+            } catch (e) {
+                if (e instanceof FrExitError) {
+                    flushOutput();
+                    return { success: e.code === 0, exitCode: e.code, output: outputBuffer };
+                }
+                throw e;
+            }
+        },
+        getOutput: () => outputBuffer,
+        flushOutput,
+        memory,
+        domElements,
+        lists,
+        sets,
+    };
+}
+
+
+// Load and run Fr WASM module
+(async function() {
+    const output = document.getElementById('body');
+    try {
+            const wasmBase64 = 'AGFzbQEAAAABpgEaYAJ/fwF/YAN/f38AYAJ/fwBgBX9/f39/AGAEf39/fwJ/f2ACf38BfmACf38BfGABfgJ/f2ABfAJ/f2ABfwJ/f2ACf38Cf39gBn9/f39/fwJ/f2ADf39+An9/YAR/f39/AX9gA39/fwJ/f2ABfAF8YAABf2ACf34Bf2ACf34BfmADf35+AX9gAX8BfmABfwJ/fmABfwBgAXwAYAV/f39/fwF/YAAAAsMFLANlbnYKZG9tX2NyZWF0ZQAAA2Vudgxkb21fc2V0X3RleHQAAQNlbnYKZG9tX2FwcGVuZAACA2VudgVwcmludAACA2VudgdwcmludGxuAAIDZW52DXJ1bnRpbWVfZXJyb3IAAwNlbnYKc3RyX2NvbmNhdAAEA2VudgpzdHJfdG9faTY0AAUDZW52CnN0cl90b19mNjQABgNlbnYKaTY0X3RvX3N0cgAHA2VudgpmNjRfdG9fc3RyAAgDZW52C2Jvb2xfdG9fc3RyAAcDZW52C2xpc3RfdG9fc3RyAAkDZW52CnNldF90b19zdHIACQNlbnYJc3RyX3VwcGVyAAoDZW52CXN0cl9sb3dlcgAKA2VudglzdHJfc3RyaXAACgNlbnYLc3RyX3JlcGxhY2UACwNlbnYHc3RyX2dldAAMA2VudgxzdHJfY29udGFpbnMADQNlbnYGc3RyX2VxAA0DZW52CHN0cl9qb2luAA4DZW52CXN0cl9zcGxpdAANA2VudgRzcXJ0AA8DZW52CGxpc3RfbmV3ABADZW52C2xpc3RfYXBwZW5kABEDZW52CGxpc3RfZ2V0ABIDZW52CGxpc3Rfc2V0ABMDZW52CGxpc3RfbGVuABQDZW52CGxpc3RfcG9wABUDZW52B3NldF9uZXcAEANlbnYHc2V0X2FkZAARA2VudgpzZXRfcmVtb3ZlABEDZW52DHNldF9jb250YWlucwARA2VudgdzZXRfbGVuABQDZW52CXJvdW5kX2Y2NAAPA2VudglmbG9vcl9mNjQADwNlbnYIY2VpbF9mNjQADwNlbnYJZmlsZV9vcGVuAA0DZW52CWZpbGVfcmVhZAAJA2VudgpmaWxlX3dyaXRlAAEDZW52CmZpbGVfY2xvc2UAFgNlbnYMZXhpdF9wcm9jZXNzABYDZW52BXNsZWVwABcDAwIYGQUFAQFAgAgGDAJ/AUGACAt/AUEACwcRAgZtZW1vcnkCAARtYWluAC0KxQECmgEHBH8BfgF/AX4DfwF+AXwgACABEAAhByAHIAIgAxABEBghBUIAIQsCQANAIAsgBBAcU0UNASAEIAsQGiEJIAcgCacpAwCnEAIgBSAJEBkhBSALQgF8IQsMAAsLIAcgACABIAUjACMAQRhqJAAhDa0hDyANIA83AxCtQiCGIQ+tIA+EIQ8gDSAPNwMIrSEPIA0gDzcDACANDwALJwMEfwF+AXxBAEEDQQNBBRAYQQhBAkEIQQIQGBAsrRAZECwhAA8ACwsaAwBBAAsDZGl2AEEDCwVEaXYgMQBBCAsCaDE=';
+            const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
+            const wasmBuffer = wasmBytes.buffer;
+            const wasmPath = null; // Not needed since we have bytes
+            
+            // Set metadata before loading module
+            metadata = {"version": 1, "functions": ["element", "main"], "entry_point": "main", "imports": ["list_append", "dom_append", "dom_set_text", "list_get", "list_new", "dom_create"], "memory_size": 10, "string_constants": {"div": 0, "Div 1": 3, "h1": 8}, "callbacks": [], "source_file": "main.fr", "line_map": [9, 9, 9, 10, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 16, 16, 16, 16, 16, 16, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4], "wasm_binary": true};
+            
+            const fr = await loadFrModuleFromBytes(wasmBuffer, {
+                outputElementId: 'output',
+                autoFlush: true
+            });
+
+        const result = fr.run();
+        if (!result.success) {
+            output.innerHTML += '<span class="error">\nProgram exited with code ' + result.exitCode + '</span>';
+        }
+    } catch (e) {
+        output.innerHTML += '<span class="error">Error: ' + e.message + '</span>';
+        console.error(e);
+    }
+})();
+    </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+
+struct Element {
+    int id
+    str name
+    list content
+}
+
+Element element(str name, str text="", list content=[]) {
+    int new_element  = dom_create(name)
+    dom_set_text(new_element, text)
+    list new_content = []
+    for (child in content) {
+        dom_append(new_element, child.id)
+        new_content.append(child)
+    }
+    return Element(new_element, name, new_content)
+}

@@ -2,6 +2,7 @@ from utils import InputStream, strip_all, split
 from builtin_funcs import funcs
 from typing import Any, cast
 import ast
+import copy
 import sys
 import threading
 import os
@@ -510,17 +511,15 @@ def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int
     Handles varargs: type *name, type **name
     """
     import re
-    
-    # Handle varargs: "type **name" or "type *name"
-    varargs_match = re.match(r'^(\w+)\s+(\*\*?)(\w+)$', arg)
-    if varargs_match:
-        arg_type = varargs_match.group(1)
-        varargs_marker = varargs_match.group(2)
-        arg_name = varargs_match.group(3)
+
+    if varargs_match := re.match(r'^(\w+)\s+(\*\*?)(\w+)$', arg):
+        arg_type = varargs_match[1]
         if arg_type in types:
+            varargs_marker = varargs_match[2]
+            arg_name = varargs_match[3]
             # Mark varargs with * prefix in type to indicate varargs
             return (arg_name, arg_type + varargs_marker)
-    
+
     parts = arg.split()
 
     if len(parts) == 1:
@@ -575,10 +574,6 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
         else:
             new_arg = False
 
-        if chr == '\n' and not new_arg:
-            stream.seek_back_line()
-            raise SyntaxError(stream.format_error('Expected ")"'))
-
         if depth > 0:  # Don't include the final ')'
             args_text += chr
 
@@ -596,7 +591,38 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
     if not parse_types:
         return [(arg, None) for arg in args]
 
-    return [_parse_typed_arg(arg, check_comma, stream, line) for arg in args]
+    parsed_args: list[tuple[str, str | None, Any]] = []
+    seen_default = False
+
+    for arg in args:
+        default_value: Any | None = None
+        arg_decl = arg
+
+        if '=' in arg:
+            # Split only on the first top-level '=' to allow it inside strings
+            parts = split(arg, '=', maxsplit=1)
+            arg_decl = parts[0].strip()
+            default_text = parts[1].strip() if len(parts) > 1 else ''
+
+            if not default_text:
+                raise SyntaxError(stream.format_error('Expected default value after "="'))
+
+            default_value = parse_literal(default_text)
+            seen_default = True
+        elif seen_default:
+            raise SyntaxError(stream.format_error('Non-default argument follows default argument'))
+
+        name, arg_type = _parse_typed_arg(arg_decl, check_comma, stream, line)
+
+        if default_value is not None:
+            if isinstance(arg_type, str) and (arg_type.endswith('*') or arg_type.endswith('**')):
+                raise SyntaxError(stream.format_error('Varargs parameters cannot have default values'))
+            if arg_type is not None:
+                default_value = cast_value(default_value, arg_type)
+
+        parsed_args.append((name, arg_type, default_value))
+
+    return parsed_args
 
 def _normalize_operators(text: str) -> str:
     """Normalize custom operators to Python equivalents."""
@@ -724,6 +750,10 @@ def parse_expr(text: str):
 
                 if func_name and func_name in funcs:
                     func_info = funcs[func_name]
+
+                    # Apply defaults for non-C functions when args are missing
+                    if func_info.get('type') != 'c_function':
+                        node['args'] = _apply_default_args(func_info, list(node.get('args', [])), None, func_name)
 
                     # Validate argument count for C functions (skip if function has varargs)
                     if func_info.get('type') == 'c_function':
@@ -893,8 +923,17 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     global current_func
     current_func = name
 
-    args = parse_args(stream, parse_types=True)
-    for arg_name, arg_type in args:
+    parsed_args = parse_args(stream, parse_types=True)
+
+    defaults: list[Any] = []
+    args: list[tuple[str, str | None]] = []
+
+    for arg_entry in parsed_args:
+        arg_name, arg_type, default_value = arg_entry if len(arg_entry) == 3 else (*arg_entry, None)
+
+        defaults.append(default_value)
+        args.append((arg_name, arg_type))
+
         vars[arg_name] = {
             "type": arg_type or "none",
             "value": None
@@ -914,6 +953,7 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     funcs[name] = {
         "type": "func",
         "args": args,
+        "defaults": defaults,
         "func": scope,
         "mods": mods,
         "return_type": type
@@ -930,6 +970,46 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
         scope=scope,
         mods=mods
     )
+
+def _consume_expression(stream: InputStream) -> str:
+    """Consume an expression, handling multiline constructs inside (), [], {}."""
+    expr = ""
+    depth = 0
+    in_string = False
+    quote_char = None
+    
+    while stream.text:
+        char = stream.peek(1)
+        
+        if in_string:
+            if char == '\\':
+                # Escape sequence
+                stream.consume(char)
+                expr += char
+                if stream.text:
+                    next_char = stream.peek(1)
+                    stream.consume(next_char)
+                    expr += next_char
+                continue
+            elif char == quote_char:
+                in_string = False
+                quote_char = None
+        else:
+            if char in '"\'':
+                in_string = True
+                quote_char = char
+            elif char in '([{':
+                depth += 1
+            elif char in ')]}':
+                depth -= 1
+            elif char == '\n':
+                if depth == 0:
+                    break
+        
+        stream.consume(char)
+        expr += char
+        
+    return expr
 
 def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list = []) -> dict[str, Any] | type[SkipNode]:
     """Parse a variable declaration or assignment.
@@ -952,7 +1032,7 @@ def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list =
     value_line = stream.line
 
     # Parse the value expression
-    value_text = stream.consume_until('\n').strip().rstrip(';')
+    value_text = _consume_expression(stream).strip().rstrip(';')
     value = parse_expr(value_text)
 
     if var_type is None:
@@ -1096,6 +1176,44 @@ def cast_args(args: list, func: dict) -> list:
 
     return args
 
+def _has_varargs_definition(func_args: list) -> bool:
+    """Return True if the last argument is marked as varargs (type ending with * or **)."""
+    if not func_args or not isinstance(func_args, list):
+        return False
+
+    last_arg = func_args[-1]
+    if isinstance(last_arg, (list, tuple)) and len(last_arg) >= 2:
+        last_type = last_arg[1]
+        return isinstance(last_type, str) and (last_type.endswith('*') or last_type.endswith('**'))
+
+    return False
+
+def _apply_default_args(func: dict, provided_args: list, stream: InputStream | None, name: str) -> list:
+    """Insert default argument values for missing parameters based on the function signature."""
+    func_args = func.get('args', [])
+    if not isinstance(func_args, list) or not func_args:
+        return provided_args
+
+    defaults = func.get('defaults', [])
+    defaults = defaults if isinstance(defaults, list) else []
+
+    # Varargs (type ending with * or **) are optional and should not require defaults
+    required_args = len(func_args) - (1 if _has_varargs_definition(func_args) else 0)
+
+    if len(provided_args) < required_args:
+        for idx in range(len(provided_args), required_args):
+            default_val = defaults[idx] if idx < len(defaults) else None
+            if default_val is None:
+                message = (
+                    f"Function '{name}' expects at least {required_args} argument{'s' if required_args != 1 else ''}, got {len(provided_args)}"
+                )
+                if stream is not None:
+                    raise SyntaxError(stream.format_error(message))
+                raise SyntaxError(message)
+            provided_args.append(copy.deepcopy(default_val))
+
+    return provided_args
+
 def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
     """Check if a function body contains builtin calls that cannot be evaluated at parse time.
     Returns (has_non_evaluable, first_builtin_name)"""
@@ -1231,6 +1349,9 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
         arg_values.append(arg_node)
 
     func = funcs[name]
+
+    # Add default arguments for missing parameters before casting
+    arg_values = _apply_default_args(func, arg_values, stream, name)
 
     # Type-cast arguments to match function signature
     arg_values = cast_args(arg_values, func)
@@ -1875,7 +1996,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 target, field = parts
                 stream.consume('=')
                 stream.strip()
-                value = stream.consume_until('\n').strip()
+                value = _consume_expression(stream).strip().rstrip(';')
                 node = make_node(stream,
                     type="field_assign",
                     target=target,
@@ -1902,7 +2023,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                         expected = func_info.get('param_count', 0)
                         actual = len(result.get('args', []))
                         if actual != expected:
-                            param_names = ', '.join(p['type'] + ' ' + p['name'] for p in func_info.get('params', []))
+                            param_names = ', '.join(f"{p['type']} {p['name']}" for p in func_info.get('params', []))
                             raise SyntaxError(stream.format_error(
                                 f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
                                 f"({param_names or 'void'}), got {actual}"
@@ -1959,7 +2080,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
         if stream.peek_char(1) == '.':
             # This could be obj.method() or obj.field = value
             # Consume the rest to check
-            remaining = stream.consume_until('\n').strip()
+            remaining = _consume_expression(stream).strip().rstrip(';')
 
             # Check if this is a method call by looking for '('
             if '(' in remaining:
@@ -1979,7 +2100,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
         # Handle expression statements like obj.attr.method() where word contains '.'
         elif '.' in word and stream.peek_char(1) == '(':
             # This is a method call on an object - parse the full expression
-            full_expr = word + stream.consume_until('\n').strip()
+            full_expr = word + _consume_expression(stream).strip().rstrip(';')
             parsed = parse_expr(full_expr)
             # If it's a call expression (has 'func' key), return it as a statement
             if isinstance(parsed, dict) and 'func' in parsed:
@@ -1994,7 +2115,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             stream.strip()
             if not stream.consume('='):
                 raise SyntaxError(stream.format_error('Expected "=" after index'))
-            value = stream.consume_until('\n').strip()
+            value = _consume_expression(stream).strip().rstrip(';')
             node = make_node(stream,
                 type="index_assign",
                 target=word,
@@ -2018,7 +2139,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             stream.strip()
 
             # Read the value expression
-            value_text = stream.consume_until('\n').strip()
+            value_text = _consume_expression(stream).strip().rstrip(';')
             value_expr = parse_expr(value_text)
 
             # Map augmented operators to their binary equivalents
@@ -2442,7 +2563,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             # consume_word() already consumed whitespace after 'return', which may include newlines
             # So we need to check if there's actually content on the same line
-            rest = stream.consume_until('\n')
+            rest = _consume_expression(stream).strip().rstrip(';')
 
             # If rest contains only whitespace or is a closing brace, treat as void return
             rest_stripped = rest.strip()
@@ -2483,7 +2604,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             # Parse raise statement: raise "ExceptionType" "message"
             # or: raise "ExceptionType"
             # or: raise (re-raise current exception)
-            rest = stream.consume_until('\n').strip()
+            rest = _consume_expression(stream).strip().rstrip(';')
 
             exc_type = None
             message = None
