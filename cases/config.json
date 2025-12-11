@@ -1,7 +1,7 @@
 {
     "native": {
         "enabled": true,
-        "timeout": 10,
+        "timeout": 2,
         "ignore": [
             "syntax_errors",
             "python_interop"
@@ -11,7 +11,7 @@
     },
     "c": {
         "enabled": true,
-        "timeout": 5,
+        "timeout": 2,
         "ignore": [
             "syntax_errors",
             "imports/c_import.fr"
@@ -21,7 +21,7 @@
     },
     "py": {
         "enabled": true,
-        "timeout": 10,
+        "timeout": 2,
         "ignore": [
             "runtime",
             "imports/c_import.fr",
@@ -32,12 +32,13 @@
     },
     "wasm": {
         "enabled": true,
-        "timeout": 10,
+        "timeout": 2,
         "ignore": [
             "syntax_errors",
             "runtime",
             "python_interop",
-            "io",
+            "io/file*",
+            "io/socket*",
             "imports/c_import.fr",
             "misc/goto_with_return.fr"
         ],

@@ -4728,7 +4728,14 @@ L_RETURN: // OP_RETURN
 
     if (vm->call_stack_top <= 1)
     {
+        // Returning from main - set exit code if return value is an integer
+        if (ret_val.type == VAL_INT) {
+            vm->exit_code = (int)ret_val.as.int64;
+        } else if (ret_val.type != VAL_VOID) {
+            vm->exit_code = 0; // Non-integer return, use 0
+        }
         vm->running = false;
+        value_free(ret_val);
         return; // Returning from main - exit interpreter
     }
     else

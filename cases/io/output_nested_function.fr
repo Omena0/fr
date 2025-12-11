@@ -1,10 +1,10 @@
 // !6
 
-int add(a, b) {
+int add(int a, int b) {
     return a + b
 }
 
-int multiply(x, y) {
+int multiply(int x, int y) {
     return x * y
 }
 

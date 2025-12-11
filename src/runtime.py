@@ -1082,7 +1082,10 @@ def run(ast:AstType, file:str='', source:str=''):
         if 'main' not in funcs:
             raise RuntimeError('Missing main function')
 
-        run_func('main', sys.argv[3:])
+        exit_code = run_func('main', sys.argv[3:])
+        # If main returns an integer, use it as the exit code
+        if isinstance(exit_code, int):
+            sys.exit(exit_code)
 __all__ = [
     'run',
     'eval_expr',

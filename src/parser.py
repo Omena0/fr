@@ -507,7 +507,20 @@ def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int
     """Parse a single argument which may have a type annotation.
 
     Returns (name, type) where type is None if untyped.
+    Handles varargs: type *name, type **name
     """
+    import re
+    
+    # Handle varargs: "type **name" or "type *name"
+    varargs_match = re.match(r'^(\w+)\s+(\*\*?)(\w+)$', arg)
+    if varargs_match:
+        arg_type = varargs_match.group(1)
+        varargs_marker = varargs_match.group(2)
+        arg_name = varargs_match.group(3)
+        if arg_type in types:
+            # Mark varargs with * prefix in type to indicate varargs
+            return (arg_name, arg_type + varargs_marker)
+    
     parts = arg.split()
 
     if len(parts) == 1:
@@ -712,17 +725,19 @@ def parse_expr(text: str):
                 if func_name and func_name in funcs:
                     func_info = funcs[func_name]
 
-                    # Validate argument count for C functions
+                    # Validate argument count for C functions (skip if function has varargs)
                     if func_info.get('type') == 'c_function':
-                        expected = func_info.get('param_count', 0)
-                        actual = len(node.get('args', []))
-                        if actual != expected:
-                            params = func_info.get('params', [])
-                            param_names = ', '.join(f"{p['type']} {p['name']}" for p in params) if params else 'void'
-                            raise SyntaxError(
-                                f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
-                                f"({param_names}), got {actual}"
-                            )
+                        has_varargs = any(param_type.endswith('*') or param_type.endswith('**') for _, param_type in func_info.get('params', []))
+                        if not has_varargs:
+                            expected = func_info.get('param_count', 0)
+                            actual = len(node.get('args', []))
+                            if actual != expected:
+                                params = func_info.get('params', [])
+                                param_names = ', '.join(f"{p['type']} {p['name']}" for p in params) if params else 'void'
+                                raise SyntaxError(
+                                    f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
+                                    f"({param_names}), got {actual}"
+                                )
 
             # Recursively validate nested structures
             for key, value in node.items():
@@ -1880,16 +1895,18 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 # Parse the call
                 result = parse_func_call(stream, word)
 
-                # Validate argument count for C functions
+                # Validate argument count for C functions (skip if function has varargs)
                 if func_info.get('type') == 'c_function':
-                    expected = func_info.get('param_count', 0)
-                    actual = len(result.get('args', []))
-                    if actual != expected:
-                        param_names = ', '.join(p['type'] + ' ' + p['name'] for p in func_info.get('params', []))
-                        raise SyntaxError(stream.format_error(
-                            f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
-                            f"({param_names or 'void'}), got {actual}"
-                        ))
+                    has_varargs = any(param_type.endswith('*') or param_type.endswith('**') for _, param_type in func_info.get('params', []))
+                    if not has_varargs:
+                        expected = func_info.get('param_count', 0)
+                        actual = len(result.get('args', []))
+                        if actual != expected:
+                            param_names = ', '.join(p['type'] + ' ' + p['name'] for p in func_info.get('params', []))
+                            raise SyntaxError(stream.format_error(
+                                f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
+                                f"({param_names or 'void'}), got {actual}"
+                            ))
 
                 return result
             else:

@@ -10,6 +10,7 @@ import glob
 import sys
 import os
 import json
+import fnmatch
 
 def load_config():
     """Load test configuration from cases/config.json"""
@@ -68,8 +69,12 @@ def should_skip_test(test_path, runtime, config):
     category = get_test_category(test_path)
     ignore_list = runtime_config.get('ignore', [])
     
-    # Check both category and full test path
-    return bool(category in ignore_list or test_path in ignore_list)
+    # Check both category and full test path (with glob pattern support)
+    for pattern in ignore_list:
+        if fnmatch.fnmatch(test_path, pattern) or fnmatch.fnmatch(category, pattern):
+            return True
+    
+    return False
 
 def run_test_isolated(test_file, test_path, test_content, config=None):
     """Run a single test in complete isolation via subprocess

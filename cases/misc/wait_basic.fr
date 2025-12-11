@@ -1,15 +1,16 @@
-// !Parent waiting\nParent got exit status: 0
-// Test: wait basic
+// !Parent waiting\nParent got exit status: 9
 
-void main() {
+int main(str *args) {
     int pid = fork()
 
     if (pid == 0) {
-        // Child process - just exits normally
+        sleep(2)
+        return 9
     } else {
         // Parent process
         println("Parent waiting")
         int status = pid.wait()
         println("Parent got exit status: " + str(status))
     }
+    return 0
 }
