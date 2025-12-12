@@ -4,8 +4,16 @@ void main() {
     Element div = element(
         'div',
         'Div 1',
-        [
-            element('h1', 'h1')
-        ]
+        element('h1', 'Bing chilling 1').styles(
+            "margin-top: 100px"
+        ),
+        element('h2', 'Bing chilling 2'),
+        element('h3', 'Bing chilling 3'),
+        element('h4', 'Bing chilling 4'),
+        element('h5', 'Bing chilling 5'),
+        element('h6', 'Bing chilling 6')
+
+    ).styles(
+        "margin-left: 30px"
     )
 }

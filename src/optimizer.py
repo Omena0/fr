@@ -2054,7 +2054,10 @@ class BytecodeOptimizer:
             'MUL_I64', 'MUL_F64', 'DIV_I64', 'DIV_F64', 'MOD_I64',
             'CMP_EQ', 'CMP_NE', 'CMP_LT', 'CMP_GT', 'CMP_LE', 'CMP_GE',
             'AND', 'OR', 'NOT', 'NEG',
-            'BUILTIN_PRINTLN', 'BUILTIN_PRINT',  # Void functions that consume arguments
+            'BUILTIN_PRINTLN', 'BUILTIN_PRINT',
+            'LIST_APPEND', 'LIST_SET', 'SET_ADD', 'SET_REMOVE', 'SET_CONTAINS',
+            'STRUCT_NEW', 'STRUCT_SET', 'CALL', 'PY_CALL', 'PY_CALL_METHOD',
+            'STORE_GLOBAL', 'LOAD_GLOBAL', 'STORE', 'LOAD'
         }
         
         while i < len(lines):

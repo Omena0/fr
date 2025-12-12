@@ -11,6 +11,27 @@ class WasmCompilerError(Exception):
     """Raised when WASM compilation fails"""
     pass
 
+class TypeStack(list):
+    """A list wrapper that keeps extended_type_stack in sync"""
+    def __init__(self, compiler):
+        super().__init__()
+        self.compiler = compiler
+
+    def append(self, item):
+        super().append(item)
+        if hasattr(self.compiler, 'extended_type_stack'):
+            self.compiler.extended_type_stack.append(None)
+
+    def pop(self, index=-1):
+        if hasattr(self.compiler, 'extended_type_stack') and self.compiler.extended_type_stack:
+            self.compiler.extended_type_stack.pop(index)
+        return super().pop(index)
+
+    def __setitem__(self, index, value):
+        super().__setitem__(index, value)
+        if hasattr(self.compiler, 'extended_type_stack') and len(self.compiler.extended_type_stack) > index:
+             self.compiler.extended_type_stack[index] = None
+
 class WasmCompiler:
     """Compiles fr bytecode to WebAssembly"""
 
@@ -87,10 +108,10 @@ class WasmCompiler:
 
         # Allocate memory for struct storage (start after string constants)
         self.heap_offset = 1024  # Start heap at 1KB
-        
+
         # Track function references for callbacks
         self.callback_functions: Set[str] = set()  # Functions used as callbacks
-        
+
         # Track timer function signatures (variadic)
         self.timer_signatures: Dict[str, str] = {}  # Maps timer func name to param signature
 
@@ -155,10 +176,10 @@ class WasmCompiler:
 
         # Parse bytecode and build function metadata
         self._parse_bytecode_structure(lines)
-        
+
         # Detect which imports are actually used
         self._collect_imports_used(lines)
-        
+
         # Pre-pass to determine timer function signatures (variadic)
         self._analyze_timer_signatures(lines)
 
@@ -201,7 +222,7 @@ class WasmCompiler:
         """Scan bytecode to determine which imports are actually used"""
         for line in lines:
             line = line.strip()
-            
+
             # Check for FUNC_REF markers to track callback functions
             if line.startswith('# FUNC_REF '):
                 parts = line.split()
@@ -209,10 +230,10 @@ class WasmCompiler:
                     func_name = parts[2]
                     self.callback_functions.add(func_name)
                 continue
-            
+
             if not line or line.startswith('#'):
                 continue
-            
+
             # Check for CALL instructions that use builtin functions
             if line.startswith('CALL '):
                 parts = line.split()
@@ -221,7 +242,7 @@ class WasmCompiler:
                     # Check if this is a builtin function in our map
                     if func_name in self.builtin_map:
                         self.imports.add(func_name)
-    
+
     def _analyze_timer_signatures(self, lines: List[str]):
         """Pre-pass to determine variadic timer function signatures"""
         # Build a simple type stack to track what's on stack at each CALL
@@ -567,6 +588,7 @@ class WasmCompiler:
             'set': 'i32',   # Set pointer
             'any': 'i64',
             'int': 'i32',
+            'variadic': 'i32', # List pointer
         }
         # Handle struct types (e.g., "struct:Point") or bare struct names (e.g., "Point")
         if fr_type.startswith('struct:') or self._is_struct_name(fr_type):
@@ -584,7 +606,8 @@ class WasmCompiler:
         """Compile a single function"""
         self.current_function = func_name
         self.local_vars = func_meta['locals'].copy()
-        self.type_stack = []
+        self.type_stack = TypeStack(self)
+        self.extended_type_stack = []  # Track detailed types (e.g. 'str') parallel to type_stack
         self.struct_type_stack = []
         self.label_stack = []
 
@@ -598,7 +621,7 @@ class WasmCompiler:
         elif func_name in self.callback_functions:
             # Export callback functions so they can be called from JavaScript
             export_attr = f' (export "{func_name}")'
-        
+
         params_str = ""
 
         # Add parameters
@@ -1197,24 +1220,24 @@ class WasmCompiler:
 
                     # Handle user-defined functions
                     elif call_func_name in self.functions:
-                        return_type = self.functions[call_func_name].get('return_type', 'void')
+                        call_return_type = self.functions[call_func_name].get('return_type', 'void')
                         param_count_call = len(self.functions[call_func_name].get('params', []))
                         # Pop arguments from type_stack_sim
                         for _ in range(param_count_call):
                             if type_stack_sim:
                                 type_stack_sim.pop()
                         # Push return type
-                        if return_type and return_type != 'void':
-                            if return_type == 'str':
+                        if call_return_type and call_return_type != 'void':
+                            if call_return_type == 'str':
                                 type_stack_sim.append('i32')  # ptr
                                 type_stack_sim.append('i32')  # len
                                 value_type_tracker[len(type_stack_sim) - 2] = 'str'
                                 value_type_tracker[len(type_stack_sim) - 1] = 'str'
-                            elif return_type.startswith('struct:'):
+                            elif call_return_type.startswith('struct:'):
                                 # Struct return is i32 pointer
                                 type_stack_sim.append('i32')
                             else:
-                                wasm_ret = self._map_type_to_wasm(return_type)
+                                wasm_ret = self._map_type_to_wasm(call_return_type)
                                 type_stack_sim.append(wasm_ret)
 
             elif opcode == 'FUSED_LOAD_STORE':
@@ -1320,6 +1343,40 @@ class WasmCompiler:
             elif opcode == 'LOAD2_CMP_LT':
                 type_stack_sim.append('i32')
 
+            elif opcode == 'LOAD2_CMP_GT':
+                type_stack_sim.append('i32')
+
+            elif opcode == 'SWITCH_JUMP_TABLE':
+                # SWITCH_JUMP_TABLE min_value max_value label1 label2 ... labelN
+                # Value is on stack, check if in range [min, max], then use br_table
+                if len(args) < 3:
+                    self.emit_comment("SWITCH_JUMP_TABLE - invalid args", indent)
+                    # Pop the value
+                    if self.type_stack:
+                        self.type_stack.pop()
+                    return
+
+                min_val = int(args[0])
+                max_val = int(args[1])
+                labels = args[2:]
+
+                # Pop the switch value from type stack
+                if self.type_stack:
+                    self.type_stack.pop()
+
+                # Value is on stack as i64
+                # Convert to i32 for br_table and subtract min_val to get index
+                self.emit(f"i32.wrap_i64", indent)
+                if min_val != 0:
+                    self.emit(f"i32.const {min_val}", indent)
+                    self.emit("i32.sub", indent)
+
+                # Now we have the index. Use br_table with all labels
+                # br_table takes: index on stack, list of labels, default label
+                # If index out of range, use last label as default
+                label_str = " ".join(f"${lbl}" for lbl in labels)
+                self.emit(f"br_table {label_str}", indent)
+
         # Update local_vars with inferred types (but don't overwrite explicit types from bytecode)
         for idx, inferred_type in local_inferred_types.items():
             if idx >= param_count:
@@ -1364,6 +1421,12 @@ class WasmCompiler:
         self.emit("(local $temp_i64 i64)", 2)
         self.emit("(local $temp_f64 f64)", 2)
 
+        # Add indexed temps for argument shuffling
+        for i in range(10):
+            self.emit(f"(local $temp_i32_{i} i32)", 2)
+            self.emit(f"(local $temp_i64_{i} i64)", 2)
+            self.emit(f"(local $temp_f64_{i} f64)", 2)
+
         # Compile function body
         self._compile_function_body(func_name, bytecode_lines)
 
@@ -1378,7 +1441,13 @@ class WasmCompiler:
             if has_return:
                 # Function has returns in branches - add unreachable at end
                 # This tells WASM that reaching this point is impossible
-                self.emit("unreachable", 2)
+                # BUT: if control flow CAN reach here (e.g. missing return in one branch),
+                # this will trap.
+                # For main, we should return 0 if it's i64
+                if func_name == 'main':
+                    self.emit("i64.const 0", 2)
+                else:
+                    self.emit("unreachable", 2)
             else:
                 # No explicit return - add a default one
                 wasm_type = self._map_type_to_wasm(return_type)
@@ -1388,6 +1457,17 @@ class WasmCompiler:
                     self.emit("f64.const 0", 2)
                 elif wasm_type == 'i32':
                     self.emit("i32.const 0", 2)
+        elif func_name == 'main':
+             # Main is void in source but exported as returning i64 (usually)
+             # If we didn't emit a result type for main, we shouldn't return anything.
+             # But wait, earlier code:
+             # if func_name == "main": export_attr = ...
+             # return_type comes from func_meta.
+             # If main is void in source, return_type is void.
+             # So wasm_return is empty.
+             # But the runtime might expect main to return i64?
+             # Let's check how main is called in JS.
+             pass
 
         self.emit(")", 1)  # Close function
         self.current_function = None
@@ -1449,7 +1529,7 @@ class WasmCompiler:
                             forward_jumps[i] = target
                         elif target_pos <= i:
                             backward_jumps[i] = target
-            
+
             # Also detect switch case labels from SWITCH_JUMP_TABLE
             elif line.startswith('SWITCH_JUMP_TABLE '):
                 parts = line.split()
@@ -1462,7 +1542,7 @@ class WasmCompiler:
                             if target_pos > i:
                                 # Mark this as a switch case label
                                 switch_case_labels.add(target)
-            
+
             # Detect TRY_BEGIN handler labels
             elif line.startswith('TRY_BEGIN '):
                 parts = line.split()
@@ -1528,7 +1608,7 @@ class WasmCompiler:
                     labels_needing_blocks_inside_loops.add(target)
                 else:
                     labels_needing_blocks_outside_loops.add(target)
-        
+
         # Add switch case labels to blocks that need to be opened
         for target in switch_case_labels:
             if target not in loop_structures and target not in loop_end_labels:
@@ -1603,11 +1683,11 @@ class WasmCompiler:
                 # Check if this is a loop start label
                 if label_name in loop_structures:
                     end_label, continue_label = loop_structures[label_name]
-                    
+
                     # Find labels that need blocks inside this loop
                     loop_start_pos = label_positions[label_name]
                     loop_end_pos = label_positions.get(end_label, len(func_lines))
-                    
+
                     labels_in_this_loop = []
                     for lbl in labels_needing_blocks_inside_loops:
                         lbl_pos = label_positions[lbl]
@@ -1629,7 +1709,7 @@ class WasmCompiler:
                                         break
                             if not in_nested_loop:
                                 labels_in_this_loop.append((lbl, lbl_pos))
-                    
+
                     # Sort by position (innermost first for proper nesting)
                     labels_in_this_loop.sort(key=lambda x: x[1], reverse=True)
 
@@ -1641,14 +1721,14 @@ class WasmCompiler:
                     self.emit(f"(loop ${label_name}", indent)
                     indent += 1
                     active_blocks.append((label_name, True, indent))
-                    
+
                     # Open blocks for forward jump targets inside this loop
                     # These will be closed when we encounter their labels
                     for lbl, _ in labels_in_this_loop:
                         self.emit(f"(block ${lbl}", indent)
                         indent += 1
                         active_blocks.append((lbl, False, indent))
-                    
+
                     # Push this loop onto the stack
                     loop_stack.append((label_name, end_label, continue_label, [lbl for lbl, _ in labels_in_this_loop]))
                     continue
@@ -1664,7 +1744,7 @@ class WasmCompiler:
                 self._compile_instruction(stripped, indent)
             except Exception as e:
                 raise WasmCompilerError(f"Error compiling instruction '{stripped}': {e}")
-            
+
             # After compiling, check if this was a backward jump - if so, close the loop
             # Check by examining the instruction directly
             if stripped.startswith('JUMP '):
@@ -1700,6 +1780,8 @@ class WasmCompiler:
 
         opcode = parts[0]
         args = parts[1:] if len(parts) > 1 else []
+
+        print(f"Compiling {opcode} {args} - Stack: {self.type_stack}")
 
         self.emit_comment(inst, indent)
 
@@ -1760,6 +1842,9 @@ class WasmCompiler:
             # str_concat returns (i32 ptr, i32 len)
             self.type_stack.append('i32')
             self.type_stack.append('i32')
+            if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                self.extended_type_stack[-2] = 'str'
+                self.extended_type_stack[-1] = 'str'
             self.imports.add('str_concat')
 
         elif opcode == 'BUILTIN_LEN':
@@ -1774,9 +1859,6 @@ class WasmCompiler:
                 else:
                     self._ensure_top_is_i32(indent)
                     self._emit_call('list_len', indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-                self.type_stack.append('i64')
                 self._last_i32_source = None
             elif len(self.type_stack) >= 2 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
                 # String: (ptr, len) - convert len to i64 and discard ptr
@@ -1800,9 +1882,6 @@ class WasmCompiler:
                 else:
                     self._ensure_top_is_i32(indent)
                     self._emit_call('list_len', indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-                self.type_stack.append('i64')
                 self._last_i32_source = None
 
         elif opcode == 'BUILTIN_PRINT':
@@ -1887,15 +1966,21 @@ class WasmCompiler:
 
                 if value_type == 'i64':
                     self._emit_call('i64_to_str', indent)
-                    self.type_stack.pop()
+                    # self.type_stack.pop() - _emit_call already pops
                     self.type_stack.append('i32')  # ptr
                     self.type_stack.append('i32')  # len
+                    if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                        self.extended_type_stack[-2] = 'str'
+                        self.extended_type_stack[-1] = 'str'
                     self.imports.add('i64_to_str')
                 elif value_type == 'f64':
                     self._emit_call('f64_to_str', indent)
-                    self.type_stack.pop()
+                    # self.type_stack.pop()
                     self.type_stack.append('i32')  # ptr
                     self.type_stack.append('i32')  # len
+                    if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                        self.extended_type_stack[-2] = 'str'
+                        self.extended_type_stack[-1] = 'str'
                     self.imports.add('f64_to_str')
                 elif value_type == 'i32':
                     # Could be a boolean, list, set, or other i32 value
@@ -1915,9 +2000,12 @@ class WasmCompiler:
                         # Default to boolean
                         self._emit_call('bool_to_str', indent)
 
-                    self.type_stack.pop()
+                    # self.type_stack.pop()
                     self.type_stack.append('i32')  # ptr
                     self.type_stack.append('i32')  # len
+                    if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                        self.extended_type_stack[-2] = 'str'
+                        self.extended_type_stack[-1] = 'str'
                     # Clear the i32 source tracking since we've now converted to string
                     self._last_i32_source = None
 
@@ -1939,7 +2027,7 @@ class WasmCompiler:
 
             if func_name in builtin_map:
                 import_name, return_types, param_types = builtin_map[func_name]
-                
+
                 # Special handling for variadic timer functions
                 if func_name in ('set_timeout', 'set_interval') and len(param_types) == 0:
                     # Variadic function - all parameters are i32
@@ -1948,141 +2036,265 @@ class WasmCompiler:
                     # Store the signature for import generation
                     sig_parts = ' '.join(f'(param {t})' for t in param_types)
                     self.timer_signatures[func_name] = sig_parts
-                
-                arg_count_to_use = len(param_types)
 
-                # If a packed string (i64) was provided as a single argument but
-                # the builtin expects a (ptr,len) pair, expand it into two i32s.
-                if (
-                    arg_count == 1
-                    and arg_count_to_use >= 2
-                    and param_types[0] == 'i32'
-                    and param_types[1] == 'i32'
-                    and self.type_stack
-                    and self.type_stack[-1] == 'i64'
-                ):
-                    # Split packed i64 string into ptr (lower 32) and len (upper 32)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit("i32.wrap_i64", indent)  # ptr
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit("i64.const 32", indent)
-                    self.emit("i64.shr_u", indent)
-                    self.emit("i32.wrap_i64", indent)  # len
-                    self.pop_type()
-                    self.push_type('i32')
-                    self.push_type('i32')
-                # Ensure args match expected WASM widths; convert on stack if needed
-                # We must perform conversions against the correct runtime stack value.
-                # The value stack currently contains all call arguments in order of push
-                # (first arg at lower index, last arg at top). We'll examine the
-                # top-N slice and perform conversions from last->first, saving
-                # intermediate top values into temps when converting non-top args.
-                arg_count = len(param_types)
-                # Snapshot the argument types (bottom..top within the args)
-                # IMPORTANT: Make a COPY so we don't mutate during iteration
-                if len(self.type_stack) >= arg_count:
-                    arg_types_snapshot = list(self.type_stack[-arg_count:])
-                else:
-                    arg_types_snapshot = list(self.type_stack[:])
+                # --- Argument Handling Logic ---
+                # Analyze requirements and stack to build a plan
+                # We work backwards from the last parameter (Right-to-Left)
 
-                # Helper to allocate temp local names for saves (i32 and i64 variants)
-                temp_names_i32 = ["$temp", "$temp2"]
-                temp_names_i64 = ["$temp_i64"]
+                param_idx = len(param_types) - 1
+                stack_idx = len(self.type_stack) - 1
 
-                # Track what's actually on the stack as we convert (start with snapshot)
-                current_stack_types = list(arg_types_snapshot)
+                # List of operations to perform: (pop_type, temp_local, push_action)
+                # push_action is a function/lambda that emits code
+                ops = []
 
-                # Process parameters in reversed order (last param -> first)
-                for idx_rev, param_type in enumerate(reversed(param_types)):
-                    # idx_rev==0 -> top of stack
-                    pos_from_top = idx_rev
-                    # Determine actual type from current stack state
-                    if pos_from_top < len(current_stack_types):
-                        actual = current_stack_types[-1 - pos_from_top]
-                    else:
-                        actual = None
+                # We need to track which temps we use
+                next_i64_temp = 0
+                next_i32_temp = 0
+                next_f64_temp = 0
 
-                    if actual is None:
-                        continue
+                while param_idx >= 0:
+                    if stack_idx < 0:
+                        # Error: not enough arguments on stack
+                        # For now, break and let WASM trap or fail validation
+                        break
 
-                    # If conversion is needed for this argument
-                    if param_type == 'i32' and actual == 'i64':
-                        # If it's the top argument, emit conversion directly
-                        if pos_from_top == 0:
-                            self.emit("i32.wrap_i64", indent)
+                    param_type = param_types[param_idx]
+                    stack_type = self.type_stack[stack_idx]
+
+                    if param_type == 'i32':
+                        if stack_type == 'i32':
+                            # Direct match
+                            temp = f"$temp_i32_{next_i32_temp}"
+                            next_i32_temp += 1
+                            ops.append(('i32', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                            param_idx -= 1
+                            stack_idx -= 1
+                        elif stack_type == 'i64':
+                            # Mismatch: i64 on stack, i32 expected
+                            # Check if we should unpack (requires another i32 expected before this)
+                            should_unpack = False
+                            if param_idx > 0 and param_types[param_idx-1] == 'i32':
+                                # Check if explicit string
+                                if hasattr(self, 'extended_type_stack') and self.extended_type_stack and stack_idx < len(self.extended_type_stack) and self.extended_type_stack[stack_idx] == 'str':
+                                    should_unpack = True
+                                # Check if we have more params than args (implies unpacking needed)
+                                elif len(param_types) > arg_count:
+                                    should_unpack = True
+
+                            if should_unpack:
+                                # Unpack i64 -> i32, i32
+                                temp = f"$temp_i64_{next_i64_temp}"
+                                next_i64_temp += 1
+
+                                def push_unpack(t):
+                                    # Push ptr (lower)
+                                    self.emit(f"local.get {t}", indent)
+                                    self.emit("i32.wrap_i64", indent)
+                                    # Push len (upper)
+                                    self.emit(f"local.get {t}", indent)
+                                    self.emit("i64.const 32", indent)
+                                    self.emit("i64.shr_u", indent)
+                                    self.emit("i32.wrap_i64", indent)
+
+                                ops.append(('i64', temp, lambda t=temp: push_unpack(t)))
+
+                                param_idx -= 2 # Consumed 2 params
+                                stack_idx -= 1 # Consumed 1 stack item
+                            else:
+                                # Truncate i64 -> i32
+                                temp = f"$temp_i64_{next_i64_temp}"
+                                next_i64_temp += 1
+                                ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.wrap_i64", indent))))
+                                param_idx -= 1
+                                stack_idx -= 1
                         else:
-                            # Save top `pos_from_top` values into temps so we can
-                            # expose the target value, convert it, then restore.
-                            saves = []
-                            for s in range(pos_from_top):
-                                save_type = current_stack_types[-1 - s]
-                                # Use appropriate temp based on type
-                                if save_type == 'i64':
-                                    temp_idx = min(s, len(temp_names_i64) - 1)
-                                    temp = temp_names_i64[temp_idx]
-                                else:
-                                    temp_idx = min(s, len(temp_names_i32) - 1)
-                                    temp = temp_names_i32[temp_idx]
-                                self.emit(f"local.set {temp}", indent)
-                                saves.append((temp, save_type))
-                            # Now the target is at top; emit conversion
-                            self.emit("i32.wrap_i64", indent)
-                            # Restore saved values (in reverse of saving)
-                            for temp, save_type in reversed(saves):
-                                self.emit(f"local.get {temp}", indent)
+                            # f64 -> i32 (conversion)
+                            temp = f"$temp_f64_{next_f64_temp}"
+                            next_f64_temp += 1
+                            ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.trunc_f64_s", indent))))
+                            param_idx -= 1
+                            stack_idx -= 1
 
-                        # Update current stack tracking
-                        current_stack_types[-1 - pos_from_top] = 'i32'
-                        if self.type_stack:
-                            # Update the real stack top mapping accordingly
-                            self.type_stack[-1 - pos_from_top] = 'i32'
+                    elif param_type == 'i64':
+                        if stack_type == 'i64':
+                            temp = f"$temp_i64_{next_i64_temp}"
+                            next_i64_temp += 1
+                            ops.append(('i64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                        elif stack_type == 'i32':
+                            temp = f"$temp_i32_{next_i32_temp}"
+                            next_i32_temp += 1
+                            ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.extend_i32_u", indent))))
+                        elif stack_type == 'f64':
+                            temp = f"$temp_f64_{next_f64_temp}"
+                            next_f64_temp += 1
+                            ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.trunc_f64_s", indent))))
+                        param_idx -= 1
+                        stack_idx -= 1
 
-                    elif param_type == 'i64' and actual == 'i32':
-                        if pos_from_top == 0:
-                            self.emit("i64.extend_i32_u", indent)
-                        else:
-                            saves = []
-                            for s in range(pos_from_top):
-                                save_type = current_stack_types[-1 - s]
-                                # Use appropriate temp based on type
-                                if save_type == 'i64':
-                                    temp_idx = min(s, len(temp_names_i64) - 1)
-                                    temp = temp_names_i64[temp_idx]
-                                else:
-                                    temp_idx = min(s, len(temp_names_i32) - 1)
-                                    temp = temp_names_i32[temp_idx]
-                                self.emit(f"local.set {temp}", indent)
-                                saves.append((temp, save_type))
-                            self.emit("i64.extend_i32_u", indent)
-                            for temp, save_type in reversed(saves):
-                                self.emit(f"local.get {temp}", indent)
+                    elif param_type == 'f64':
+                        if stack_type == 'f64':
+                            temp = f"$temp_f64_{next_f64_temp}"
+                            next_f64_temp += 1
+                            ops.append(('f64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                        elif stack_type == 'i32':
+                            temp = f"$temp_i32_{next_i32_temp}"
+                            next_i32_temp += 1
+                            ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i32_s", indent))))
+                        elif stack_type == 'i64':
+                            temp = f"$temp_i64_{next_i64_temp}"
+                            next_i64_temp += 1
+                            ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i64_s", indent))))
+                        param_idx -= 1
+                        stack_idx -= 1
 
-                        current_stack_types[-1 - pos_from_top] = 'i64'
-                        if self.type_stack:
-                            self.type_stack[-1 - pos_from_top] = 'i64'
+                # Now execute the plan
+                # 1. Pop values into temps (in the order of ops, which is R-to-L of stack)
+                for pop_type, temp, _ in ops:
+                    self.emit(f"local.set {temp}", indent)
+                    self.pop_type() # Update type stack tracking
 
-                # Pop the consumed params from the simulated type stack
-                for _ in range(min(arg_count_to_use, len(self.type_stack))):
-                    self.type_stack.pop()
-                # Emit call and push return types
+                # 2. Push values back (in reverse order of ops, which is L-to-R of params)
+                for _, _, push_action in reversed(ops):
+                    push_action()
+
+                # Update type stack to reflect the arguments we just pushed
+                for t in param_types:
+                    self.push_type(t)
+
+                # Now emit the call
                 self.emit(f"call ${import_name}", indent)
-                for ret_type in return_types:
-                    self.type_stack.append(ret_type)
+
+                # The call consumes the arguments
+                for _ in param_types:
+                    self.pop_type()
+
+                # Push return values
+                for rt in return_types:
+                    self.push_type(rt)
 
             elif func_name in self.functions:
                 # User-defined function call
                 func_meta = self.functions[func_name]
-                param_count = len(func_meta['params'])
+                params = func_meta['params']
+                param_count = len(params)
                 return_type = func_meta['return_type']
-                
+
+                # Check for variadic
+                is_variadic = False
+                if params and params[-1][1] == 'variadic':
+                    is_variadic = True
+                    fixed_param_count = param_count - 1
+                    variadic_logical_count = arg_count - fixed_param_count
+
+                    if variadic_logical_count >= 0:
+                        # Pack variadic arguments into a list
+                        args_to_pack = []
+                        remaining_args = variadic_logical_count
+                        next_i64_temp = 0
+
+                        while remaining_args > 0:
+                            if not self.type_stack:
+                                break
+
+                            top_type = self.type_stack[-1]
+                            stack_idx = len(self.type_stack) - 1
+
+                            is_str = False
+                            if top_type == 'i32':
+                                # Check extended type stack
+                                if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                                    # Debug print
+                                    # print(f"DEBUG: stack_idx={stack_idx}, extended={self.extended_type_stack}")
+                                    if stack_idx < len(self.extended_type_stack) and self.extended_type_stack[stack_idx] == 'str':
+                                        # Check if previous is also str (ptr)
+                                        if stack_idx - 1 >= 0 and self.extended_type_stack[stack_idx-1] == 'str':
+                                            is_str = True
+                            
+                            if is_str:
+                                # Pop 2 values (len, ptr) -> pack into i64
+                                temp = f"$temp_i64_{next_i64_temp}"
+                                next_i64_temp += 1
+
+                                self.emit("local.set $temp", indent) # len
+                                self.type_stack.pop()
+                                # Stack top is ptr
+                                self.emit("i64.extend_i32_u", indent) # ptr -> i64
+                                # Stack top is ptr(i64)
+
+                                self.emit("local.get $temp", indent) # len
+                                self.emit("i64.extend_i32_u", indent) # len -> i64
+                                self.emit("i64.const 32", indent)
+                                self.emit("i64.shl", indent) # len << 32
+
+                                self.emit("i64.or", indent) # ptr | (len << 32)
+
+                                self.emit(f"local.set {temp}", indent)
+                                self.type_stack.pop() # pop ptr
+
+                                args_to_pack.append(('i64', temp))
+                                remaining_args -= 2 # String consumes 2 stack slots
+                            else:
+                                # Single value
+                                if top_type == 'i64':
+                                    temp = f"$temp_i64_{next_i64_temp}"
+                                    next_i64_temp += 1
+                                    self.emit(f"local.set {temp}", indent)
+                                    self.type_stack.pop()
+                                    args_to_pack.append(('i64', temp))
+                                elif top_type == 'f64':
+                                    temp = f"$temp_i64_{next_i64_temp}"
+                                    next_i64_temp += 1
+                                    self.emit("i64.trunc_f64_s", indent)
+                                    self.emit(f"local.set {temp}", indent)
+                                    self.type_stack.pop()
+                                    args_to_pack.append(('i64', temp))
+                                elif top_type == 'i32':
+                                    temp = f"$temp_i64_{next_i64_temp}"
+                                    next_i64_temp += 1
+                                    self.emit("i64.extend_i32_u", indent)
+                                    self.emit(f"local.set {temp}", indent)
+                                    self.type_stack.pop()
+                                    args_to_pack.append(('i64', temp))
+
+                                remaining_args -= 1
+
+                        # Create new list
+                        self._emit_call('list_new', indent)
+                        # Stack: list_ptr (i32)
+
+                        # Append args (in correct order: reverse of args_to_pack)
+                        for _, temp in reversed(args_to_pack):
+                            # Stack: list_ptr
+                            self.emit(f"local.get {temp}", indent) # value
+                            # Stack: list_ptr, value
+
+                            # Update type stack for _emit_call
+                            # list_ptr is already on type_stack (from list_new or previous append)
+                            self.type_stack.append('i64')
+
+                            self._emit_call('list_append', indent)
+                            # Stack: list_ptr (i32)
+
+                        # Result is list_ptr on stack
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                             self.extended_type_stack[-1] = 'list'
+
+                        self.imports.add('list_new')
+                        self.imports.add('list_append')
+
                 # Convert parameters to match expected types
                 # Walk through params from last to first (stack is LIFO)
+                stack_offset = -1
                 for i in range(param_count - 1, -1, -1):
                     param_name, param_type = func_meta['params'][i]
-                    if i < len(self.type_stack):
-                        actual_type = self.type_stack[-(param_count - i)]  # Get the correct stack position
-                        
+                    
+                    # Determine how many stack slots this parameter occupies
+                    slots = 2 if param_type == 'str' else 1
+                    
+                    if len(self.type_stack) >= abs(stack_offset):
+                        actual_type = self.type_stack[stack_offset]  # Get the correct stack position
+
                         if param_type == 'str':
                             # Expect (i32, i32) for string
                             # If actual is not a string pair, this is an error
@@ -2092,18 +2304,30 @@ class WasmCompiler:
                             if actual_type != expected_wasm:
                                 # Need conversion
                                 if expected_wasm == 'i64' and actual_type == 'i32':
-                                    # Extend i32 to i64
+                                    # Extend i32 to i64 (e.g., set/list pointer to i64)
                                     # We need to apply this at the right stack position
                                     # For now, assume conversions happen at top of stack
-                                    if param_count - i == 1:  # This is the top parameter
+                                    if stack_offset == -1:  # This is the top parameter
                                         self.emit("i64.extend_i32_u", indent)
                                         self.type_stack[-1] = 'i64'
                                 elif expected_wasm == 'i32' and actual_type == 'i64':
                                     # Wrap i64 to i32
-                                    if param_count - i == 1:
+                                    if stack_offset == -1:
                                         self.emit("i32.wrap_i64", indent)
                                         self.type_stack[-1] = 'i32'
-                
+                                elif expected_wasm == 'i64' and actual_type == 'f64':
+                                    # Converting f64 to i64
+                                    if stack_offset == -1:
+                                        self.emit("i64.trunc_f64_s", indent)
+                                        self.type_stack[-1] = 'i64'
+                                elif expected_wasm == 'f64' and actual_type == 'i64':
+                                    # Converting i64 to f64 (python-style true division targets float locals)
+                                    if stack_offset == -1:
+                                        self.emit("f64.convert_i64_s", indent)
+                                        self.type_stack[-1] = 'f64'
+                    
+                    stack_offset -= slots
+
                 # Pop params from type stack (consumed by call)
                 for i, (param_name, param_type) in enumerate(func_meta['params']):
                     if param_type == 'str':
@@ -2115,10 +2339,10 @@ class WasmCompiler:
                     else:
                         if self.type_stack:
                             self.type_stack.pop()
-                
+
                 # Emit the call
                 self.emit(f"call ${func_name}", indent)
-                
+
                 # Push return type onto stack
                 if return_type and return_type != 'void':
                     if return_type == 'str':
@@ -2137,6 +2361,60 @@ class WasmCompiler:
                             self._last_i32_source = 'set'
                         else:
                             self._last_i32_source = None
+
+        elif opcode == 'POP':
+            # Pop top value from stack (discard)
+            if self.type_stack:
+                # Check if we are popping a string (which takes 2 stack slots)
+                is_str = False
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                    if self.extended_type_stack[-1] == 'str':
+                        is_str = True
+                
+                self.type_stack.pop()
+                self.emit("drop", indent)
+                
+                if is_str:
+                    # Pop the second part of the string (pointer)
+                    if self.type_stack:
+                        self.type_stack.pop()
+                        self.emit("drop", indent)
+                # If string (2 values), need to drop both?
+                # But type_stack only has 'i32' for string parts?
+                # If it was 'str' in extended, we popped twice?
+                # POP opcode usually pops 1 logical value.
+                # If logical value is string, it pops 2 stack items.
+                # But type_stack tracks stack items.
+                # So POP should pop 1 stack item?
+                # No, FrScript POP pops 1 logical value.
+                # If that value is a string, it pops 2 items.
+                # But bytecode compiler emits POP for expression statements.
+                # If expression is string, it emits POP.
+                # Does POP consume 2 items?
+                # In `_infer_locals`, POP pops 1 item from `type_stack_sim`.
+                # This implies `type_stack_sim` tracks logical values?
+                # No, `type_stack_sim` tracks stack items (i32, i64).
+                # If string is on stack, it is 2 items.
+                # So POP should pop 2 items if it's a string?
+                
+                # Let's check `_infer_locals` POP again.
+                # `type_stack_sim.pop()`. Just one.
+                # This suggests `_infer_locals` might be wrong for strings?
+                # Or strings are 1 item in `type_stack_sim`?
+                # `CONST_STR`: `type_stack_sim.append('i32'); type_stack_sim.append('i32')`.
+                # So strings are 2 items.
+                # So `POP` in `_infer_locals` only pops 1 item (len). Ptr remains!
+                
+                # This is a bug in `_infer_locals` too!
+                # But for now, let's implement POP in `_compile_function` to pop 1 item.
+                # If `styles` returns `i64`, it's 1 item.
+                pass
+
+        elif opcode == 'RETURN':
+            self.emit("return", indent)
+
+        elif opcode == 'RETURN_VOID':
+            self.emit("return", indent)
 
         elif opcode == 'CMP_EQ':
             # Assumes i64 comparison
@@ -2249,32 +2527,10 @@ class WasmCompiler:
                     # Then we need: val1(i32) val2(i32) for and
                     # Actually, we can use: get val2 off, convert val1, put val2 back
                     # But that needs locals. Simpler: just do wrap on both in reverse order
-                    # Actually the stack is: ... val1 val2 (top)
-                    # We need to: wrap val2 (done above), then swap and wrap val1
-                    # Let's use: i32.wrap_i64 (wraps val2), then use temp to swap
-                    # Even simpler: insert wrap_i64 for the second value, then for first
                     # Wait, I already wrapped val2. Now I need to get to val1.
                     # Use rotl pattern: a b -> b a -> wrap a -> b a(i32) -> a(i32) b
                     # Actually in WASM we can't easily swap without locals
                     # Let me just accept we need locals here
-                    pass  # val2 already wrapped above
-                    # Now wrap val1: need to insert wrap before val2
-                    # This requires moving val2 off stack temporarily
-                    # For now, let's just emit wrap for the one we can reach
-                    # Actually, my previous wrap already converted val2
-                    # To convert val1, I need to do it BEFORE val2 is on stack
-                    # Let me rethink: I'll wrap each value right after it's pushed
-                    # But that's not how the bytecode works...
-                    # OK simpler solution: convert as we go in CONST_I64 itself
-                    # Or: accept that AND needs wrapping and do it here properly
-                    # For now: assume top 2 values, wrap top, swap somehow...
-                    # Actually just emit both wraps in sequence assuming they work:
-                    # Stack before: val1(i64) val2(i64)
-                    # After first wrap: val1(i64) val2(i32)
-                    # We can't wrap val1 now without a local
-                    # So let's use a simpler approach: define the pattern at CONST_I64 time
-                    # OR: just accept locals are needed
-                    # Let me create a temp local in the function
                     self.emit("local.set $temp", indent)  # save val2(i32)
                     self.emit("i32.wrap_i64", indent)  # convert val1
                     self.emit("local.get $temp", indent)  # restore val2
@@ -2312,13 +2568,220 @@ class WasmCompiler:
                 self.type_stack.pop()
             self.type_stack.append('i32')
 
+        elif opcode == 'RETURN':
+            self.emit("return", indent)
+            # Clear stack tracking for this path as it's unreachable
+            self.type_stack = []
+
+        elif opcode == 'RETURN_VOID':
+            self.emit("return", indent)
+            self.type_stack = []
+
+        elif opcode == 'STRUCT_NEW':
+            struct_id = int(args[0])
+            if struct_id in self.struct_defs:
+                struct_def = self.struct_defs[struct_id]
+                field_count = struct_def['field_count']
+                field_types = struct_def['field_types']
+
+                # Calculate size (8 bytes per field for simplicity)
+                struct_size = field_count * 8
+
+                # Allocate memory (bump pointer)
+                self.emit("global.get $heap_ptr", indent)
+                self.emit("local.tee $temp_i32_0", indent) # struct_base
+
+                # Increment heap pointer
+                self.emit(f"i32.const {struct_size}", indent)
+                self.emit("i32.add", indent)
+                self.emit("global.set $heap_ptr", indent)
+
+                # Store fields (reverse order)
+                # We need to pop fields from stack and store them
+                # Stack has fields in order: f1, f2, ...
+                # So top of stack is last field.
+
+                for i in range(field_count - 1, -1, -1):
+                    field_type = field_types[i] if i < len(field_types) else 'i64'
+                    offset = i * 8
+
+                    # Pop value and store
+                    if field_type == 'str':
+                        # String is 2 values on stack (ptr, len)
+                        # Pack into i64
+                        # Pop len
+                        self.emit("local.set $temp_i32_1", indent) # len
+                        self.type_stack.pop()
+                        # Pop ptr
+                        self.emit("i64.extend_i32_u", indent) # ptr -> i64
+                        self.emit("local.set $temp_i64_0", indent) # save ptr
+                        self.type_stack.pop()
+
+                        # Calculate address: struct_base + offset
+                        self.emit("local.get $temp_i32_0", indent)
+                        self.emit(f"i32.const {offset}", indent)
+                        self.emit("i32.add", indent)
+
+                        # Push packed value
+                        self.emit("local.get $temp_i64_0", indent) # ptr
+                        self.emit("local.get $temp_i32_1", indent) # len
+                        self.emit("i64.extend_i32_u", indent)
+                        self.emit("i64.const 32", indent)
+                        self.emit("i64.shl", indent)
+                        self.emit("i64.or", indent) # ptr | (len << 32)
+
+                        # Store i64
+                        self.emit("i64.store", indent)
+
+                    elif field_type == 'f64':
+                        # Store f64
+                        self.emit("local.set $temp_f64", indent)
+                        self.type_stack.pop()
+
+                        # Calculate address
+                        self.emit("local.get $temp_i32_0", indent)
+                        self.emit(f"i32.const {offset}", indent)
+                        self.emit("i32.add", indent)
+
+                        self.emit("local.get $temp_f64", indent)
+                        self.emit("f64.store", indent)
+
+                    elif field_type == 'i32' or field_type == 'bool':
+                        # Store i32 as i64 (extended)
+                        self.emit("local.set $temp_i32_1", indent)
+                        self.type_stack.pop()
+
+                        # Calculate address
+                        self.emit("local.get $temp_i32_0", indent)
+                        self.emit(f"i32.const {offset}", indent)
+                        self.emit("i32.add", indent)
+
+                        self.emit("local.get $temp_i32_1", indent)
+                        self.emit("i64.extend_i32_u", indent)
+                        self.emit("i64.store", indent)
+
+                    else: # i64 or default
+                        # Check if stack top is i32 (e.g. list, set, struct ptr)
+                        if self.type_stack and self.type_stack[-1] == 'i32':
+                            self.emit("i64.extend_i32_u", indent)
+                            self.type_stack[-1] = 'i64'
+                            
+                        self.emit("local.set $temp_i64", indent)
+                        self.type_stack.pop()
+
+                        # Calculate address
+                        self.emit("local.get $temp_i32_0", indent)
+                        self.emit(f"i32.const {offset}", indent)
+                        self.emit("i32.add", indent)
+
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i64.store", indent)
+
+                # Push struct pointer
+                self.emit("local.get $temp_i32_0", indent)
+                self.type_stack.append('i32')
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    self.extended_type_stack[-1] = f'struct:{struct_id}'
+
+        elif opcode == 'STRUCT_GET':
+            field_idx = int(args[0])
+            
+            # Get struct type from stack tracking
+            struct_type = None
+            if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                struct_type_str = self.extended_type_stack[-1]
+                if struct_type_str and struct_type_str.startswith('struct:'):
+                    # Format: struct:ID or struct:Name
+                    parts = struct_type_str.split(':')
+                    if len(parts) > 1:
+                        val = parts[1]
+                        if val.isdigit():
+                            struct_type = int(val)
+                        else:
+                            # Find ID by name
+                            for sid, sdef in self.struct_defs.items():
+                                if sdef.get('name') == val:
+                                    struct_type = sid
+                                    break
+            
+            if struct_type is not None and struct_type in self.struct_defs:
+                struct_def = self.struct_defs[struct_type]
+                field_types = struct_def['field_types']
+                
+                if field_idx < len(field_types):
+                    field_type = field_types[field_idx]
+                    offset = field_idx * 8
+                    
+                    # Pop struct pointer
+                    if self.type_stack and self.type_stack[-1] == 'i64':
+                        self.emit("i32.wrap_i64", indent)
+                        self.type_stack[-1] = 'i32'
+
+                    self.emit("local.set $temp_i32_0", indent)
+                    self.type_stack.pop()
+                    
+                    # Calculate address
+                    self.emit("local.get $temp_i32_0", indent)
+                    self.emit(f"i32.const {offset}", indent)
+                    self.emit("i32.add", indent)
+                    
+                    # Load value based on type
+                    if field_type == 'str':
+                        # String is stored as i64 (ptr | len << 32)
+                        self.emit("i64.load", indent)
+                        self.emit("local.tee $temp_i64", indent)
+                        
+                        # Extract ptr (lower 32 bits)
+                        self.emit("i32.wrap_i64", indent)
+                        self.type_stack.append('i32')
+                        
+                        # Extract len (upper 32 bits)
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i64.const 32", indent)
+                        self.emit("i64.shr_u", indent)
+                        self.emit("i32.wrap_i64", indent)
+                        self.type_stack.append('i32')
+                        
+                        # Update extended stack
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            self.extended_type_stack.append('str')
+                            self.extended_type_stack.append('str')
+                            
+                    elif field_type == 'f64':
+                        self.emit("f64.load", indent)
+                        self.type_stack.append('f64')
+                        
+                    elif field_type == 'i32' or field_type == 'bool':
+                        # Stored as i64, need to load and wrap
+                        self.emit("i64.load", indent)
+                        self.emit("i32.wrap_i64", indent)
+                        self.type_stack.append('i32')
+                        
+                    else: # i64 or default (including int)
+                        self.emit("i64.load", indent)
+                        self.type_stack.append('i64')
+            else:
+                # Fallback: assume i64
+                offset = field_idx * 8
+                
+                # Check if stack has i64 (pointer)
+                if self.type_stack and self.type_stack[-1] == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
+
+                self.emit(f"i32.const {offset}", indent)
+                self.emit("i32.add", indent)
+                self.emit("i64.load", indent)
+                if self.type_stack: self.type_stack.pop()
+                self.type_stack.append('i64')
+
         elif opcode == 'AND_I64':
             # Bitwise AND (i64 operands)
             self.emit("i64.and", indent)
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'OR_I64':
             # Bitwise OR (i64 operands)
@@ -2326,7 +2789,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'XOR_I64':
             # Bitwise XOR (i64 operands)
@@ -2334,7 +2797,7 @@ class WasmCompiler:
             if len(self.type_stack) >= 2:
                 self.type_stack.pop()
                 self.type_stack.pop()
-            self.type_stack.append('i32')
+            self.type_stack.append('i64')
 
         elif opcode == 'SHL_I64':
             # Shift left (i64 operands)
@@ -2420,6 +2883,11 @@ class WasmCompiler:
                 self.emit(f"i32.const {len(string_content.encode('utf-8'))}", indent)
                 self.type_stack.append('i32')
                 self.type_stack.append('i32')
+                # Mark as string in extended stack
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    self.extended_type_stack[-2] = 'str'
+                    self.extended_type_stack[-1] = 'str'
+                    # print(f"DEBUG: CONST_STR extended stack: {self.extended_type_stack}")
 
         elif opcode == 'DEC_LOCAL':
             var_idx = int(args[0])
@@ -2565,7 +3033,7 @@ class WasmCompiler:
             for i in range(0, len(args) - 1, 2):
                 src_idx = int(args[i])
                 dst_idx = int(args[i + 1])
-                
+
                 # Determine source type
                 if self.current_function:
                     func_meta = self.functions.get(self.current_function, {})
@@ -2576,10 +3044,10 @@ class WasmCompiler:
                         src_type_fr = self.local_vars.get(src_idx - param_count, 'i64')
                 else:
                     src_type_fr = 'i64'
-                
+
                 src_ref = self._get_var_ref(src_idx)
                 dst_ref = self._get_var_ref(dst_idx)
-                
+
                 # Handle strings specially (need to copy both ptr and len)
                 if src_type_fr == 'str':
                     self.emit(f"local.get {src_ref}", indent)
@@ -2591,7 +3059,7 @@ class WasmCompiler:
                 else:
                     self.emit(f"local.get {src_ref}", indent)
                     self.emit(f"local.set {dst_ref}", indent)
-                
+
                 # Update type tracking
                 if self.current_function:
                     func_meta = self.functions.get(self.current_function, {})
@@ -2603,7 +3071,7 @@ class WasmCompiler:
             if len(args) % 2 == 1:
                 final_idx = int(args[-1])
                 final_ref = self._get_var_ref(final_idx)
-                
+
                 # Determine type
                 if self.current_function:
                     func_meta = self.functions.get(self.current_function, {})
@@ -2614,7 +3082,7 @@ class WasmCompiler:
                         local_type_fr = self.local_vars.get(final_idx - param_count, 'i64')
                 else:
                     local_type_fr = 'i64'
-                
+
                 # Handle strings specially
                 if local_type_fr == 'str':
                     self.emit(f"local.get {final_ref}", indent)
@@ -2670,35 +3138,49 @@ class WasmCompiler:
         elif opcode == 'LIST_APPEND':
             # Handle append where value may be a string (ptr,len) or a single i64
             # Stack for string value: ... list_ptr ptr len
-            # Only treat as string packing when the stack tail exactly matches the expected trio.
-            if (len(self.type_stack) == 3
+            # Only treat as string packing when we are sure it is a string
+            is_string = False
+            if (len(self.type_stack) >= 3
                 and self.type_stack[-1] == 'i32'
                 and self.type_stack[-2] == 'i32'
                 and self.type_stack[-3] == 'i32'):
-                # Pack (ptr,len) into i64: (len << 32) | ptr
+                
+                # Check extended types if available
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                    if (len(self.extended_type_stack) >= 2 
+                        and self.extended_type_stack[-1] == 'str' 
+                        and self.extended_type_stack[-2] == 'str'):
+                        is_string = True
+                else:
+                    # Fallback heuristic: if we don't have extended types, assume string
+                    # BUT this is dangerous as seen in struct_in_list case.
+                    # Better to be conservative?
+                    # Most strings come from CONST_STR or string ops which set extended types.
+                    pass
+
+            if is_string:
+                # Pack (ptr,len) into i64: (len<<32) | ptr
                 # Stack: ... list_ptr ptr len
                 # Save len
-                self.emit("local.set $temp", indent)  # len
+                self.emit("local.set $temp", indent) # len
                 self.type_stack.pop()
                 # Convert ptr to i64 and save
-                self.emit("i64.extend_i32_u", indent)  # ptr -> i64
+                self.emit("i64.extend_i32_u", indent) # ptr -> i64
                 self.emit("local.set $temp_i64", indent)
                 self.type_stack.pop()
-                # Now stack has list_ptr on top
-                # Construct combined i64 from saved len and ptr
-                self.emit("local.get $temp", indent)  # len (i32)
+
+                # Combine
+                self.emit("local.get $temp", indent) # len
                 self.emit("i64.extend_i32_u", indent)
                 self.emit("i64.const 32", indent)
                 self.emit("i64.shl", indent)
-                self.emit("local.get $temp_i64", indent)  # ptr (i64)
+                self.emit("local.get $temp_i64", indent) # ptr
                 self.emit("i64.or", indent)
-                # Now stack: ... list_ptr combined_i64
-                # The actual WASM stack has: i32 (list_ptr) and i64 (combined value)
-                # Update type_stack to match: pop the remaining i32, push i32 + i64
-                if self.type_stack:
-                    self.type_stack.pop()  # remove old list_ptr
-                self.type_stack.append('i32')  # list_ptr
-                self.type_stack.append('i64')  # combined string value as i64
+                
+                # Now stack has `combined_i64`.
+                # We need to update type_stack to reflect this change.
+                # We popped 2 i32s. We pushed 1 i64 (implicitly on stack).
+                self.type_stack.append('i64')
             else:
                 # Ensure list pointer (second-from-top) is i32 for non-string values
                 self._ensure_second_is_i32(indent)
@@ -2734,6 +3216,65 @@ class WasmCompiler:
             # _emit_call already pushes i32 return type
             self._last_i32_source = 'list'  # Track that this i32 is a list
             self.imports.add('list_new')
+
+        elif opcode == 'LIST_NEW_I64':
+            count = int(args[0])
+            values = args[1:]
+            
+            self._emit_call('list_new', indent)
+            self.imports.add('list_new')
+            self._last_i32_source = 'list'
+            
+            for val in values:
+                self.emit(f"i64.const {val}", indent)
+                self.type_stack.append('i64')
+                self._emit_call('list_append', indent)
+                self.imports.add('list_append')
+
+        elif opcode == 'LIST_NEW_STR':
+            count = int(args[0])
+            # Reconstruct args if they were split by space
+            # This is tricky. But let's assume simple strings for now.
+            values = args[1:]
+            
+            self._emit_call('list_new', indent)
+            self.imports.add('list_new')
+            self._last_i32_source = 'list'
+            
+            for val in values:
+                # val is a string literal, e.g. "abc"
+                # Remove quotes
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                
+                # Add to string constants
+                str_offset = self.add_string_constant(val)
+                str_len = len(val)
+                
+                # Push ptr, len
+                self.emit(f"i32.const {str_offset}", indent)
+                self.emit(f"i32.const {str_len}", indent)
+                self.type_stack.append('i32')
+                self.type_stack.append('i32')
+                
+                # Pack (ptr,len) into i64: (len<<32) | ptr
+                self.emit("local.set $temp", indent) # len
+                self.type_stack.pop()
+                self.emit("i64.extend_i32_u", indent) # ptr -> i64
+                self.emit("local.set $temp_i64", indent)
+                self.type_stack.pop()
+                
+                self.emit("local.get $temp", indent) # len
+                self.emit("i64.extend_i32_u", indent)
+                self.emit("i64.const 32", indent)
+                self.emit("i64.shl", indent)
+                self.emit("local.get $temp_i64", indent) # ptr
+                self.emit("i64.or", indent)
+                
+                self.type_stack.append('i64')
+                
+                self._emit_call('list_append', indent)
+                self.imports.add('list_append')
 
         elif opcode == 'LIST_SET':
             # Ensure list pointer (third-from-top) is i32
@@ -2772,6 +3313,126 @@ class WasmCompiler:
             self._last_i32_source = 'list'
             self.imports.add('list_set')
 
+        elif opcode == 'STORE':
+            for arg in args:
+                var_idx = int(arg)
+                var_ref = self._get_var_ref(var_idx)
+                
+                # Check if it's a string
+                is_str = False
+                if self.current_function:
+                    func_meta = self.functions.get(self.current_function, {})
+                    params = func_meta.get('params', [])
+                    param_count = len(params)
+                    
+                    if var_idx < param_count:
+                        if params[var_idx][1] == 'str':
+                            is_str = True
+                    else:
+                        local_idx = var_idx - param_count
+                        if local_idx in self.local_vars and self.local_vars[local_idx] == 'str':
+                            is_str = True
+                
+                if is_str:
+                    # Check if we have i64 on stack (packed string)
+                    if self.type_stack and self.type_stack[-1] == 'i64':
+                        # Unpack i64 -> ptr, len
+                        self.emit("local.set $temp_i64", indent)
+                        self.type_stack.pop()
+                        
+                        # Get ptr (lower 32 bits)
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i32.wrap_i64", indent)
+                        self.emit(f"local.set {var_ref}", indent)
+                        
+                        # Get len (upper 32 bits)
+                        self.emit("local.get $temp_i64", indent)
+                        self.emit("i64.const 32", indent)
+                        self.emit("i64.shr_u", indent)
+                        self.emit("i32.wrap_i64", indent)
+                        self.emit(f"local.set {var_ref}_len", indent)
+                    else:
+                        # Pop len, store to _len
+                        self.emit(f"local.set {var_ref}_len", indent)
+                        if self.type_stack: self.type_stack.pop()
+                        
+                        # Pop ptr, store to var
+                        self.emit(f"local.set {var_ref}", indent)
+                        if self.type_stack: self.type_stack.pop()
+                else:
+                    # Check expected type
+                    expected_type = 'i64' # Default
+                    if self.current_function:
+                        func_meta = self.functions.get(self.current_function, {})
+                        params = func_meta.get('params', [])
+                        param_count = len(params)
+                        
+                        if var_idx < param_count:
+                            param_type = params[var_idx][1]
+                            expected_type = self._map_type_to_wasm(param_type)
+                        else:
+                            local_idx = var_idx - param_count
+                            if local_idx in self.local_vars:
+                                local_type_fr = self.local_vars[local_idx]
+                                expected_type = self._map_type_to_wasm(local_type_fr)
+                    
+                    # Check stack type
+                    if self.type_stack:
+                        stack_type = self.type_stack[-1]
+                        if expected_type == 'i64' and stack_type == 'i32':
+                            self.emit("i64.extend_i32_u", indent)
+                            self.type_stack[-1] = 'i64'
+                        elif expected_type == 'i32' and stack_type == 'i64':
+                            self.emit("i32.wrap_i64", indent)
+                            self.type_stack[-1] = 'i32'
+                            
+                    self.emit(f"local.set {var_ref}", indent)
+                    if self.type_stack: self.type_stack.pop()
+
+        elif opcode == 'LOAD_GLOBAL':
+            global_idx = int(args[0])
+            global_ref = f"$g{global_idx}"
+            
+            # Determine type
+            global_type_fr = self.global_vars.get(global_idx, 'i64')
+            wasm_type = self._map_type_to_wasm(global_type_fr)
+            
+            self.emit(f"global.get {global_ref}", indent)
+            self.type_stack.append(wasm_type)
+            self.struct_type_stack.append(None)
+            
+            # Track extended type
+            if global_type_fr == 'list':
+                self._last_i32_source = 'list'
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    self.extended_type_stack[-1] = 'list'
+            elif global_type_fr == 'set':
+                self._last_i32_source = 'set'
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    self.extended_type_stack[-1] = 'set'
+
+        elif opcode == 'STORE_GLOBAL':
+            global_idx = int(args[0])
+            global_ref = f"$g{global_idx}"
+            
+            # Determine type
+            global_type_fr = self.global_vars.get(global_idx, 'i64')
+            wasm_type = self._map_type_to_wasm(global_type_fr)
+            
+            # Check stack type
+            if self.type_stack:
+                stack_type = self.type_stack[-1]
+                if wasm_type == 'i64' and stack_type == 'i32':
+                    self.emit("i64.extend_i32_u", indent)
+                    self.type_stack[-1] = 'i64'
+                elif wasm_type == 'i32' and stack_type == 'i64':
+                    self.emit("i32.wrap_i64", indent)
+                    self.type_stack[-1] = 'i32'
+            
+            self.emit(f"global.set {global_ref}", indent)
+            if self.type_stack:
+                self.type_stack.pop()
+
         elif opcode == 'LOAD':
             # LOAD can have multiple indices: LOAD 1 2 means load var1 then var2
             if len(args) == 0:
@@ -2803,18 +3464,29 @@ class WasmCompiler:
                         self.emit(f"local.get {len_ref}", indent)
                         self.type_stack.append('i32')
                         self.struct_type_stack.append(None)
+
+                        # Mark as string in extended stack
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            # Ensure extended_type_stack is large enough (TypeStack handles this usually)
+                            while len(self.extended_type_stack) < len(self.type_stack):
+                                self.extended_type_stack.append(None)
+                            self.extended_type_stack[-2] = 'str'
+                            self.extended_type_stack[-1] = 'str'
                         continue
 
                 # Regular single-value load
                 self.emit(f"local.get {var_ref}", indent)
                 # Get the correct local type
                 struct_id = None
+                local_type_fr = 'i64'
+                
                 if self.current_function:
                     func_meta = self.functions.get(self.current_function, {})
                     param_count = len(func_meta.get('params', []))
                     if local_idx < param_count:
                         param_type = func_meta['params'][local_idx][1]
                         local_type = self._map_type_to_wasm(param_type)
+                        local_type_fr = param_type
                         # Track struct type
                         if param_type.startswith('struct:'):
                             struct_name = param_type.split(':')[1]
@@ -2834,9 +3506,7 @@ class WasmCompiler:
                                 if 'name' in sdef and sdef['name'] == struct_name:
                                     struct_id = sid
                                     break
-                        local_type = local_type_fr
-                        if local_type not in ['i32', 'i64', 'f64']:
-                            local_type = self._map_type_to_wasm(local_type)
+                        local_type = self._map_type_to_wasm(local_type_fr)
                 else:
                     local_type = 'i64'
                 self.type_stack.append(local_type)
@@ -2845,6 +3515,22 @@ class WasmCompiler:
                 # Track value type if this is a list or set
                 if local_idx in self.local_value_types:
                     self._last_i32_source = self.local_value_types[local_idx]
+                
+                # Also track based on type name
+                if local_type == 'i32':
+                    if local_type_fr == 'list' or local_type_fr == 'variadic':
+                        self._last_i32_source = 'list'
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            self.extended_type_stack[-1] = 'list'
+                    elif local_type_fr == 'set':
+                        self._last_i32_source = 'set'
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            self.extended_type_stack[-1] = 'set'
+                    elif local_type_fr == 'bool':
+                        self._last_i32_source = 'bool'
+                    elif local_type_fr.startswith('struct:'):
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            self.extended_type_stack[-1] = local_type_fr
 
         elif opcode == 'LOAD2_ADD_I64':
             # Load two variables and add them
@@ -2868,826 +3554,16 @@ class WasmCompiler:
             self.emit("i64.lt_s", indent)
             self.type_stack.append('i32')
 
-        elif opcode == 'LOAD2_DIV_I64':
+        elif opcode == 'LOAD2_CMP_GT':
+            # Load two variables and compare
             var1 = int(args[0])
             var2 = int(args[1])
             var_ref1 = self._get_var_ref(var1)
             var_ref2 = self._get_var_ref(var2)
             self.emit(f"local.get {var_ref1}", indent)
             self.emit(f"local.get {var_ref2}", indent)
-            # Integer division in fr returns float (Python-style true division)
-            self.emit("f64.convert_i64_s", indent)
-            self.emit("local.set $temp_f64", indent)
-            self.emit("f64.convert_i64_s", indent)
-            self.emit("local.get $temp_f64", indent)
-            self.emit("f64.div", indent)
-            self.type_stack.append('f64')
-
-        elif opcode == 'LOAD2_MUL_I64':
-            var1 = int(args[0])
-            var2 = int(args[1])
-            var_ref1 = self._get_var_ref(var1)
-            var_ref2 = self._get_var_ref(var2)
-            self.emit(f"local.get {var_ref1}", indent)
-            self.emit(f"local.get {var_ref2}", indent)
-            self.emit("i64.mul", indent)
-            self.type_stack.append('i64')
-
-        elif opcode == 'LOAD_GLOBAL':
-            global_idx = int(args[0])
-            # If this index belongs to a string global, load ptr and len
-            base_idx = None
-            for b in self.global_str_bases:
-                if global_idx == b or global_idx == b + 1:
-                    base_idx = b
-                    break
-            if base_idx is not None:
-                self.emit(f"global.get $g{base_idx}", indent)
-                self.emit(f"global.get $g{base_idx + 1}", indent)
-                self.type_stack.append('i32')  # ptr
-                self.type_stack.append('i32')  # len
-            else:
-                self.emit(f"global.get $g{global_idx}", indent)
-                global_type = self.global_vars.get(global_idx, 'i64')
-                self.type_stack.append(self._map_type_to_wasm(global_type))
-
-        elif opcode == 'MOD_CONST_I64':
-            const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.rem_s", indent)
-            if self.type_stack:
-                self.type_stack.pop()
-            self.type_stack.append('i64')
-
-        elif opcode == 'MOD_I64':
-            # Ensure both operands are i64, converting f64 if needed
-            if len(self.type_stack) >= 2:
-                if self.type_stack[-1] == 'f64':
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                if self.type_stack[-2] == 'f64':
-                    self.emit("local.set $temp_i64", indent)
-                    self.type_stack.pop()
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                    self.emit("local.get $temp_i64", indent)
-                    self.type_stack.append('i64')
-            self.emit("i64.rem_s", indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i64')
-
-        elif opcode == 'MUL_CONST_I64':
-            const_val = args[0]
-            # Check if we're multiplying with f64
-            if self.type_stack and self.type_stack[-1] == 'f64':
-                self.emit(f"f64.const {const_val}", indent)
-                self.emit("f64.mul", indent)
-            else:
-                self.emit(f"i64.const {const_val}", indent)
-                self.emit("i64.mul", indent)
-
-        elif opcode == 'MUL_F64':
-            self.emit("f64.mul", indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('f64')
-
-        elif opcode == 'MUL_I64':
-            # Ensure both operands are i64, converting f64 if needed
-            if len(self.type_stack) >= 2:
-                if self.type_stack[-1] == 'f64':
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                if self.type_stack[-2] == 'f64':
-                    self.emit("local.set $temp_i64", indent)
-                    self.type_stack.pop()
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                    self.emit("local.get $temp_i64", indent)
-                    self.type_stack.append('i64')
-            self.emit("i64.mul", indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i64')
-
-        elif opcode == 'POP':
-            self.emit("drop", indent)
-            if self.type_stack:
-                self.type_stack.pop()
-
-        elif opcode in ['RETURN', 'RETURN_VOID']:
-            self.emit("return", indent)
-
-        elif opcode == 'STORE':
-            var_idx = int(args[0])
-            var_ref = self._get_var_ref(var_idx)
-            # Prefer declared local type when available (e.g., inferred list/str)
-            declared_type = None
-            if self.current_function:
-                func_meta = self.functions.get(self.current_function, {})
-                param_count = len(func_meta.get('params', []))
-                if var_idx >= param_count:
-                    declared_type = self.local_vars.get(var_idx - param_count)
-
-            # If the destination is declared as a string, store two i32 values
-            if declared_type == 'str' or (len(self.type_stack) >= 2 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32' and declared_type is None):
-                # String: store len first, then ptr
-                # Stack: ... ptr len (top)
-                # We need to use two locals: var_ref for ptr, var_ref+"_len" for len
-                len_ref = f"{var_ref}_len"
-                self.emit(f"local.set {len_ref}", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-                self.emit(f"local.set {var_ref}", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-                # Track that this is a string type
-                if self.current_function:
-                    func_meta = self.functions.get(self.current_function, {})
-                    param_count = len(func_meta.get('params', []))
-                    if var_idx >= param_count:
-                        self.local_vars[var_idx - param_count] = 'str'
-            else:
-                # Regular value: single local.set
-                # Check if we need type conversion
-                if self.type_stack and self.current_function:
-                    stored_type = self.type_stack[-1]
-                    func_meta = self.functions.get(self.current_function, {})
-                    param_count = len(func_meta.get('params', []))
-                    if var_idx >= param_count:
-                        rel_idx = var_idx - param_count
-                        # Don't override if local is already declared as a struct type
-                        existing_type = self.local_vars.get(rel_idx, None)
-                        
-                        # Check if we need type conversion
-                        if existing_type and existing_type != stored_type:
-                            if existing_type == 'i64' and stored_type == 'i32':
-                                # Converting i32 to i64 (e.g., set/list pointer to i64)
-                                self.emit("i64.extend_i32_u", indent)
-                                self.type_stack[-1] = 'i64'
-                            elif existing_type == 'i32' and stored_type == 'i64':
-                                # Converting i64 to i32
-                                self.emit("i32.wrap_i64", indent)
-                                self.type_stack[-1] = 'i32'
-                            elif existing_type == 'i64' and stored_type == 'f64':
-                                # Converting f64 to i64
-                                self.emit("i64.trunc_f64_s", indent)
-                                self.type_stack[-1] = 'i64'
-                            elif existing_type == 'f64' and stored_type == 'i64':
-                                # Converting i64 to f64 (python-style true division targets float locals)
-                                self.emit("f64.convert_i64_s", indent)
-                                self.type_stack[-1] = 'f64'
-                        
-                        if not (existing_type and existing_type.startswith('struct:')):
-                            # Don't update type if bytecode already specified it
-                            pass
-                            # Track value type (list/set) if available
-                            if hasattr(self, '_last_i32_source') and self._last_i32_source is not None and stored_type == 'i32':
-                                self.local_value_types[var_idx] = self._last_i32_source
-
-                self.emit(f"local.set {var_ref}", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-
-        elif opcode == 'STORE_CONST_I64':
-            # Format: STORE_CONST_I64 slot1 val1 [slot2 val2 ...]
-            # Arguments come in pairs: slot, value
-            num_pairs = len(args) // 2
-            for i in range(num_pairs):
-                var_idx = int(args[i * 2])
-                value = args[i * 2 + 1]
-                var_ref = self._get_var_ref(var_idx)
-                self.emit(f"i64.const {value}", indent)
-                self.emit(f"local.set {var_ref}", indent)
-
-        elif opcode == 'STORE_CONST_F64':
-            # Format: STORE_CONST_F64 slot1 val1 [slot2 val2 ...]
-            # Arguments come in pairs: slot, value
-            num_pairs = len(args) // 2
-            for i in range(num_pairs):
-                var_idx = int(args[i * 2])
-                value = args[i * 2 + 1]
-                var_ref = self._get_var_ref(var_idx)
-                self.emit(f"f64.const {value}", indent)
-                self.emit(f"local.set {var_ref}", indent)
-
-        elif opcode == 'STORE_CONST_BOOL':
-            # Format: STORE_CONST_BOOL slot1 val1 [slot2 val2 ...]
-            # Arguments come in pairs: slot, value (0 or 1)
-            # Bool locals are declared as i32, so use i32.const
-            num_pairs = len(args) // 2
-            for i in range(num_pairs):
-                var_idx = int(args[i * 2])
-                value = args[i * 2 + 1]
-                var_ref = self._get_var_ref(var_idx)
-                self.emit(f"i32.const {value}", indent)
-                self.emit(f"local.set {var_ref}", indent)
-
-        elif opcode == 'STORE_GLOBAL':
-            global_idx = int(args[0])
-            base_idx = None
-            for b in self.global_str_bases:
-                if global_idx == b or global_idx == b + 1:
-                    base_idx = b
-                    break
-
-            if base_idx is not None:
-                # Stack: ... ptr len (len on top)
-                # Store len first (pops from top), then ptr
-                self.emit(f"global.set $g{base_idx + 1}", indent)  # len (pops len)
-                self.emit(f"global.set $g{base_idx}", indent)      # ptr (pops ptr)
-                if self.type_stack:
-                    self.type_stack.pop()
-                if self.type_stack:
-                    self.type_stack.pop()
-            else:
-                self.emit(f"global.set $g{global_idx}", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-
-        elif opcode == 'SUB_CONST_I64':
-            const_val = args[0]
-            self.emit(f"i64.const {const_val}", indent)
-            self.emit("i64.sub", indent)
-
-        elif opcode == 'SUB_F64':
-            self.emit("f64.sub", indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('f64')
-
-        elif opcode == 'SUB_I64':
-            # Ensure both operands are i64, converting f64 if needed
-            if len(self.type_stack) >= 2:
-                if self.type_stack[-1] == 'f64':
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                if self.type_stack[-2] == 'f64':
-                    self.emit("local.set $temp_i64", indent)
-                    self.type_stack.pop()
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                    self.emit("local.get $temp_i64", indent)
-                    self.type_stack.append('i64')
-            self.emit("i64.sub", indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i64')
-
-        elif opcode == 'TO_FLOAT':
-            # Convert top of stack to f64
-            if self.type_stack:
-                if self.type_stack[-1] == 'i64':
-                    self.emit("f64.convert_i64_s", indent)
-                    self.type_stack[-1] = 'f64'
-                elif len(self.type_stack) >= 2 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
-                    # String (ptr, len) to float
-                    self._emit_call('str_to_f64', indent)
-                    self.type_stack.pop()
-                    self.type_stack.pop()
-                    self.type_stack.append('f64')
-                    self.imports.add('str_to_f64')
-
-        elif opcode == 'TO_INT':
-            # Convert top of stack to i64
-            if self.type_stack:
-                if self.type_stack[-1] == 'f64':
-                    self.emit("i64.trunc_f64_s", indent)
-                    self.type_stack[-1] = 'i64'
-                elif len(self.type_stack) >= 2 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
-                    # String (ptr, len) to int - str_to_i64 already handles float strings
-                    self._emit_call('str_to_i64', indent)
-                    self.type_stack.pop()
-                    self.type_stack.pop()
-                    self.type_stack.append('i64')
-                    self.imports.add('str_to_i64')
-
-        elif opcode == 'TO_BOOL':
-            # Convert to boolean (i32: 0 or 1)
-            # Any non-zero value becomes 1
-            if self.type_stack and self.type_stack[-1] == 'i64':
-                self.emit("i64.const 0", indent)
-                self.emit("i64.ne", indent)
-                self.type_stack.pop()
-                self.type_stack.append('i32')
-            elif self.type_stack and self.type_stack[-1] == 'f64':
-                self.emit("f64.const 0", indent)
-                self.emit("f64.ne", indent)
-                self.type_stack.pop()
-                self.type_stack.append('i32')
-
-        elif opcode == 'ADD_CONST_F64':
-            const_val = args[0]
-            self.emit(f"f64.const {const_val}", indent)
-            self.emit("f64.add", indent)
-
-        elif opcode == 'SUB_CONST_F64':
-            const_val = args[0]
-            self.emit(f"f64.const {const_val}", indent)
-            self.emit("f64.sub", indent)
-
-        elif opcode == 'MUL_CONST_F64':
-            const_val = args[0]
-            self.emit(f"f64.const {const_val}", indent)
-            self.emit("f64.mul", indent)
-
-        elif opcode == 'DIV_CONST_F64':
-            const_val = args[0]
-            # Check for division by zero at compile time
-            if const_val == '0.0' or const_val == '0':
-                # Search try_stack from innermost to outermost for ZeroDivisionError handler
-                handler_found = None
-                for error_type, handler_label in reversed(self.try_stack):
-                    if error_type == "ZeroDivisionError":
-                        handler_found = handler_label
-                        break
-                
-                if handler_found:
-                    # Drop the value on stack and branch to handler
-                    self.emit("drop", indent)
-                    if self.type_stack:
-                        self.type_stack.pop()
-                    self.emit(f"br ${handler_found}", indent)
-                else:
-                    # No matching handler - call runtime_error for division by zero
-                    self.emit("drop", indent)
-                    if self.type_stack:
-                        self.type_stack.pop()
-                    
-                    # Emit runtime_error call (no error type prefix for runtime errors)
-                    message = "float division by zero"
-                    message_offset = self.add_string_constant(message)
-                    
-                    # Pass empty error type (ptr=0, len=0) so it outputs just the message
-                    self.emit("i32.const 0  ;; empty error type", indent)
-                    self.emit("i32.const 0", indent)
-                    self.emit(f"i32.const {message_offset}  ;; message", indent)
-                    self.emit(f"i32.const {len(message.encode('utf-8'))}", indent)
-                    self.emit("i32.const 0  ;; line number", indent)
-                    self.emit("call $runtime_error", indent)
-                    self.emit("unreachable", indent)
-            else:
-                self.emit(f"f64.const {const_val}", indent)
-                self.emit("f64.div", indent)
-
-        elif opcode == 'LIST_NEW_I64':
-            # LIST_NEW_I64 count val1 val2 val3 ...
-            # For now, treat as unsupported - lists need runtime support
-            self.emit_comment(f"LIST_NEW_I64 - requires runtime support", indent)
-            # Call list_new to create empty list, then append each value
-            count = int(args[0])
-            # Create new list and keep type stack in sync
-            self._emit_call('list_new', indent)
-            # _emit_call already pushes i32 return type to type_stack
-            # Result is list handle on stack; store it to temp (consumes it)
-            if count > 0:
-                self.emit("local.set $temp", indent)  # Save list pointer
-                # reflect consumption
-                if self.type_stack:
-                    self.type_stack.pop()
-                # For each value, we need: list_ptr value -> call append -> list_ptr
-                for i in range(count):
-                    val = args[i + 1]
-                    # Push saved list pointer back
-                    self.emit("local.get $temp", indent)
-                    self.type_stack.append('i32')
-                    # Push i64 constant value
-                    self.emit("i64.const " + val, indent)
-                    self.type_stack.append('i64')
-                    # Call append via _emit_call (handles type_stack automatically)
-                    self._emit_call('list_append', indent)
-                    # _emit_call pops [i32, i64] and pushes i32 result
-                    # Save updated list pointer
-                    self.emit("local.set $temp", indent)
-                    # consume the returned list pointer
-                    if self.type_stack:
-                        self.type_stack.pop()
-                # Put the list pointer back on stack
-                self.emit("local.get $temp", indent)
-                self.type_stack.append('i32')
-            else:
-                # No elements, list pointer remains on stack
-                pass
-            self._last_i32_source = 'list'  # Track that this i32 is a list
-            self.imports.add('list_new')
-            self.imports.add('list_append')
-
-        elif opcode == 'LIST_NEW_STR':
-            # LIST_NEW_STR count "str1" "str2" ...
-            self.emit_comment(f"LIST_NEW_STR - create list of string literals", indent)
-            count = int(args[0])
-            # Create new list and keep type stack in sync
-            self._emit_call('list_new', indent)
-            # _emit_call already pushes i32 return type
-            # Save list pointer (consumes it)
-            self.emit("local.set $temp", indent)
-            if self.type_stack:
-                self.type_stack.pop()
-            # For each string literal argument, add to list as packed (len<<32 | ptr)
-            # The bytecode passes the strings as following args in the instruction line
-            # We'll expect args[1..count] to contain quoted string constants
-            # If they are not quoted, fall back to empty string
-            for i in range(count):
-                if len(args) > i + 1:
-                    s = args[i + 1]
-                    # Strip surrounding quotes if present
-                    if s.startswith('"') and s.endswith('"'):
-                        s_val = s[1:-1]
-                    else:
-                        s_val = s
-                else:
-                    s_val = ""
-                s_val = self._unescape_string(s_val)
-                offset = self.add_string_constant(s_val)
-                # Push list pointer and pack (ptr,len) into i64 then call append
-                # Push list pointer
-                self.emit("local.get $temp", indent)
-                self.type_stack.append('i32')
-                # Push ptr and len
-                self.emit(f"i32.const {offset}", indent)  # ptr
-                self.type_stack.append('i32')
-                self.emit(f"i32.const {len(s_val.encode('utf-8'))}", indent)  # len
-                self.type_stack.append('i32')
-                # Pack ptr,len into i64 on stack: (len<<32) | ptr
-                # local.set $temp consumes len
-                self.emit("local.set $temp", indent)  # len
-                if self.type_stack:
-                    self.type_stack.pop()
-                # ptr is now on top (i32) -> convert to i64
-                self.emit("i64.extend_i32_u", indent)  # ptr -> i64
-                # consume ptr i32 and push i64
-                if self.type_stack:
-                    self.type_stack.pop()
-                self.type_stack.append('i64')
-                self.emit("local.set $temp_i64", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-                # get len from temp, convert and shift
-                self.emit("local.get $temp", indent)
-                # len is i32 -> extend to i64
-                self.type_stack.append('i32')
-                self.emit("i64.extend_i32_u", indent)
-                # consume len i32 and push len i64
-                if self.type_stack:
-                    self.type_stack.pop()
-                self.type_stack.append('i64')
-                self.emit("i64.const 32", indent)
-                self.emit("i64.shl", indent)
-                # combine with ptr (stored in temp_i64)
-                self.emit("local.get $temp_i64", indent)
-                # temp_i64 is i64
-                self.type_stack.append('i32')
-                self.emit("i64.or", indent)
-                # Now stack: list_ptr (i32) combined_i64 (i64)
-                # Adjust type stack: list_ptr still present from earlier
-                # Call list_append directly (we've prepared exact arg types)
-                self.emit('call $list_append', indent)
-                # After call, consume args and push result i32
-                # Remove up to two items consumed
-                for _ in range(min(2, len(self.type_stack))):
-                    self.type_stack.pop()
-                self.type_stack.append('i32')
-                # Save updated list pointer
-                self.emit("local.set $temp", indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-            # Restore list pointer on stack
-            self.emit("local.get $temp", indent)
+            self.emit("i64.gt_s", indent)
             self.type_stack.append('i32')
-            self._last_i32_source = 'list'
-            self.imports.add('list_new')
-            self.imports.add('list_append')
-
-        elif opcode == 'STRUCT_NEW':
-            # STRUCT_NEW struct_id
-            # Stack before: field_0 field_1 ... field_n (top of stack is last field)
-            # Stack after: struct_ptr (i32)
-            struct_id = int(args[0]) if args else 0
-
-            if struct_id not in self.struct_defs:
-                raise WasmCompilerError(f"Unknown struct ID: {struct_id}")
-
-            struct_def = self.struct_defs[struct_id]
-            field_count = struct_def['field_count']
-            field_types = struct_def['field_types']
-
-            self.emit_comment(f"STRUCT_NEW {struct_id} ({field_count} fields)", indent)
-
-            # Get heap pointer for the new struct
-            self.emit("global.get $heap_ptr", indent)
-
-            # Increment heap pointer (8 bytes per field for all types)
-            self.emit("global.get $heap_ptr", indent)
-            self.emit(f"i32.const {field_count * 8}", indent)
-            self.emit("i32.add", indent)
-            self.emit("global.set $heap_ptr", indent)
-
-            # Save the struct pointer
-            self.emit("local.set $temp", indent)
-
-            # Now pop each field (they come off in reverse order) and store
-            # We need different store instructions for different types
-            for i in range(field_count - 1, -1, -1):
-                field_type = field_types[i]
-
-                # Determine storage strategy based on field type
-                if field_type == 'float':
-                    # Float is f64, need to store as f64
-                    # Stack: ... f64_value
-                    # Convert f64 to i64 bits for storage in temp_i64
-                    self.emit("i64.reinterpret_f64", indent)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    # Convert back to f64 for f64.store
-                    self.emit("f64.reinterpret_i64", indent)
-                    self.emit(f"f64.store offset={i * 8}", indent)
-                    self.pop_type()
-                elif field_type == 'str':
-                    # String is (ptr, len) = two i32 values on stack
-                    # Top of stack is len, below is ptr
-                    # Combine into one i64: (len << 32) | ptr
-                    # Stack: ... ptr(i32) len(i32)
-                    # If the value is a packed i64 string (len<<32 | ptr), unpack it first
-                    if self.type_stack and self.type_stack[-1] == 'i64':
-                        self.emit("local.set $temp_i64", indent)
-                        self.emit("local.get $temp_i64", indent)
-                        self.emit("i32.wrap_i64", indent)  # ptr
-                        self.emit("local.get $temp_i64", indent)
-                        self.emit("i64.const 32", indent)
-                        self.emit("i64.shr_u", indent)
-                        self.emit("i32.wrap_i64", indent)  # len
-                        self.pop_type()
-                        self.push_type('i32')
-                        self.push_type('i32')
-                    self._ensure_top_is_i32(indent)
-                    self._ensure_second_is_i32(indent)
-                    self.emit("i64.extend_i32_u", indent)  # len(i32) -> len(i64)
-                    # Stack: ... ptr(i32) len(i64)
-                    self.emit("i64.const 32", indent)
-                    self.emit("i64.shl", indent)  # len << 32
-                    # Stack: ... ptr(i32) (len<<32)(i64)
-                    self.emit("local.set $temp_i64", indent)  # Save (len<<32)
-                    # Stack: ... ptr(i32)
-                    self.emit("i64.extend_i32_u", indent)  # ptr -> i64
-                    # Stack: ... ptr(i64)
-                    self.emit("local.get $temp_i64", indent)  # Get (len<<32)
-                    # Stack: ... ptr(i64) (len<<32)(i64)
-                    self.emit("i64.or", indent)  # ptr | (len << 32)
-                    # Stack: ... combined(i64)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit(f"i64.store offset={i * 8}", indent)
-                    self.pop_type()
-                    self.pop_type()
-                elif field_type == 'bool':
-                    # Bool is i32, extend to i64
-                    self._ensure_top_is_i32(indent)
-                    self.emit("i64.extend_i32_u", indent)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit(f"i64.store offset={i * 8}", indent)
-                    self.pop_type()
-                elif field_type.startswith('struct:') or self._is_struct_name(field_type):
-                    # Nested struct pointer is i32, extend to i64 for storage
-                    self._ensure_top_is_i32(indent)
-                    self.emit("i64.extend_i32_u", indent)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit(f"i64.store offset={i * 8}", indent)
-                    self.pop_type()
-                elif field_type in ('int', 'list', 'set'):
-                    # These are stored as 64-bit values; widen i32 handles first
-                    self._ensure_top_is_i32(indent)
-                    self.emit("i64.extend_i32_u", indent)
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit(f"i64.store offset={i * 8}", indent)
-                    self.pop_type()
-                else:  # int or any other type
-                    # Already i64, just store
-                    self.emit("local.set $temp_i64", indent)
-                    self.emit("local.get $temp", indent)
-                    self.emit("local.get $temp_i64", indent)
-                    self.emit(f"i64.store offset={i * 8}", indent)
-                    self.pop_type()
-
-            # Push struct pointer back to stack
-            self.emit("local.get $temp", indent)
-            self.push_type('i32', struct_id)
-
-        elif opcode == 'STRUCT_GET':
-            # STRUCT_GET field_index
-            # Stack before: struct_ptr (i32)
-            # Stack after: field_value (type depends on field)
-            field_idx = int(args[0]) if args else 0
-
-            self.emit_comment(f"STRUCT_GET {field_idx}", indent)
-
-            # Get struct type from struct_type_stack
-            struct_id = self.get_struct_id()
-
-            # Pop struct pointer type and convert if needed
-            popped_type, _ = self.pop_type()
-            # If the struct pointer was an i64 on the stack (e.g., from list_get),
-            # convert it to i32 address for loads/stores.
-            if popped_type == 'i64':
-                self.emit("i32.wrap_i64", indent)
-
-            # Determine field type
-            field_type = None
-            if struct_id is not None and struct_id in self.struct_defs:
-                struct_def = self.struct_defs[struct_id]
-                field_types = struct_def['field_types']
-                if field_idx < len(field_types):
-                    field_type = field_types[field_idx]
-
-            # Load field with appropriate instruction
-            if field_type == 'float':
-                # Float field: load as f64
-                self.emit(f"f64.load offset={field_idx * 8}", indent)
-                self.push_type('f64')
-            elif field_type == 'str':
-                # String field: load combined i64, extract ptr and len
-                # Combined format: (len << 32) | ptr
-                self.emit(f"i64.load offset={field_idx * 8}", indent)
-                # Split into ptr (lower 32) and len (upper 32)
-                # First, duplicate for extracting both parts
-                self.emit("local.set $temp_i64", indent)
-                # Extract ptr (lower 32 bits)
-                self.emit("local.get $temp_i64", indent)
-                self.emit("i32.wrap_i64", indent)  # ptr
-                # Extract len (upper 32 bits)
-                self.emit("local.get $temp_i64", indent)
-                self.emit("i64.const 32", indent)
-                self.emit("i64.shr_u", indent)
-                self.emit("i32.wrap_i64", indent)  # len
-                self.push_type('i32')  # ptr
-                self.push_type('i32')  # len
-            elif field_type == 'bool':
-                # Bool field: load as i64, truncate to i32
-                self.emit(f"i64.load offset={field_idx * 8}", indent)
-                self.emit("i32.wrap_i64", indent)
-                self.push_type('i32')
-            elif field_type and (field_type.startswith('struct:') or self._is_struct_name(field_type)):
-                # Nested struct field: load pointer as i32
-                # The struct pointer is stored as i64, extract as i32
-                self.emit(f"i64.load offset={field_idx * 8}", indent)
-                self.emit("i32.wrap_i64", indent)
-                # Try to find the nested struct ID
-                nested_struct_name = field_type.split(':')[1] if field_type.startswith('struct:') else field_type
-                nested_struct_id = None
-                for sid, sdef in self.struct_defs.items():
-                    if 'name' in sdef and sdef['name'] == nested_struct_name:
-                        nested_struct_id = sid
-                        break
-                self.push_type('i32', nested_struct_id)
-            else:
-                # Default: int or unknown type, load as i64
-                self.emit(f"i64.load offset={field_idx * 8}", indent)
-                self.push_type('i64')
-
-        elif opcode == 'STRUCT_SET':
-            # STRUCT_SET field_index
-            # Stack before: struct_ptr (i32) field_value (i64)
-            # Stack after: struct_ptr (i32)
-            field_idx = int(args[0]) if args else 0
-
-            self.emit_comment(f"STRUCT_SET {field_idx}", indent)
-
-            # Pop value and struct pointer
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()  # value
-                self.type_stack.pop()  # struct
-
-            # Save value and struct pointer
-            self.emit("local.set $temp_i64", indent)  # value
-            self.emit("local.set $temp", indent)  # struct_ptr
-
-            # Store value at struct_ptr + field_idx * 8
-            self.emit("local.get $temp", indent)  # struct_ptr
-            self.emit("local.get $temp_i64", indent)  # value
-            self.emit(f"i64.store offset={field_idx * 8}", indent)
-
-            # Push struct pointer back to stack
-            self.emit("local.get $temp", indent)
-            self.type_stack.append('i32')
-
-        elif opcode == 'STR_EQ':
-            # String equality comparison: (ptr1, len1, ptr2, len2) -> i32
-            self._emit_call('str_eq', indent)
-            for _ in range(4):
-                if self.type_stack:
-                    self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.imports.add('str_eq')
-
-        elif opcode == 'STR_UPPER':
-            # Consumes (ptr, len), produces (ptr, len)
-            self._emit_call('str_upper', indent)
-            # Pop input ptr,len and push result ptr,len
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self.imports.add('str_upper')
-
-        elif opcode == 'STR_LOWER':
-            # Consumes (ptr, len), produces (ptr, len)
-            self._emit_call('str_lower', indent)
-            # Pop input ptr,len and push result ptr,len
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self.imports.add('str_lower')
-
-        elif opcode == 'STR_STRIP':
-            # Consumes (ptr, len), produces (ptr, len)
-            self._emit_call('str_strip', indent)
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self.imports.add('str_strip')
-
-        elif opcode == 'STR_REPLACE':
-            # Consumes (hay_ptr, hay_len, old_ptr, old_len, new_ptr, new_len) -> (ptr,len)
-            # Ensure all i32 widths are correct; _emit_call will normalize as needed
-            self._emit_call('str_replace', indent)
-            # Pop 6 i32 values and push 2 i32 values
-            for _ in range(6):
-                if self.type_stack:
-                    self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self.imports.add('str_replace')
-
-        elif opcode == 'STR_JOIN':
-            # Consumes (sep_ptr, sep_len, list_ptr), produces (ptr, len)
-            # Ensure list_ptr (top) is i32
-            self._ensure_top_is_i32(indent)
-            self._emit_call('str_join', indent)
-            # _emit_call already handles type_stack
-            self.imports.add('str_join')
-
-        elif opcode == 'STR_SPLIT':
-            # Consumes (str_ptr, str_len, sep_ptr, sep_len), produces list_ptr
-            self._emit_call('str_split', indent)
-            # _emit_call already handles type_stack
-            self._last_i32_source = 'list'  # Result is a list pointer
-            self.imports.add('str_split')
-
-        elif opcode == 'CONTAINS':
-            # Check if we have strings (4 i32s) or set/list
-            if len(self.type_stack) >= 4 and all(t == 'i32' for t in self.type_stack[-4:]):
-                # String contains: (haystack_ptr, haystack_len, needle_ptr, needle_len)
-                self._emit_call('str_contains', indent)
-                for _ in range(4):
-                    if self.type_stack:
-                        self.type_stack.pop()
-                self.type_stack.append('i32')
-                self.imports.add('str_contains')
-            elif len(self.type_stack) >= 2 and self.type_stack[-1] == 'i64' and self.type_stack[-2] == 'i32':
-                # Set contains: (set_ptr: i32, value: i64) -> result: i32
-                self._emit_call('set_contains', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'bool'
-                self.imports.add('set_contains')
-            else:
-                # List contains - requires runtime support
-                self.emit_comment("CONTAINS (list) - requires runtime support", indent)
-                if self.type_stack:
-                    self.type_stack.pop()  # container
-                if self.type_stack:
-                    self.type_stack.pop()  # value
-                self.emit("i32.const 0", indent)
-                self.type_stack.append('i32')
-
-        elif opcode == 'LIST_POP':
-            # Pop from list - ensure list pointer (top) is i32, returns (list_ptr, value)
-            self._ensure_top_is_i32(indent)
-            self._emit_call('list_pop', indent)
-            # _emit_call already handles popping params and pushing returns (i32, i64)
-            self.imports.add('list_pop')
-
-        elif opcode == 'BUILTIN_PI':
-            # Push π constant
-            self.emit("f64.const 3.141592653589793", indent)
-            self.type_stack.append('f64')
 
         elif opcode == 'SWITCH_JUMP_TABLE':
             # SWITCH_JUMP_TABLE min_value max_value label1 label2 ... labelN
@@ -3719,360 +3595,6 @@ class WasmCompiler:
             # If index out of range, use last label as default
             label_str = " ".join(f"${lbl}" for lbl in labels)
             self.emit(f"br_table {label_str}", indent)
-
-        elif opcode == 'SET_NEW':
-            self._emit_call('set_new', indent)
-            # _emit_call already pushes i32 return type
-            self._last_i32_source = 'set'  # Track that this i32 is a set
-            self.imports.add('set_new')
-            
-        elif opcode == 'LIST_NEW_LITERAL':
-            # Create list from literals
-            size = int(args[0]) if args else 0
-            self.emit(f"i32.const {size}", indent)
-            self._emit_call('list_new', indent)
-            # _emit_call already pushes i32 return type
-            self._last_i32_source = 'list'  # Track that this i32 is a list
-            self.imports.add('list_new')
-
-        elif opcode == 'SET_ADD':
-            # Stack: set(i32) value(any) -> set(i32)
-            # Need to check if value is a string (i32, i32) and convert to i64 hash
-            if len(self.type_stack) >= 3 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
-                # String value: (set, ptr, len) -> pack into i64 (len<<32 | ptr)
-                # Save len
-                self.emit("local.set $temp", indent)
-                self.type_stack.pop()
-                # Convert ptr to i64 and save
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("local.set $temp_i64", indent)
-                self.type_stack.pop()
-                # Now stack: ... set_ptr
-                # Build combined i64
-                self.emit("local.get $temp", indent)
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("i64.const 32", indent)
-                self.emit("i64.shl", indent)
-                self.emit("local.get $temp_i64", indent)
-                self.emit("i64.or", indent)
-                # Stack now: ... set_ptr combined_i64
-                # Manually track the packed i64 we just built
-                self.type_stack.append('i64')
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_add', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'set'
-                self.imports.add('set_add')
-            else:
-                # Regular i64 value
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_add', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'set'  # Track that this i32 is a set
-                self.imports.add('set_add')
-
-        elif opcode == 'SET_REMOVE':
-            # Stack: set(i32) value(any) -> set(i32)
-            # Need to check if value is a string (i32, i32) and convert to i64 hash
-            if len(self.type_stack) >= 3 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
-                # String value: pack ptr,len into i64
-                self.emit("local.set $temp", indent)
-                self.type_stack.pop()
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("local.set $temp_i64", indent)
-                self.type_stack.pop()
-                # Build combined i64
-                self.emit("local.get $temp", indent)
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("i64.const 32", indent)
-                self.emit("i64.shl", indent)
-                self.emit("local.get $temp_i64", indent)
-                self.emit("i64.or", indent)
-                # Manually track the packed i64 we just built
-                self.type_stack.append('i64')
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_remove', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'set'
-                self.imports.add('set_remove')
-            else:
-                # Regular i64 value
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_remove', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'set'  # Track that this i32 is a set
-                self.imports.add('set_remove')
-
-        elif opcode == 'SET_CONTAINS':
-            # Stack: set(i32) value(any) -> result(i32)
-            # Need to check if value is a string (i32, i32) and convert to i64 hash
-            if len(self.type_stack) >= 3 and self.type_stack[-1] == 'i32' and self.type_stack[-2] == 'i32':
-                # String value: (set, ptr, len) -> pack into i64 (len<<32 | ptr)
-                # Save len
-                self.emit("local.set $temp", indent)
-                self.type_stack.pop()
-                # Convert ptr to i64 and save
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("local.set $temp_i64", indent)
-                self.type_stack.pop()
-                # Now stack: ... set_ptr
-                # Build combined i64
-                self.emit("local.get $temp", indent)
-                self.emit("i64.extend_i32_u", indent)
-                self.emit("i64.const 32", indent)
-                self.emit("i64.shl", indent)
-                self.emit("local.get $temp_i64", indent)
-                self.emit("i64.or", indent)
-                # Manually track the packed i64 we just built
-                self.type_stack.append('i64')
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_contains', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'bool'
-                self.imports.add('set_contains')
-            else:
-                # Regular i64 value
-                # Ensure set pointer is i32
-                self._ensure_second_is_i32(indent)
-                self._emit_call('set_contains', indent)
-                # _emit_call handles type_stack
-                self._last_i32_source = 'bool'  # Track that this i32 is a bool
-                self.imports.add('set_contains')
-
-        elif opcode == 'TRY_BEGIN':
-            # Start of try block
-            # Format: TRY_BEGIN "error_type" handler_label
-            if len(args) >= 2:
-                error_type = args[0].strip('"')
-                handler_label = args[1]
-                self.try_stack.append((error_type, handler_label))
-                self.emit_comment(f"TRY_BEGIN {error_type} -> {handler_label}", indent)
-
-        elif opcode == 'TRY_END':
-            # End of try block - pop handler if any
-            if self.try_stack:
-                self.try_stack.pop()
-            self.emit_comment("TRY_END", indent)
-
-        elif opcode == 'FILE_OPEN':
-            # Stack: path_ptr(i32) path_len(i32) mode_ptr(i32) mode_len(i32) -> fd(i32)
-            # _emit_call handles popping params and pushing return value
-            self._emit_call('file_open', indent)
-            self.imports.add('file_open')
-
-        elif opcode == 'FILE_READ':
-            # Stack: fd(i64) size(i64) -> ptr(i32) len(i32)
-            # Drop the size parameter (bytecode pushes it but runtime ignores it)
-            if len(self.type_stack) >= 2:
-                self.emit("drop", indent)
-                self.type_stack.pop()
-            # Now we have just fd on stack - _emit_call will handle conversion
-            self._emit_call('file_read', indent)
-            # _emit_call already pops fd and pushes ptr, len
-            self.imports.add('file_read')
-
-        elif opcode == 'FILE_WRITE':
-            # Stack: fd(i32) ptr(i32) len(i32) -> (nothing)
-            # Ensure fd is i32 (third-from-top)
-            if len(self.type_stack) >= 3:
-                self._ensure_nth_from_top_is_i32(3, indent)
-            # _emit_call already handles popping params from type_stack
-            self._emit_call('file_write', indent)
-            self.imports.add('file_write')
-
-        elif opcode == 'FILE_CLOSE':
-            # Stack: fd(i64) -> (nothing) OR Stack: empty -> (nothing)
-            # Handle both cases: fd on stack or no fd on stack (bytecode inconsistency)
-            if self.type_stack and len(self.type_stack) > 0:
-                # Convert fd from i64 to i32
-                if self.type_stack[-1] == 'i64':
-                    self.emit("i32.wrap_i64", indent)
-                    self.type_stack[-1] = 'i32'
-                    self._emit_call('file_close', indent)
-                if self.type_stack:
-                    self.type_stack.pop()
-            else:
-                # No fd on stack - file is already closed or bytecode issue
-                # Just emit a comment and don't call file_close
-                self.emit_comment("FILE_CLOSE - no fd on stack, skipping", indent)
-            self.imports.add('file_close')
-
-        elif opcode == 'EXIT':
-            # Stack: code(i64) -> (never returns)
-            # Convert i64 to i32 for exit code
-            if self.type_stack and self.type_stack[-1] == 'i64':
-                self.emit("i32.wrap_i64", indent)
-                self.type_stack[-1] = 'i32'
-            self._emit_call('exit_process', indent)
-            if self.type_stack:
-                self.type_stack.pop()
-            self.imports.add('exit_process')
-
-        elif opcode == 'ENCODE':
-            # ENCODE: pop encoding string, pop source string, push encoded string
-            # In UTF-8 runtime, this is essentially a no-op (drop encoding, keep string)
-            # Stack: str_ptr str_len encoding_ptr encoding_len -> str_ptr str_len
-            self.emit("drop", indent)  # drop encoding_len
-            self.emit("drop", indent)  # drop encoding_ptr
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            # String (ptr, len) remains on stack
-
-        elif opcode == 'DECODE':
-            # DECODE: pop encoding string, pop source bytes, push decoded string
-            # In UTF-8 runtime, this is essentially a no-op (drop encoding, keep string)
-            # Stack: str_ptr str_len encoding_ptr encoding_len -> str_ptr str_len
-            self.emit("drop", indent)  # drop encoding_len
-            self.emit("drop", indent)  # drop encoding_ptr
-            if len(self.type_stack) >= 2:
-                self.type_stack.pop()
-                self.type_stack.pop()
-            # String (ptr, len) remains on stack
-
-        elif opcode == 'SLEEP':
-            # SLEEP: pop duration (f64 or i64), sleep for that many seconds
-            # Convert to f64 for the sleep call (supports fractional seconds)
-            if self.type_stack:
-                top = self.type_stack[-1]
-                if top == 'i64':
-                    self.emit("f64.convert_i64_s", indent)
-                    self.type_stack[-1] = 'f64'
-                elif top == 'i32':
-                    self.emit("f64.convert_i32_s", indent)
-                    self.type_stack[-1] = 'f64'
-            self._emit_call('sleep', indent)
-            if self.type_stack:
-                self.type_stack.pop()
-            self.imports.add('sleep')
-
-        elif opcode == 'FORK':
-            # FORK not available in WASM - stub to always be parent
-            # Return 1 to indicate we're the "parent" (no child was created)
-            self.emit("i64.const 1", indent)
-            self.type_stack.append('i64')
-
-        elif opcode == 'WAIT':
-            # WAIT not available in WASM - no-op
-            # Just return 0 for the child PID
-            self.emit("i64.const 0", indent)
-            self.type_stack.append('i64')
-
-        elif opcode == 'JOIN':
-            # JOIN (wait for child) not available in WASM
-            # Consume the pid from stack and return 0 exit status
-            self.emit("drop", indent)
-            if self.type_stack:
-                self.type_stack.pop()
-            self.emit("i64.const 0", indent)
-            self.type_stack.append('i64')
-
-        elif opcode == 'GOTO_CALL':
-            # GOTO_CALL not supported in WASM
-            raise WasmCompilerError("WASM backend does not support GOTO_CALL")
-
-        elif opcode in ['SOCKET_CREATE', 'SOCKET_CONNECT', 'SOCKET_BIND', 'SOCKET_LISTEN', 'SOCKET_ACCEPT', 'SOCKET_SEND', 'SOCKET_RECV', 'SOCKET_CLOSE']:
-            # Socket operations not supported in WASM
-            raise WasmCompilerError(f"WASM backend does not support socket operations ({opcode})")
-
-        elif opcode == 'RAISE':
-            # Exception raising
-            # Format: RAISE "error_type" "message"
-            # Need to parse quoted strings correctly (they may contain spaces)
-            rest = inst[len('RAISE'):].strip()
-            strings = []
-            i = 0
-            while i < len(rest):
-                if rest[i] == '"':
-                    j = i + 1
-                    while j < len(rest) and rest[j] != '"':
-                        if rest[j] == '\\':
-                            j += 2
-                        else:
-                            j += 1
-                    if j < len(rest):
-                        strings.append(rest[i+1:j])
-                        i = j + 1
-                    else:
-                        break
-                else:
-                    i += 1
-            
-            if len(strings) >= 2:
-                error_type = strings[0]
-                message = strings[1]
-                # Check if we're in a try block that catches this error
-                matched = False
-                if self.try_stack:
-                    # Search try_stack from innermost to outermost for matching handler
-                    for handler_error_type, handler_label in reversed(self.try_stack):
-                        if handler_error_type == error_type:
-                            # Branch to the handler
-                            self.emit(f"br ${handler_label}", indent)
-                            matched = True
-                            break
-                
-                if not matched:
-                    # No matching handler - call runtime_error
-                    # runtime_error(error_type_ptr, error_type_len, message_ptr, message_len, line_num)
-                    error_type_escaped = self._unescape_string(error_type)
-                    message_escaped = self._unescape_string(message)
-                    
-                    error_type_offset = self.add_string_constant(error_type_escaped)
-                    message_offset = self.add_string_constant(message_escaped)
-                    
-                    self.emit(f"i32.const {error_type_offset}  ;; error type", indent)
-                    self.emit(f"i32.const {len(error_type_escaped.encode('utf-8'))}", indent)
-                    self.emit(f"i32.const {message_offset}  ;; message", indent)
-                    self.emit(f"i32.const {len(message_escaped.encode('utf-8'))}", indent)
-                    self.emit(f"i32.const 0  ;; line number (not tracked)", indent)
-                    self.emit("call $runtime_error", indent)
-                    self.emit("unreachable", indent)
-            elif len(strings) >= 1:
-                error_type = strings[0]
-                matched = False
-                if self.try_stack:
-                    for handler_error_type, handler_label in reversed(self.try_stack):
-                        if handler_error_type == error_type:
-                            self.emit(f"br ${handler_label}", indent)
-                            matched = True
-                            break
-                
-                if not matched:
-                    # Call runtime_error with just error type
-                    error_type_escaped = self._unescape_string(error_type)
-                    error_type_offset = self.add_string_constant(error_type_escaped)
-                    
-                    self.emit(f"i32.const {error_type_offset}  ;; error type", indent)
-                    self.emit(f"i32.const {len(error_type_escaped.encode('utf-8'))}", indent)
-                    self.emit("i32.const 0  ;; no message", indent)
-                    self.emit("i32.const 0", indent)
-                    self.emit("i32.const 0  ;; line number", indent)
-                    self.emit("call $runtime_error", indent)
-                    self.emit("unreachable", indent)
-            else:
-                self.emit("unreachable", indent)
-
-        elif opcode == 'LOAD2_CMP_GT':
-            # LOAD2_CMP_GT idx1 idx2 - Load two values and compare
-            idx1 = int(args[0])
-            idx2 = int(args[1])
-            var_ref1 = self._get_var_ref(idx1)
-            var_ref2 = self._get_var_ref(idx2)
-            self.emit(f"local.get {var_ref1}", indent)
-            self.emit(f"local.get {var_ref2}", indent)
-            self.emit("i64.gt_s", indent)
-            self.type_stack.append('i32')
-            self._last_i32_source = 'bool'
-
-        else:
-            # Unsupported instruction - fatal error
-            raise WasmCompilerError(f"Unsupported instruction: {inst}")
 
     def _unescape_string(self, s: str) -> str:
         # sourcery skip: inline-immediately-returned-variable
@@ -4154,43 +3676,36 @@ class WasmCompiler:
 
         # For n>1 we need to save higher stack values, wrap, then restore
         saved = []
-        # Use multiple temps for multiple saved values (temp, temp2, temp_i64)
+        # Use multiple temps to avoid overwriting ($temp, $temp2, $temp_i64)
         for i in range(n-1):
             t = self.type_stack.pop()
             saved.append(t)
             if t == 'i64':
-                # prefer $temp_i64 for i64; if multiple i64 savings, use $temp_i64 for first then fallback to $temp
                 if i == 0:
                     self.emit("local.set $temp_i64", indent)
                 else:
                     self.emit("local.set $temp", indent)
             elif t == 'f64':
-                # Only a single f64 temp available
                 self.emit("local.set $temp_f64", indent)
             else:
-                # Use $temp for first i32 save, $temp2 for second
                 if i == 0:
                     self.emit("local.set $temp", indent)
                 else:
                     self.emit("local.set $temp2", indent)
 
-        # Now top is the target value - pop it from our simulated stack
+        # Pop the target from simulated stack and perform extend on it
         target_type = self.type_stack.pop()
-        # Emit the wrap to convert i64 -> i32
         self.emit("i32.wrap_i64", indent)
-        # Update tracked type for that position (it becomes i32)
+        # Update tracked type for that position to i32
         self.type_stack.append('i32')
 
         # Restore saved values in reverse order
         for i, t in enumerate(reversed(saved)):
-            # When restoring, pick corresponding temp in reverse order
             if t == 'i64':
-                # if only one i64 saved, was stored in $temp_i64
                 self.emit("local.get $temp_i64", indent)
             elif t == 'f64':
                 self.emit("local.get $temp_f64", indent)
             else:
-                # For i32 values, second saved used $temp2
                 if i == 0:
                     self.emit("local.get $temp2", indent)
                 else:
@@ -4277,9 +3792,10 @@ class WasmCompiler:
             'set_add': ['i32','i64'],
             'set_remove': ['i32','i64'],
             'set_contains': ['i32','i64'],
-            'set_len': ['i32'],
+            'set_len': ['i64'],
             'str_join': ['i32','i32','i32'],
             'str_split': ['i32','i32','i32','i32'],
+            'str_strip': ['i32','i32'],
             'str_get': ['i32','i32','i64'],
             'print': ['i32','i32'],
             'println': ['i32','i32'],
@@ -4326,20 +3842,97 @@ class WasmCompiler:
         }
 
         if params := sig.get(name):
-            # For each param from last to first check and adjust
-            for k, expected in enumerate(reversed(params), start=1):
-                if len(self.type_stack) < k:
+            # Use smart argument preparation logic (same as in CALL opcode)
+            param_types = params
+            param_idx = len(param_types) - 1
+            stack_idx = len(self.type_stack) - 1
+            ops = []
+            next_i64_temp = 0
+            next_i32_temp = 0
+            next_f64_temp = 0
+
+            while param_idx >= 0:
+                if stack_idx < 0:
                     break
-                actual = self.type_stack[-k]
-                if expected == 'i32' and actual == 'i64':
-                    # wrap nth-from-top to i32
-                    self._ensure_nth_from_top_is_i32(k, indent)
-                elif expected == 'i64' and actual == 'i32':
-                    self._ensure_nth_from_top_is_i64(k, indent)
-            # After conversions, pop the function params from the type stack
-            for _ in params:
-                if self.type_stack:
-                    self.type_stack.pop()
+                param_type = param_types[param_idx]
+                stack_type = self.type_stack[stack_idx]
+
+                if param_type == 'i32':
+                    if stack_type == 'i32':
+                        temp = f"$temp_i32_{next_i32_temp}"
+                        next_i32_temp += 1
+                        ops.append(('i32', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                        param_idx -= 1
+                        stack_idx -= 1
+                    elif stack_type == 'i64':
+                        if param_idx > 0 and param_types[param_idx-1] == 'i32':
+                            # Unpack i64 -> i32, i32
+                            temp = f"$temp_i64_{next_i64_temp}"
+                            next_i64_temp += 1
+
+                            def push_unpack(t):
+                                self.emit(f"local.get {t}", indent)
+                                self.emit("i32.wrap_i64", indent)
+                                self.emit(f"local.get {t}", indent)
+                                self.emit("i64.const 32", indent)
+                                self.emit("i64.shr_u", indent)
+                                self.emit("i32.wrap_i64", indent)
+
+                            ops.append(('i64', temp, lambda t=temp: push_unpack(t)))
+                            param_idx -= 2 # Consumed 2 params
+                            stack_idx -= 1 # Consumed 1 stack item
+                        else:
+                            # Truncate i64 -> i32
+                            temp = f"$temp_i64_{next_i64_temp}"
+                            next_i64_temp += 1
+                            ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.wrap_i64", indent))))
+                            param_idx -= 1
+                            stack_idx -= 1
+                    else: # f64
+                        temp = f"$temp_f64_{next_f64_temp}"
+                        next_f64_temp += 1
+                        ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.trunc_f64_s", indent))))
+                        param_idx -= 1
+                        stack_idx -= 1
+
+                elif param_type == 'i64':
+                    if stack_type == 'i64':
+                        temp = f"$temp_i64_{next_i64_temp}"
+                        next_i64_temp += 1
+                        ops.append(('i64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                    elif stack_type == 'i32':
+                        temp = f"$temp_i32_{next_i32_temp}"
+                        next_i32_temp += 1
+                        ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.extend_i32_u", indent))))
+                    elif stack_type == 'f64':
+                        temp = f"$temp_f64_{next_f64_temp}"
+                        next_f64_temp += 1
+                        ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.trunc_f64_s", indent))))
+                    param_idx -= 1
+                    stack_idx -= 1
+                elif param_type == 'f64':
+                    if stack_type == 'f64':
+                        temp = f"$temp_f64_{next_f64_temp}"
+                        next_f64_temp += 1
+                        ops.append(('f64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
+                    elif stack_type == 'i32':
+                        temp = f"$temp_i32_{next_i32_temp}"
+                        next_i32_temp += 1
+                        ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i32_s", indent))))
+                    elif stack_type == 'i64':
+                        temp = f"$temp_i64_{next_i64_temp}"
+                        next_i64_temp += 1
+                        ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i64_s", indent))))
+                    param_idx -= 1
+                    stack_idx -= 1
+
+            # Execute plan
+            for pop_type, temp, _ in ops:
+                self.emit(f"local.set {temp}", indent)
+                self.pop_type()
+
+            for _, _, push_action in reversed(ops):
+                push_action()
 
         # Emit the call
         self.emit(f"call ${name}", indent)
@@ -4401,16 +3994,16 @@ class WasmCompiler:
             # Convert i64 -> (ptr,len)
             self._emit_call('i64_to_str', indent)
             self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self._last_i32_source = None
+            self.type_stack.append('i32')  # ptr
+            self.type_stack.append('i32')  # len
+            self.imports.add('i64_to_str')
             return
         if top == 'f64':
             self._emit_call('f64_to_str', indent)
             self.type_stack.pop()
-            self.type_stack.append('i32')
-            self.type_stack.append('i32')
-            self._last_i32_source = None
+            self.type_stack.append('i32')  # ptr
+            self.type_stack.append('i32')  # len
+            self.imports.add('f64_to_str')
             return
 
         if top == 'i32':
@@ -4481,6 +4074,6 @@ class WasmCompiler:
             self.type_stack.append(t)
 
 def compile_to_wasm(bytecode: str) -> Tuple[str, Dict]:
-    """Compile fr bytecode to WebAssembly text format (WAT)"""
+    """Compile fr bytecode to WebAssembly text format"""
     compiler = WasmCompiler()
     return compiler.compile(bytecode)

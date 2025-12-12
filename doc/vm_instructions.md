@@ -1,6 +1,8 @@
 # VM Instructions Reference
 
-This document describes all bytecode instructions supported by the fr VM.
+This document describes all bytecode instructions in fr.
+
+Probably outdated!
 
 ## Table of Contents
 
@@ -110,16 +112,18 @@ Push a bytes constant onto the stack.
 ### LOAD
 
 Load a local variable onto the stack.
+Can have any num args. In which case it will load all.
 
-**Syntax:** `LOAD <var_index>`
+**Syntax:** `LOAD <var_index> ...`
 
 **Stack:** `-> value`
 
 ### STORE
 
 Pop a value from the stack and store it in a local variable.
+Can have any num args. In which case it will store all.
 
-**Syntax:** `STORE <var_index>`
+**Syntax:** `STORE <var_index> ...`
 
 **Stack:** `value ->`
 
@@ -198,6 +202,7 @@ Alias one local variable to another (pointer alias, not a copy).
 ### LOAD_MULTI
 
 Load multiple variables onto the stack at once.
+Same as normal LOAD but explicit.
 
 **Syntax:** `LOAD_MULTI <var1> <var2> ...`
 
@@ -206,6 +211,7 @@ Load multiple variables onto the stack at once.
 ### FUSED_LOAD_STORE
 
 Interleaved load/store operations.
+Does not have to be in pairs.
 
 **Syntax:** `FUSED_LOAD_STORE <src1> <dst1> <src2> <dst2> ...`
 
@@ -214,6 +220,7 @@ Interleaved load/store operations.
 ### FUSED_STORE_LOAD
 
 Interleaved store/load operations.
+Does not have to be in pairs.
 
 **Syntax:** `FUSED_STORE_LOAD <dst1> <src1> <dst2> <src2> ...`
 

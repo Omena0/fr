@@ -1001,6 +1001,8 @@ def _consume_expression(stream: InputStream) -> str:
             elif char in '([{':
                 depth += 1
             elif char in ')]}':
+                if depth == 0:
+                    break
                 depth -= 1
             elif char == '\n':
                 if depth == 0:
@@ -2385,6 +2387,10 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     raise SyntaxError(stream.format_error('Invalid for loop syntax'))
 
                 varname = parts[0].strip()
+                # Handle typed variable: "str style" -> "style"
+                if ' ' in varname:
+                    varname = varname.split(' ')[-1].strip()
+
                 iterable_expr = parts[1].strip()
 
                 # Check if it's a range expression (start..end) or (start..end..step)

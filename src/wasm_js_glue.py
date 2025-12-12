@@ -581,7 +581,11 @@ JS_WEB_FUNCTIONS = {
         'implementation': '''(parentId, childId) => {
             const parent = domElements.get(parentId);
             const child = domElements.get(childId);
-            if (parent && child) parent.appendChild(child);
+            if (parent && child) {
+                parent.appendChild(child);
+            } else {
+                console.error(`dom_append failed: parent=${parentId} (${parent}), child=${childId} (${child})`);
+            }
         }''',
         'wasm_signature': '(param i32 i32)',
         'category': 'dom',

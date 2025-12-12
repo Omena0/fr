@@ -239,6 +239,9 @@ class BytecodeCompiler:
         if type_str in self.struct_defs:
             return f'struct:{type_str}'  # Return struct name with prefix
 
+        if type_str.endswith('*'):
+            return 'variadic'
+
         type_map = {
             'int': 'i64',
             'i64': 'i64',

@@ -651,6 +651,21 @@ def wasm_cmd(args):
         else:
             if result.stderr:
                 print(f"Error: {result.stderr}")
+                # Print WAT content around error line
+                try:
+                    import re
+                    match = re.search(r':(\d+):(\d+):', result.stderr)
+                    if match:
+                        line_num = int(match.group(1))
+                        with open(wat_path, 'r') as f:
+                            lines = f.readlines()
+                            start = max(0, line_num - 5)
+                            end = min(len(lines), line_num + 5)
+                            print("Context:")
+                            for i in range(start, end):
+                                print(f"{i+1}: {lines[i].rstrip()}")
+                except Exception as e:
+                    print(f"Could not print context: {e}")
             else:
                 print("Warning: wat2wasm failed. Install WABT to generate .wasm binary.")
                 print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")

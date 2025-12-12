@@ -5,7 +5,9 @@ struct Element {
     list content
 }
 
-Element element(str name, str text="", list content=[]) {
+list elements = []
+
+Element element(str name, str text, Element *content) {
     int new_element  = dom_create(name)
     dom_set_text(new_element, text)
     list new_content = []
@@ -13,5 +15,18 @@ Element element(str name, str text="", list content=[]) {
         dom_append(new_element, child.id)
         new_content.append(child)
     }
-    return Element(new_element, name, new_content)
+    Element elem = Element(new_element, name, new_content)
+    elements.append(elem)
+    return elem
 }
+
+Element styles(Element elem, str *_styles) {
+    println(_styles)
+    for (str style in _styles) {
+        str prop = style.split(':')[0].strip()
+        str value = style.split(':')[1].strip()
+        dom_set_style(elem.id, prop, value)
+    }
+    return elem
+}
+
