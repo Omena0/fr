@@ -13,7 +13,82 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
-#include <dlfcn.h>  // For dynamic loading
+
+// Dynamic loading (POSIX: dlfcn.h, Windows: LoadLibrary/GetProcAddress)
+#if defined(_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+
+    #ifndef RTLD_NOW
+        #define RTLD_NOW 0
+    #endif
+
+    static char g_dl_error_buf[512];
+
+    static void fr_set_dl_error_from_last_error(void) {
+        DWORD err = GetLastError();
+        if (err == 0) {
+            g_dl_error_buf[0] = '\0';
+            return;
+        }
+
+        char *msg_buf = NULL;
+        DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+        DWORD len = FormatMessageA(flags, NULL, err, 0, (LPSTR)&msg_buf, 0, NULL);
+        if (len == 0 || !msg_buf) {
+            snprintf(g_dl_error_buf, sizeof(g_dl_error_buf), "Win32 error %lu", (unsigned long)err);
+            return;
+        }
+
+        // Trim trailing CR/LF
+        while (len > 0 && (msg_buf[len - 1] == '\r' || msg_buf[len - 1] == '\n')) {
+            msg_buf[len - 1] = '\0';
+            len--;
+        }
+
+        strncpy(g_dl_error_buf, msg_buf, sizeof(g_dl_error_buf) - 1);
+        g_dl_error_buf[sizeof(g_dl_error_buf) - 1] = '\0';
+        LocalFree(msg_buf);
+    }
+
+    static const char *dlerror(void) {
+        return g_dl_error_buf[0] ? g_dl_error_buf : NULL;
+    }
+
+    static void *dlopen(const char *filename, int flags) {
+        (void)flags;
+        g_dl_error_buf[0] = '\0';
+        HMODULE h = LoadLibraryA(filename);
+        if (!h) {
+            fr_set_dl_error_from_last_error();
+            return NULL;
+        }
+        return (void *)h;
+    }
+
+    static void *dlsym(void *handle, const char *symbol) {
+        g_dl_error_buf[0] = '\0';
+        FARPROC p = GetProcAddress((HMODULE)handle, symbol);
+        if (!p) {
+            fr_set_dl_error_from_last_error();
+            return NULL;
+        }
+        return (void *)p;
+    }
+
+    static int dlclose(void *handle) {
+        g_dl_error_buf[0] = '\0';
+        if (!handle)
+            return 0;
+        if (!FreeLibrary((HMODULE)handle)) {
+            fr_set_dl_error_from_last_error();
+            return -1;
+        }
+        return 0;
+    }
+#else
+    #include <dlfcn.h>  // For dynamic loading
+#endif
 
 // Ensure M_PI is defined
 #ifndef M_PI
@@ -9038,14 +9113,17 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    // Load C libraries (.so files passed as arguments)
-    // Count .so files in arguments
+    // Load C libraries (.so/.dll files passed as arguments)
+    // Count dynamic libraries in arguments
     int so_count = 0;
     for (int i = 0; i < vm.prog_argc; i++)
     {
         const char *arg = vm.prog_argv[i];
         size_t len = strlen(arg);
-        if (len > 3 && strcmp(arg + len - 3, ".so") == 0)
+        bool is_dynlib = (len > 3 && strcmp(arg + len - 3, ".so") == 0);
+        if (len > 4 && strcmp(arg + len - 4, ".dll") == 0)
+            is_dynlib = true;
+        if (is_dynlib)
             so_count++;
     }
     
@@ -9058,7 +9136,10 @@ int main(int argc, char **argv) {
         {
             const char *arg = vm.prog_argv[i];
             size_t len = strlen(arg);
-            if (len > 3 && strcmp(arg + len - 3, ".so") == 0)
+            bool is_dynlib = (len > 3 && strcmp(arg + len - 3, ".so") == 0);
+            if (len > 4 && strcmp(arg + len - 4, ".dll") == 0)
+                is_dynlib = true;
+            if (is_dynlib)
             {
                 void *handle = dlopen(arg, RTLD_NOW);
                 if (!handle)
