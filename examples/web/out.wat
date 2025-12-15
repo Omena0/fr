@@ -4,6 +4,7 @@
   (import "env" "dom_set_text" (func $dom_set_text (param i32 i32 i32)))
   (import "env" "dom_append" (func $dom_append (param i32 i32)))
   (import "env" "dom_set_style" (func $dom_set_style (param i32 i32 i32 i32 i32)))
+  (import "env" "dom_query" (func $dom_query (param i32 i32) (result i32)))
   (import "env" "print" (func $print (param i32 i32)))
   (import "env" "println" (func $println (param i32 i32)))
   (import "env" "runtime_error" (func $runtime_error (param i32 i32 i32 i32 i32)))
@@ -30,6 +31,7 @@
   (import "env" "list_get" (func $list_get (param i32 i64) (result i64)))
   (import "env" "list_set" (func $list_set (param i32 i64 i64) (result i32)))
   (import "env" "list_len" (func $list_len (param i32) (result i64)))
+  (import "env" "list_contains" (func $list_contains (param i32 i64) (result i32)))
   (import "env" "list_pop" (func $list_pop (param i32) (result i32 i64)))
   (import "env" "set_new" (func $set_new (result i32)))
   (import "env" "set_add" (func $set_add (param i32 i64) (result i32)))
@@ -133,6 +135,8 @@
     ;; STORE 4
     local.set $l1
     ;; STORE_CONST_I64 7 0
+    i64.const 0
+    local.set $l4
     (block $forin_end2
       (loop $forin_start0
         ;; LOAD 7 2
@@ -312,6 +316,8 @@
     local.get $temp_i32_0
     call $println
     ;; STORE_CONST_I64 3 0
+    i64.const 0
+    local.set $l1
     (block $forin_end2
       (loop $forin_start0
         ;; LOAD 3 1
@@ -343,19 +349,45 @@
         i32.const 0  ;; string: :...
         i32.const 1
         ;; STR_SPLIT
+        local.set $temp_i32_0
+        local.set $temp_i32_1
+        local.set $temp_i64_0
+        local.get $temp_i64_0
+        i32.wrap_i64
+        local.get $temp_i64_0
+        i64.const 32
+        i64.shr_u
+        i32.wrap_i64
+        local.get $temp_i32_1
+        local.get $temp_i32_0
+        call $str_split
         ;; CONST_I64 0
         i64.const 0
         ;; LIST_GET
         local.set $temp_i64_0
         local.set $temp_i32_0
-        local.set $temp_i32_1
-        local.get $temp_i32_1
         local.get $temp_i32_0
         local.get $temp_i64_0
-        call $str_get
+        call $list_get
         ;; STR_STRIP
+        local.set $temp_i64_0
+        local.get $temp_i64_0
+        i32.wrap_i64
+        local.get $temp_i64_0
+        i64.const 32
+        i64.shr_u
+        i32.wrap_i64
+        call $str_strip
         ;; STORE 4
+        local.set $temp
         i64.extend_i32_u
+        local.set $temp_i64
+        local.get $temp
+        i64.extend_i32_u
+        i64.const 32
+        i64.shl
+        local.get $temp_i64
+        i64.or
         local.set $l2
         ;; LOAD 2
         local.get $l0
@@ -363,19 +395,45 @@
         i32.const 0  ;; string: :...
         i32.const 1
         ;; STR_SPLIT
+        local.set $temp_i32_0
+        local.set $temp_i32_1
+        local.set $temp_i64_0
+        local.get $temp_i64_0
+        i32.wrap_i64
+        local.get $temp_i64_0
+        i64.const 32
+        i64.shr_u
+        i32.wrap_i64
+        local.get $temp_i32_1
+        local.get $temp_i32_0
+        call $str_split
         ;; CONST_I64 1
         i64.const 1
         ;; LIST_GET
         local.set $temp_i64_0
         local.set $temp_i32_0
-        local.set $temp_i32_1
-        local.get $temp_i32_1
         local.get $temp_i32_0
         local.get $temp_i64_0
-        call $str_get
+        call $list_get
         ;; STR_STRIP
+        local.set $temp_i64_0
+        local.get $temp_i64_0
+        i32.wrap_i64
+        local.get $temp_i64_0
+        i64.const 32
+        i64.shr_u
+        i32.wrap_i64
+        call $str_strip
         ;; STORE 5
+        local.set $temp
         i64.extend_i32_u
+        local.set $temp_i64
+        local.get $temp
+        i64.extend_i32_u
+        i64.const 32
+        i64.shl
+        local.get $temp_i64
+        i64.or
         local.set $l3
         ;; LOAD 0
         local.get $p0
@@ -617,6 +675,30 @@
     call $styles
     ;; STORE 0
     local.set $l0
+    ;; CONST_STR "#output"
+    i32.const 145  ;; string: #output...
+    i32.const 7
+    ;; CALL dom_query 1
+    local.set $temp_i32_0
+    local.set $temp_i32_1
+    local.get $temp_i32_1
+    local.get $temp_i32_0
+    call $dom_query
+    ;; LOAD 0
+    local.get $l0
+    ;; STRUCT_GET 0
+    local.set $temp_i32_0
+    local.get $temp_i32_0
+    i32.const 0
+    i32.add
+    i64.load
+    ;; CALL dom_append 2
+    local.set $temp_i64_0
+    local.set $temp_i32_0
+    local.get $temp_i32_0
+    local.get $temp_i64_0
+    i32.wrap_i64
+    call $dom_append
     ;; RETURN_VOID
     return
   )
@@ -637,4 +719,5 @@
   (data (i32.const 111) "\68\36")
   (data (i32.const 113) "\42\69\6e\67\20\63\68\69\6c\6c\69\6e\67\20\36")
   (data (i32.const 128) "\6d\61\72\67\69\6e\2d\6c\65\66\74\3a\20\33\30\70\78")
+  (data (i32.const 145) "\23\6f\75\74\70\75\74")
 )

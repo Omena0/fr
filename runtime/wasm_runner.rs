@@ -503,6 +503,16 @@ fn main() -> Result<()> {
         }
     });
 
+    let lists_clone = lists.clone();
+    let list_contains = Func::wrap(&mut store, move |_: Caller<'_, ()>, list: i32, value: i64| -> i32 {
+        let lists_lock = lists_clone.lock().unwrap();
+        if let Some(list_vec) = lists_lock.get(list as usize) {
+            if list_vec.contains(&value) { 1 } else { 0 }
+        } else {
+            0
+        }
+    });
+
     // Set to string conversion
     let offset_clone = string_offset.clone();
     let sets_clone = sets.clone();
@@ -723,6 +733,7 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "list_set", list_set)?;
     linker.define(&store, "env", "list_len", list_len)?;
     linker.define(&store, "env", "list_pop", list_pop)?;
+    linker.define(&store, "env", "list_contains", list_contains)?;
     linker.define(&store, "env", "set_new", set_new)?;
     linker.define(&store, "env", "set_add", set_add)?;
     linker.define(&store, "env", "set_remove", set_remove)?;

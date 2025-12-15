@@ -290,6 +290,21 @@ JS_RUNTIME_FUNCTIONS = {
         'wasm_signature': '(param i32) (result i32 i32)',
     },
 
+    'list_contains': {
+        'signature': '(listId, value) => i32',
+        'implementation': '''(listId, value) => {
+            const list = lists.get(listId);
+            if (!list) return 0;
+            // Values are stored as i64 (BigInt) in the list.
+            const needle = BigInt(value);
+            for (const v of list) {
+                if (BigInt(v) === needle) return 1;
+            }
+            return 0;
+        }''',
+        'wasm_signature': '(param i32 i64) (result i32)',
+    },
+
     # Set operations
     'set_new': {
         'signature': '() => setId',
@@ -466,10 +481,6 @@ JS_WEB_FUNCTIONS = {
         'implementation': '''(tagPtr, tagLen) => {
             const tag = readString(tagPtr, tagLen);
             const elem = document.createElement(tag);
-            // Auto-attach to document body so elements become visible by default
-            if (document.body) {
-                document.body.appendChild(elem);
-            }
             const id = domElements.size + 1;
             domElements.set(id, elem);
             return id;
@@ -700,7 +711,8 @@ JS_WEB_FUNCTIONS = {
             if (elem) {
                 const prop = readString(propPtr, propLen);
                 const value = readString(valuePtr, valueLen);
-                elem.style[prop] = value;
+                // Use setProperty so hyphenated CSS properties work (e.g. margin-top)
+                elem.style.setProperty(prop, value);
             }
         }''',
         'wasm_signature': '(param i32 i32 i32 i32 i32)',
@@ -712,7 +724,7 @@ JS_WEB_FUNCTIONS = {
             const elem = domElements.get(elemId);
             if (!elem) return [0, 0];
             const prop = readString(propPtr, propLen);
-            return allocString(elem.style[prop] || '');
+            return allocString(elem.style.getPropertyValue(prop) || '');
         }''',
         'wasm_signature': '(param i32 i32 i32) (result i32 i32)',
         'category': 'dom',

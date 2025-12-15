@@ -16,4 +16,6 @@ void main() {
     ).styles(
         "margin-left: 30px"
     )
+
+    dom_append(dom_query("#output"), div.id)
 }

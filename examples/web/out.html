@@ -101,10 +101,14 @@ function buildImports() {
             dom_create: (tagPtr, tagLen) => {
             const tag = readString(tagPtr, tagLen);
             const elem = document.createElement(tag);
-            // Auto-attach to document body so elements become visible by default
-            if (document.body) {
-                document.body.appendChild(elem);
-            }
+            const id = domElements.size + 1;
+            domElements.set(id, elem);
+            return id;
+        },
+            dom_query: (selectorPtr, selectorLen) => {
+            const selector = readString(selectorPtr, selectorLen);
+            const elem = document.querySelector(selector);
+            if (!elem) return 0;
             const id = domElements.size + 1;
             domElements.set(id, elem);
             return id;
@@ -114,7 +118,8 @@ function buildImports() {
             if (elem) {
                 const prop = readString(propPtr, propLen);
                 const value = readString(valuePtr, valueLen);
-                elem.style[prop] = value;
+                // Use setProperty so hyphenated CSS properties work (e.g. margin-top)
+                elem.style.setProperty(prop, value);
             }
         },
             dom_set_text: (elemId, textPtr, textLen) => {
@@ -155,6 +160,16 @@ function buildImports() {
             const list = lists.get(listId);
             if (list) list.push(value);
             return listId;
+        },
+            list_contains: (listId, value) => {
+            const list = lists.get(listId);
+            if (!list) return 0;
+            // Values are stored as i64 (BigInt) in the list.
+            const needle = BigInt(value);
+            for (const v of list) {
+                if (BigInt(v) === needle) return 1;
+            }
+            return 0;
         },
             list_get: (listId, index) => {
             const list = lists.get(listId);
@@ -386,13 +401,13 @@ async function loadFrModuleFromBytes(wasmBytes, options = {}) {
 (async function() {
     const output = document.getElementById('body');
     try {
-            const wasmBase64 = 'AGFzbQEAAAABpgEaYAJ/fwF/YAN/f38AYAJ/fwBgBX9/f39/AGAEf39/fwJ/f2ACf38BfmACf38BfGABfgJ/f2ABfAJ/f2ABfwJ/f2ACf38Cf39gBn9/f39/fwJ/f2ADf39+An9/YAR/f39/AX9gA39/fwJ/f2ABfAF8YAABf2ACf34Bf2ACf34BfmADf35+AX9gAX8BfmABfwJ/fmABfwBgAXwAYAV/f39/fwF/YAAAAtcFLQNlbnYKZG9tX2NyZWF0ZQAAA2Vudgxkb21fc2V0X3RleHQAAQNlbnYKZG9tX2FwcGVuZAACA2Vudg1kb21fc2V0X3N0eWxlAAMDZW52BXByaW50AAIDZW52B3ByaW50bG4AAgNlbnYNcnVudGltZV9lcnJvcgADA2VudgpzdHJfY29uY2F0AAQDZW52CnN0cl90b19pNjQABQNlbnYKc3RyX3RvX2Y2NAAGA2VudgppNjRfdG9fc3RyAAcDZW52CmY2NF90b19zdHIACANlbnYLYm9vbF90b19zdHIABwNlbnYLbGlzdF90b19zdHIACQNlbnYKc2V0X3RvX3N0cgAJA2VudglzdHJfdXBwZXIACgNlbnYJc3RyX2xvd2VyAAoDZW52CXN0cl9zdHJpcAAKA2VudgtzdHJfcmVwbGFjZQALA2VudgdzdHJfZ2V0AAwDZW52DHN0cl9jb250YWlucwANA2VudgZzdHJfZXEADQNlbnYIc3RyX2pvaW4ADgNlbnYJc3RyX3NwbGl0AA0DZW52BHNxcnQADwNlbnYIbGlzdF9uZXcAEANlbnYLbGlzdF9hcHBlbmQAEQNlbnYIbGlzdF9nZXQAEgNlbnYIbGlzdF9zZXQAEwNlbnYIbGlzdF9sZW4AFANlbnYIbGlzdF9wb3AAFQNlbnYHc2V0X25ldwAQA2VudgdzZXRfYWRkABEDZW52CnNldF9yZW1vdmUAEQNlbnYMc2V0X2NvbnRhaW5zABEDZW52B3NldF9sZW4AFANlbnYJcm91bmRfZjY0AA8DZW52CWZsb29yX2Y2NAAPA2VudghjZWlsX2Y2NAAPA2VudglmaWxlX29wZW4ADQNlbnYJZmlsZV9yZWFkAAkDZW52CmZpbGVfd3JpdGUAAQNlbnYKZmlsZV9jbG9zZQAWA2VudgxleGl0X3Byb2Nlc3MAFgNlbnYFc2xlZXAAFwMEAxgAGQUFAQFAgAgGOQt/AUGACAt/AUEAC38BQQALfgFCAAt+AUIAC34BQgALfgFCAAt+AUIAC34BQgALfgFCAAt+AUIACwcRAgZtZW1vcnkCAARtYWluAC8K4wYDpwIlBn8BfgF/AX4DfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwgACABIRMhFiAWIBMQACEJIAkgAiADIRMhFiEZIBkgFiATEAEQGSEHAkADQCANIAQhEyATEB1TRQ0BIAQgDSEUIRMgEyAUEBshCyAJIAunQQBqKQMAIRQhEyATIBSnEAIgByALIRQhEyATIBQQGiEHIA1CAXwhDQwACwsgCSAAIAEgByMAIhNBGGokAK0hESATQRBqIBE3AwAhFq0hFCATQQhqIBQgFq1CIIaENwMArSERIBNBAGogETcDACATIQUjCiAFIQ+nIA+tIRQhEyATIBQQGq0kCiAFDwAL9AEoAX4BfwF+AX8BfgF/AX4DfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwgASEOIA4QDSEOIREgESAOEAUCQANAIAQgASEOIA4QHVNFDQEgASAEIQ8hDiAOIA8QGyECIAJBAEEBQgAhDyEOIREgESAOIA8QE60hBiACQQBBAUIBIQ8hDiERIBEgDiAPEBOtIQggACEOIA5BAGopAwAgBiAIIQ8hEiEVIBWnIBKnIBJCIIinIA+nIA9CIIinEAMgBEIBfCEEDAALCyAADwALwQIhBH8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8EBmtJANBAUEDQQRBBUEJQQJBC0EPEBkQLUEaQREhAq0gAq1CIIaEIQcQGSAHIQchBiAGIAcQGhAuQStBAkEtQQ8QGRAtQTxBAkE+QQ8QGRAtQc0AQQJBzwBBDxAZEC1B3gBBAkHgAEEPEBkQLUHvAEECQfEAQQ8QGRAtrSEHrSEKrSENrSEQrSETrSEWEBkgFiEHIQYgBiAHEBogEyEHIQYgBiAHEBogECEHIQYgBiAHEBogDSEHIQYgBiAHEBogCiEHIQYgBiAHEBogByEHIQYgBiAHEBoQLUGAAUERIQKtIAKtQiCGhCEHEBkgByEHIQYgBiAHEBoQLiEADwsL7gERAEEACwE6AEEBCwNkaXYAQQQLBURpdiAxAEEJCwJoMQBBCwsPQmluZyBjaGlsbGluZyAxAEEaCxFtYXJnaW4tdG9wOiAxMDBweABBKwsCaDIAQS0LD0JpbmcgY2hpbGxpbmcgMgBBPAsCaDMAQT4LD0JpbmcgY2hpbGxpbmcgMwBBzQALAmg0AEHPAAsPQmluZyBjaGlsbGluZyA0AEHeAAsCaDUAQeAACw9CaW5nIGNoaWxsaW5nIDUAQe8ACwJoNgBB8QALD0JpbmcgY2hpbGxpbmcgNgBBgAELEW1hcmdpbi1sZWZ0OiAzMHB4';
+            const wasmBase64 = 'AGFzbQEAAAABpgEaYAJ/fwF/YAN/f38AYAJ/fwBgBX9/f39/AGAEf39/fwJ/f2ACf38BfmACf38BfGABfgJ/f2ABfAJ/f2ABfwJ/f2ACf38Cf39gBn9/f39/fwJ/f2ADf39+An9/YAR/f39/AX9gA39/fwJ/f2ABfAF8YAABf2ACf34Bf2ACf34BfmADf35+AX9gAX8BfmABfwJ/fmABfwBgAXwAYAV/f39/fwF/YAAAAvsFLwNlbnYKZG9tX2NyZWF0ZQAAA2Vudgxkb21fc2V0X3RleHQAAQNlbnYKZG9tX2FwcGVuZAACA2Vudg1kb21fc2V0X3N0eWxlAAMDZW52CWRvbV9xdWVyeQAAA2VudgVwcmludAACA2VudgdwcmludGxuAAIDZW52DXJ1bnRpbWVfZXJyb3IAAwNlbnYKc3RyX2NvbmNhdAAEA2VudgpzdHJfdG9faTY0AAUDZW52CnN0cl90b19mNjQABgNlbnYKaTY0X3RvX3N0cgAHA2VudgpmNjRfdG9fc3RyAAgDZW52C2Jvb2xfdG9fc3RyAAcDZW52C2xpc3RfdG9fc3RyAAkDZW52CnNldF90b19zdHIACQNlbnYJc3RyX3VwcGVyAAoDZW52CXN0cl9sb3dlcgAKA2VudglzdHJfc3RyaXAACgNlbnYLc3RyX3JlcGxhY2UACwNlbnYHc3RyX2dldAAMA2VudgxzdHJfY29udGFpbnMADQNlbnYGc3RyX2VxAA0DZW52CHN0cl9qb2luAA4DZW52CXN0cl9zcGxpdAANA2VudgRzcXJ0AA8DZW52CGxpc3RfbmV3ABADZW52C2xpc3RfYXBwZW5kABEDZW52CGxpc3RfZ2V0ABIDZW52CGxpc3Rfc2V0ABMDZW52CGxpc3RfbGVuABQDZW52DWxpc3RfY29udGFpbnMAEQNlbnYIbGlzdF9wb3AAFQNlbnYHc2V0X25ldwAQA2VudgdzZXRfYWRkABEDZW52CnNldF9yZW1vdmUAEQNlbnYMc2V0X2NvbnRhaW5zABEDZW52B3NldF9sZW4AFANlbnYJcm91bmRfZjY0AA8DZW52CWZsb29yX2Y2NAAPA2VudghjZWlsX2Y2NAAPA2VudglmaWxlX29wZW4ADQNlbnYJZmlsZV9yZWFkAAkDZW52CmZpbGVfd3JpdGUAAQNlbnYKZmlsZV9jbG9zZQAWA2VudgxleGl0X3Byb2Nlc3MAFgNlbnYFc2xlZXAAFwMEAxgAGQUFAQFAgAgGOQt/AUGACAt/AUEAC38BQQALfgFCAAt+AUIAC34BQgALfgFCAAt+AUIAC34BQgALfgFCAAt+AUIACwcRAgZtZW1vcnkCAARtYWluADEK5wcDqwIlBn8BfgF/AX4DfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwBfwF+AXwgACABIRMhFiAWIBMQACEJIAkgAiADIRMhFiEZIBkgFiATEAEQGiEHQgAhDQJAA0AgDSAEIRMgExAeU0UNASAEIA0hFCETIBMgFBAcIQsgCSALp0EAaikDACEUIRMgEyAUpxACIAcgCyEUIRMgEyAUEBshByANQgF8IQ0MAAsLIAkgACABIAcjACITQRhqJACtIREgE0EQaiARNwMAIRatIRQgE0EIaiAUIBatQiCGhDcDAK0hESATQQBqIBE3AwAgEyEFIwogBSEPpyAPrSEUIRMgEyAUEButJAogBQ8AC84CKAF+AX8BfgF/AX4BfwF+A38BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8AX8BfgF8IAEhDiAOEA4hDiERIBEgDhAGQgAhBAJAA0AgBCABIQ4gDhAeU0UNASABIAQhDyEOIA4gDxAcIQIgAkEAQQEhDiERIQ8gD6cgD0IgiKcgESAOEBhCACEPIQ4gDiAPEBwhDyAPpyAPQiCIpxASIQqtIQwgCq1CIIYgDIQhBiACQQBBASEOIREhDyAPpyAPQiCIpyARIA4QGEIBIQ8hDiAOIA8QHCEPIA+nIA9CIIinEBIhCq0hDCAKrUIghiAMhCEIIAAhDiAOQQBqKQMAIAYgCCEPIRIhFSAVpyASpyASQiCIpyAPpyAPQiCIpxADIARCAXwhBAwACwsgAA8AC+cCIQR/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfAF/AX4BfBAarSQDQQFBA0EEQQVBCUECQQtBDxAaEC9BGkERIQKtIAKtQiCGhCEHEBogByEHIQYgBiAHEBsQMEErQQJBLUEPEBoQL0E8QQJBPkEPEBoQL0HNAEECQc8AQQ8QGhAvQd4AQQJB4ABBDxAaEC9B7wBBAkHxAEEPEBoQL60hB60hCq0hDa0hEK0hE60hFhAaIBYhByEGIAYgBxAbIBMhByEGIAYgBxAbIBAhByEGIAYgBxAbIA0hByEGIAYgBxAbIAohByEGIAYgBxAbIAchByEGIAYgBxAbEC9BgAFBESECrSACrUIghoQhBxAaIAchByEGIAYgBxAbEDAhAEGRAUEHIQYhCSAJIAYQBCAAIQYgBkEAaikDACEHIQYgBiAHpxACDwsL+wESAEEACwE6AEEBCwNkaXYAQQQLBURpdiAxAEEJCwJoMQBBCwsPQmluZyBjaGlsbGluZyAxAEEaCxFtYXJnaW4tdG9wOiAxMDBweABBKwsCaDIAQS0LD0JpbmcgY2hpbGxpbmcgMgBBPAsCaDMAQT4LD0JpbmcgY2hpbGxpbmcgMwBBzQALAmg0AEHPAAsPQmluZyBjaGlsbGluZyA0AEHeAAsCaDUAQeAACw9CaW5nIGNoaWxsaW5nIDUAQe8ACwJoNgBB8QALD0JpbmcgY2hpbGxpbmcgNgBBgAELEW1hcmdpbi1sZWZ0OiAzMHB4AEGRAQsHI291dHB1dA==';
             const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
             const wasmBuffer = wasmBytes.buffer;
             const wasmPath = null; // Not needed since we have bytes
             
             // Set metadata before loading module
-            metadata = {"version": 1, "functions": ["element", "styles", "main"], "entry_point": "main", "imports": ["list_new", "list_append", "str_get", "dom_create", "dom_append", "dom_set_style", "list_get", "dom_set_text"], "memory_size": 145, "string_constants": {":": 0, "div": 1, "Div 1": 4, "h1": 9, "Bing chilling 1": 11, "margin-top: 100px": 26, "h2": 43, "Bing chilling 2": 45, "h3": 60, "Bing chilling 3": 62, "h4": 77, "Bing chilling 4": 79, "h5": 94, "Bing chilling 5": 96, "h6": 111, "Bing chilling 6": 113, "margin-left: 30px": 128}, "callbacks": [], "source_file": "main.fr", "line_map": [11, 11, 11, 12, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 30, 30, 30, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4], "wasm_binary": true};
+            metadata = {"version": 1, "functions": ["element", "styles", "main"], "entry_point": "main", "imports": ["list_append", "list_get", "dom_query", "dom_set_text", "str_split", "dom_create", "dom_append", "dom_set_style", "str_strip", "list_new"], "memory_size": 152, "string_constants": {":": 0, "div": 1, "Div 1": 4, "h1": 9, "Bing chilling 1": 11, "margin-top: 100px": 26, "h2": 43, "Bing chilling 2": 45, "h3": 60, "Bing chilling 3": 62, "h4": 77, "Bing chilling 4": 79, "h5": 94, "Bing chilling 5": 96, "h6": 111, "Bing chilling 6": 113, "margin-left: 30px": 128, "#output": 145}, "callbacks": [], "source_file": "main.fr", "line_map": [11, 11, 11, 12, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 30, 30, 30, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 20, 20, 20, 20, 20, 20, 20], "wasm_binary": true};
             
             const fr = await loadFrModuleFromBytes(wasmBuffer, {
                 outputElementId: 'output',

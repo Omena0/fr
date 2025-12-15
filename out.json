@@ -1,319 +1,7 @@
 [
   {
     "type": "metadata",
-    "source_file": "examples/web/main.fr"
-  },
-  {
-    "type": "import",
-    "file": "weblib",
-    "ast": [
-      {
-        "type": "metadata",
-        "source_file": "/home/omena0/Github/frscript/examples/web/weblib.fr"
-      },
-      {
-        "type": "struct_def",
-        "name": "Element",
-        "fields": [
-          {
-            "name": "id",
-            "type": "int"
-          },
-          {
-            "name": "name",
-            "type": "str"
-          },
-          {
-            "name": "content",
-            "type": "list"
-          }
-        ],
-        "line": 2
-      },
-      {
-        "type": "var",
-        "name": "elements",
-        "value_type": "list",
-        "value": [],
-        "mods": [],
-        "line": 8
-      },
-      {
-        "type": "function",
-        "name": "element",
-        "return": "Element",
-        "args": [
-          [
-            "name",
-            "str"
-          ],
-          [
-            "text",
-            "str"
-          ],
-          [
-            "content",
-            "Element*"
-          ]
-        ],
-        "scope": [
-          {
-            "type": "var",
-            "name": "new_element",
-            "value_type": "int",
-            "value": {
-              "func": {
-                "id": "dom_create"
-              },
-              "args": [
-                {
-                  "id": "name"
-                }
-              ],
-              "keywords": []
-            },
-            "mods": [],
-            "line": 11
-          },
-          {
-            "type": "call",
-            "name": "dom_set_text",
-            "args": [
-              {
-                "id": "new_element"
-              },
-              {
-                "id": "text"
-              }
-            ],
-            "return_type": "void",
-            "line": 12
-          },
-          {
-            "type": "var",
-            "name": "new_content",
-            "value_type": "list",
-            "value": [],
-            "mods": [],
-            "line": 13
-          },
-          {
-            "type": "for_in",
-            "var": "child",
-            "iterable": "content",
-            "scope": [
-              {
-                "type": "call",
-                "name": "dom_append",
-                "args": [
-                  {
-                    "id": "new_element"
-                  },
-                  {
-                    "value": {
-                      "id": "child"
-                    },
-                    "attr": "id"
-                  }
-                ],
-                "return_type": "void",
-                "line": 15
-              },
-              {
-                "func": {
-                  "id": "append"
-                },
-                "args": [
-                  {
-                    "id": "new_content"
-                  },
-                  {
-                    "id": "child"
-                  }
-                ]
-              }
-            ],
-            "line": 14
-          },
-          {
-            "type": "var",
-            "name": "elem",
-            "value_type": "Element",
-            "value": {
-              "func": {
-                "id": "Element"
-              },
-              "args": [
-                {
-                  "id": "new_element"
-                },
-                {
-                  "id": "name"
-                },
-                {
-                  "id": "new_content"
-                }
-              ],
-              "keywords": []
-            },
-            "mods": [],
-            "line": 18
-          },
-          {
-            "func": {
-              "id": "append"
-            },
-            "args": [
-              {
-                "id": "elements"
-              },
-              {
-                "id": "elem"
-              }
-            ]
-          },
-          {
-            "type": "return",
-            "value": {
-              "id": "elem"
-            },
-            "line": 20
-          }
-        ],
-        "mods": [],
-        "line": 10
-      },
-      {
-        "type": "function",
-        "name": "styles",
-        "return": "Element",
-        "args": [
-          [
-            "elem",
-            "Element"
-          ],
-          [
-            "_styles",
-            "str*"
-          ]
-        ],
-        "scope": [
-          {
-            "type": "call",
-            "name": "println",
-            "args": [
-              {
-                "id": "_styles"
-              }
-            ],
-            "return_type": "none",
-            "line": 24
-          },
-          {
-            "type": "for_in",
-            "var": "str style",
-            "iterable": "_styles",
-            "scope": [
-              {
-                "type": "var",
-                "name": "prop",
-                "value_type": "str",
-                "value": {
-                  "func": {
-                    "value": {
-                      "value": {
-                        "func": {
-                          "id": "split"
-                        },
-                        "args": [
-                          {
-                            "id": "style"
-                          },
-                          {
-                            "value": ":"
-                          }
-                        ]
-                      },
-                      "slice": {
-                        "value": 0
-                      }
-                    },
-                    "attr": "strip"
-                  },
-                  "args": [],
-                  "keywords": []
-                },
-                "mods": [],
-                "line": 26
-              },
-              {
-                "type": "var",
-                "name": "value",
-                "value_type": "str",
-                "value": {
-                  "func": {
-                    "value": {
-                      "value": {
-                        "func": {
-                          "id": "split"
-                        },
-                        "args": [
-                          {
-                            "id": "style"
-                          },
-                          {
-                            "value": ":"
-                          }
-                        ]
-                      },
-                      "slice": {
-                        "value": 1
-                      }
-                    },
-                    "attr": "strip"
-                  },
-                  "args": [],
-                  "keywords": []
-                },
-                "mods": [],
-                "line": 27
-              },
-              {
-                "type": "call",
-                "name": "dom_set_style",
-                "args": [
-                  {
-                    "value": {
-                      "id": "elem"
-                    },
-                    "attr": "id"
-                  },
-                  {
-                    "id": "prop"
-                  },
-                  {
-                    "id": "value"
-                  }
-                ],
-                "return_type": "void",
-                "line": 28
-              }
-            ],
-            "line": 25
-          },
-          {
-            "type": "return",
-            "value": {
-              "id": "elem"
-            },
-            "line": 30
-          }
-        ],
-        "mods": [],
-        "line": 23
-      }
-    ],
-    "line": 1
+    "source_file": "cases/misc/fork_basic.fr"
   },
   {
     "type": "function",
@@ -323,133 +11,96 @@
     "scope": [
       {
         "type": "var",
-        "name": "div",
-        "value_type": "Element",
+        "name": "pid",
+        "value_type": "int",
         "value": {
           "func": {
-            "value": {
-              "func": {
-                "id": "element"
-              },
-              "args": [
-                {
-                  "value": "div"
-                },
-                {
-                  "value": "Div 1"
-                },
-                {
-                  "func": {
-                    "value": {
-                      "func": {
-                        "id": "element"
-                      },
-                      "args": [
-                        {
-                          "value": "h1"
-                        },
-                        {
-                          "value": "Bing chilling 1"
-                        }
-                      ],
-                      "keywords": []
-                    },
-                    "attr": "styles"
-                  },
-                  "args": [
-                    {
-                      "value": "margin-top: 100px"
-                    }
-                  ],
-                  "keywords": []
-                },
-                {
-                  "func": {
-                    "id": "element"
-                  },
-                  "args": [
-                    {
-                      "value": "h2"
-                    },
-                    {
-                      "value": "Bing chilling 2"
-                    }
-                  ],
-                  "keywords": []
-                },
-                {
-                  "func": {
-                    "id": "element"
-                  },
-                  "args": [
-                    {
-                      "value": "h3"
-                    },
-                    {
-                      "value": "Bing chilling 3"
-                    }
-                  ],
-                  "keywords": []
-                },
-                {
-                  "func": {
-                    "id": "element"
-                  },
-                  "args": [
-                    {
-                      "value": "h4"
-                    },
-                    {
-                      "value": "Bing chilling 4"
-                    }
-                  ],
-                  "keywords": []
-                },
-                {
-                  "func": {
-                    "id": "element"
-                  },
-                  "args": [
-                    {
-                      "value": "h5"
-                    },
-                    {
-                      "value": "Bing chilling 5"
-                    }
-                  ],
-                  "keywords": []
-                },
-                {
-                  "func": {
-                    "id": "element"
-                  },
-                  "args": [
-                    {
-                      "value": "h6"
-                    },
-                    {
-                      "value": "Bing chilling 6"
-                    }
-                  ],
-                  "keywords": []
-                }
-              ],
-              "keywords": []
-            },
-            "attr": "styles"
+            "id": "fork"
           },
-          "args": [
-            {
-              "value": "margin-left: 30px"
-            }
-          ],
+          "args": [],
           "keywords": []
         },
         "mods": [],
-        "line": 4
+        "line": 5
+      },
+      {
+        "type": "if",
+        "condition": {
+          "left": {
+            "id": "pid"
+          },
+          "ops": [
+            "Eq"
+          ],
+          "comparators": [
+            {
+              "value": 0
+            }
+          ]
+        },
+        "scope": [
+          {
+            "type": "call",
+            "name": "exit",
+            "args": [
+              0
+            ],
+            "return_type": "void",
+            "line": 9
+          }
+        ],
+        "elifs": [],
+        "else": {},
+        "line": 8
+      },
+      {
+        "type": "if",
+        "condition": {
+          "left": {
+            "id": "pid"
+          },
+          "ops": [
+            "GtE"
+          ],
+          "comparators": [
+            {
+              "value": 0
+            }
+          ]
+        },
+        "scope": [
+          {
+            "type": "call",
+            "name": "println",
+            "args": [
+              {
+                "type": "string",
+                "value": "fork returned: true"
+              }
+            ],
+            "return_type": "none",
+            "line": 14
+          }
+        ],
+        "elifs": [],
+        "else": [
+          {
+            "type": "call",
+            "name": "println",
+            "args": [
+              {
+                "type": "string",
+                "value": "fork returned: false"
+              }
+            ],
+            "return_type": "none",
+            "line": 16
+          }
+        ],
+        "line": 13
       }
     ],
     "mods": [],
-    "line": 3
+    "line": 4
   }
 ]
