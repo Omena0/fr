@@ -711,11 +711,141 @@ def parse_expr(text: str):
                     # Convert args to dict representation
                     converted_args = [_ast_to_dict(arg) for arg in node.args]
 
+                    # Check if this function has varargs and pack them
+                    func_info = funcs[method_name]
+                    func_args = func_info.get('args')
+                    if func_args and isinstance(func_args, list) and func_args:
+                        last_param_name, last_param_type = func_args[-1]
+                        if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                            # Has varargs - pack converted_args (NOT including the object)
+                            # The function signature is: func(obj, fixed_param1, ..., varargs)
+                            # num_fixed is how many fixed params (excluding the varargs)
+                            num_fixed = len(func_args) - 1  # -1 for varargs param
+                            # But the first param is the object itself, so we need num_fixed - 1 fixed args
+                            num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
+                            fixed_args = converted_args[:num_fixed_args]
+                            varargs = converted_args[num_fixed_args:]
+                            varargs_list = {
+                                'type': 'list',
+                                'value': varargs
+                            }
+                            return {
+                                'func': {'id': method_name},
+                                'args': [{'id': obj_name}] + fixed_args + [varargs_list]
+                            }
+
                     # Create new function call: method(x, ...)
                     return {
                         'func': {'id': method_name},
                         'args': [{'id': obj_name}] + converted_args
                     }
+
+            # Check if this is a method call on an expression (expr.method(args))
+            # These are kept as-is but we need to transform varargs
+            if (isinstance(node, ast.Call) and
+                isinstance(node.func, ast.Attribute)):
+
+                method_name = node.func.attr
+
+                # Check if this is a known function with varargs
+                if method_name in funcs:
+                    func_info = funcs[method_name]
+                    func_args = func_info.get('args')
+                    if func_args and isinstance(func_args, list) and func_args:
+                        last_param_name, last_param_type = func_args[-1]
+                        if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                            # Has varargs - transform the call node to pack varargs
+                            # Convert the object expression
+                            obj_expr = _ast_to_dict(node.func.value)
+                            # Convert args
+                            converted_args = [_ast_to_dict(arg) for arg in node.args]
+                            
+                            # Pack varargs
+                            num_fixed = len(func_args) - 1
+                            num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
+                            fixed_args = converted_args[:num_fixed_args]
+                            varargs = converted_args[num_fixed_args:]
+                            varargs_list = {
+                                'type': 'list',
+                                'value': varargs
+                            }
+                            
+                            return {
+                                'func': {'id': method_name},
+                                'args': [obj_expr] + fixed_args + [varargs_list]
+                            }
+
+            # Handle varargs parameter packing for regular function calls
+            # Transform func(a, b, c, d) where func has signature func(a, b, type *rest)
+            # into func(a, b, [c, d])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                func_name = node.func.id
+                
+                if func_name in funcs:
+                    func_info = funcs[func_name]
+                    
+                    # Check if function has varargs - handle different formats
+                    has_varargs = False
+                    num_fixed = 0
+                    
+                    # Format 1: regular functions with 'args' key as list of tuples
+                    if 'args' in func_info:
+                        func_args = func_info['args']
+                        # Check if it's a list (regular functions) vs dict (builtin functions)
+                        if isinstance(func_args, list) and func_args:
+                            last_param_name, last_param_type = func_args[-1]
+                            if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                                has_varargs = True
+                                num_fixed = len(func_args) - 1
+                        elif isinstance(func_args, dict):
+                            # Builtin functions use dict format - check last value
+                            param_types = list(func_args.values())
+                            if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
+                                has_varargs = True
+                                num_fixed = len(param_types) - 1
+                    
+                    # Format 2: C functions with 'params' key (list of dicts)
+                    elif 'params' in func_info:
+                        params = func_info['params']
+                        if params and len(params) > 0:
+                            last_param_type = params[-1].get('type', '')
+                            if last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                                has_varargs = True
+                                num_fixed = len(params) - 1
+                    
+                    if has_varargs:
+                        # Convert all args to dict representation
+                        converted_args = [_ast_to_dict(arg) for arg in node.args]
+                        
+                        # Split into fixed and varargs
+                        fixed_args = converted_args[:num_fixed]
+                        varargs = converted_args[num_fixed:]
+                        
+                        # Create a list literal for the varargs
+                        varargs_list = {
+                            'type': 'list',
+                            'value': varargs
+                        }
+                        
+                        # Return function call with fixed args + varargs list
+                        return {
+                            'func': {'id': func_name},
+                            'args': fixed_args + [varargs_list]
+                        }
+                        fixed_args = converted_args[:num_fixed]
+                        varargs = converted_args[num_fixed:]
+                        
+                        # Create a list literal for the varargs
+                        varargs_list = {
+                            'type': 'list',
+                            'value': varargs
+                        }
+                        
+                        # Return function call with fixed args + varargs list
+                        return {
+                            'func': {'id': func_name},
+                            'args': fixed_args + [varargs_list]
+                        }
 
             result = {}
             for field in node._fields:
@@ -1172,6 +1302,10 @@ def cast_args(args: list, func: dict) -> list:
         if required_type is None:
             continue  # No type requirement
 
+        # Skip casting for varargs parameters - they're already packed as lists
+        if required_type.endswith('*') and not required_type.endswith('**'):
+            continue
+
         casted = cast_value(arg, required_type)
         if casted != arg:
             args[i] = casted
@@ -1354,6 +1488,49 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
 
     # Add default arguments for missing parameters before casting
     arg_values = _apply_default_args(func, arg_values, stream, name)
+
+    # Transform varargs calls: if function has type* param, pack extra args into list
+    func_args = func.get('args')
+    func_params = func.get('params')
+    
+    if func_args:  # Regular or builtin functions
+        if isinstance(func_args, list) and func_args:
+            # Regular functions: list of tuples
+            last_param_name, last_param_type = func_args[-1]
+            if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                # Has varargs - pack extra args into list
+                num_fixed = len(func_args) - 1
+                fixed_args = arg_values[:num_fixed]
+                varargs = arg_values[num_fixed:]
+                varargs_list = {
+                    'type': 'list',
+                    'value': varargs
+                }
+                arg_values = fixed_args + [varargs_list]
+        elif isinstance(func_args, dict):
+            # Builtin functions: dict of param_name -> type
+            param_types = list(func_args.values())
+            if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
+                num_fixed = len(param_types) - 1
+                fixed_args = arg_values[:num_fixed]
+                varargs = arg_values[num_fixed:]
+                varargs_list = {
+                    'type': 'list',
+                    'value': varargs
+                }
+                arg_values = fixed_args + [varargs_list]
+    elif func_params:  # C functions
+        if func_params:
+            last_param_type = func_params[-1].get('type', '')
+            if last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                num_fixed = len(func_params) - 1
+                fixed_args = arg_values[:num_fixed]
+                varargs = arg_values[num_fixed:]
+                varargs_list = {
+                    'type': 'list',
+                    'value': varargs
+                }
+                arg_values = fixed_args + [varargs_list]
 
     # Type-cast arguments to match function signature
     arg_values = cast_args(arg_values, func)

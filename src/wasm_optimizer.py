@@ -65,8 +65,9 @@ def apply_peephole_optimizations(code: str) -> str:
     code = re.sub(instr_pat('i64.const', '0') + SEP + instr_pat('i64.sub'), '', code)
 
     # Pattern: (i32.const 0) followed by (i32.add) or (i32.sub) - remove both
-    code = re.sub(instr_pat('i32.const', '0') + SEP + instr_pat('i32.add'), '', code)
-    code = re.sub(instr_pat('i32.const', '0') + SEP + instr_pat('i32.sub'), '', code)
+    # DISABLED: This breaks STRUCT_GET for field 0 where address calculation is needed
+    # code = re.sub(instr_pat('i32.const', '0') + SEP + instr_pat('i32.add'), '', code)
+    # code = re.sub(instr_pat('i32.const', '0') + SEP + instr_pat('i32.sub'), '', code)
 
     # Pattern: (f64.const 0.0) followed by (f64.add) or (f64.sub) - remove both
     code = re.sub(instr_pat('f64.const', r'0\.0') + SEP + instr_pat('f64.add'), '', code)
@@ -937,4 +938,126 @@ def remove_unused_blocks(code: str) -> str:
     return code
 
 
+def remove_unused_locals(code: str) -> str:
+    """Remove local variable declarations that are never used."""
+    lines = code.split('\n')
+    
+    # Find all local declarations and track usage
+    local_pattern = re.compile(r'\(local \$(\w+) (i32|i64|f64)\)')
+    
+    # Process each function separately
+    result_lines = []
+    in_function = False
+    func_lines = []
+    func_start = 0
+    paren_depth = 0
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Only match actual function definitions, not imports
+        if stripped.startswith('(func ') and '(import' not in line:
+            in_function = True
+            func_lines = [line]
+            func_start = i
+            paren_depth = line.count('(') - line.count(')')
+        elif in_function:
+            func_lines.append(line)
+            paren_depth += line.count('(') - line.count(')')
+            
+            # Check for end of function when paren depth returns to 0
+            if paren_depth <= 0:
+                # Process this function
+                func_code = '\n'.join(func_lines)
+                
+                # Find all declared locals
+                declared_locals = set()
+                for fl in func_lines:
+                    match = local_pattern.search(fl)
+                    if match:
+                        declared_locals.add(match.group(1))
+                
+                # Find all used locals (local.get, local.set, local.tee)
+                used_locals = set()
+                usage_pattern = re.compile(r'local\.(get|set|tee) \$(\w+)')
+                for fl in func_lines:
+                    for match in usage_pattern.finditer(fl):
+                        used_locals.add(match.group(2))
+                
+                # Filter out unused locals
+                unused = declared_locals - used_locals
+                
+                # Rebuild function without unused locals
+                new_func_lines = []
+                for fl in func_lines:
+                    match = local_pattern.search(fl)
+                    if match and match.group(1) in unused:
+                        continue  # Skip unused local declaration
+                    new_func_lines.append(fl)
+                
+                result_lines.extend(new_func_lines)
+                in_function = False
+                func_lines = []
+                paren_depth = 0
+        else:
+            result_lines.append(line)
+    
+    # Handle case where we're still in a function at end
+    if func_lines:
+        result_lines.extend(func_lines)
+    
+    return '\n'.join(result_lines)
 
+def remove_unused_imports(code: str) -> str:
+    """Remove import declarations for functions that are never called."""
+    lines = code.split('\n')
+    
+    # Find all imported function names
+    import_pattern = re.compile(r'\(import\s+"[^"]+"\s+"[^"]+"\s+\(func\s+\$(\w+)')
+    imported_funcs = {}  # name -> line index
+    
+    for i, line in enumerate(lines):
+        match = import_pattern.search(line)
+        if match:
+            imported_funcs[match.group(1)] = i
+    
+    # Find all function calls in the code
+    call_pattern = re.compile(r'call\s+\$(\w+)')
+    called_funcs = set()
+    
+    for line in lines:
+        for match in call_pattern.finditer(line):
+            called_funcs.add(match.group(1))
+    
+    # Find unused imports
+    unused_imports = set(imported_funcs.keys()) - called_funcs
+    lines_to_remove = {imported_funcs[name] for name in unused_imports}
+    
+    # Rebuild without unused imports
+    result_lines = [line for i, line in enumerate(lines) if i not in lines_to_remove]
+    
+    return '\n'.join(result_lines)
+
+
+def remove_empty_lines(code: str) -> str:
+    """Remove excessive empty lines."""
+    # Replace multiple consecutive empty lines with single empty line
+    code = re.sub(r'\n\s*\n\s*\n', '\n\n', code)
+    # Remove empty lines before closing parens
+    code = re.sub(r'\n\s*\n(\s*\))', r'\n\1', code)
+    return code
+
+
+def remove_comments(code: str) -> str:
+    """Remove comment lines to reduce output size."""
+    lines = code.split('\n')
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip pure comment lines
+        if stripped.startswith(';;'):
+            continue
+        # Remove inline comments (but keep the code)
+        if ';;' in line:
+            line = line[:line.index(';;')].rstrip()
+        result.append(line)
+    return '\n'.join(result)

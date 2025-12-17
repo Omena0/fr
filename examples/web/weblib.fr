@@ -17,6 +17,10 @@ Element element(str name, str text, Element *content) {
     }
     Element elem = Element(new_element, name, new_content)
     elements.append(elem)
+    
+    // Automatically append to body (will be moved if appended to another element later)
+    dom_append(dom_get_body(), new_element)
+    
     return elem
 }
 
@@ -30,3 +34,17 @@ Element styles(Element elem, str *_styles) {
     return elem
 }
 
+void class(str name, str *_styles) {
+    for (str style in _styles) {
+        str prop = style.split(':')[0].strip()
+        str value = style.split(':')[1].strip()
+        css_add_rule('.' + name, prop, value)
+    }
+}
+
+Element classes(Element elem, str *_classes) {
+    for (str cls in _classes) {
+        dom_add_class(elem.id, cls)
+    }
+    return elem
+}

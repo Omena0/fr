@@ -53,6 +53,7 @@ class WasmCompiler:
         self.if_indent: int = 0  # Track indent for if blocks
         self.struct_defs: Dict[int, Dict] = {}  # Maps struct ID to struct definition
         self.local_value_types: Dict[int, str] = {}  # Track what type of value each local holds (set, list, bool)
+        self.variadic_param_types: Dict[Tuple[str, int], str] = {}  # Track (func_name, param_idx) -> element_type for variadic params
         self.builtin_map = {
             'fopen': ('file_open', ['i32'], ['i32', 'i32', 'i32', 'i32']),
             'fread': ('file_read', ['i32', 'i32'], ['i32', 'i32']),
@@ -107,7 +108,7 @@ class WasmCompiler:
         self.version = 1
 
         # Allocate memory for struct storage (start after string constants)
-        self.heap_offset = 1024  # Start heap at 1KB
+        self.heap_offset = 16384  # Start heap at 16KB
 
         # Track current source line from `.line` directives (best-effort).
         self.current_source_line = 0
@@ -201,6 +202,17 @@ class WasmCompiler:
         # Compile each function
         for func_name, func_meta in self.functions.items():
             self._compile_function(func_name, func_meta, lines)
+
+        # Update heap offset to start after all string constants
+        # Round up to next 16-byte boundary for alignment
+        self.heap_offset = ((self.memory_offset + 15) // 16) * 16
+        
+        # Update memory_offset to match heap_offset so JS knows where free memory starts
+        self.memory_offset = self.heap_offset
+
+        # Emit heap pointer global AFTER calculating proper offset
+        self.emit_comment("Heap pointer for struct allocation", 1)
+        self.emit(f"(global $heap_ptr (mut i32) (i32.const {self.heap_offset}))", 1)
 
         # Emit string constants
         for data_line in self.data_section:
@@ -448,11 +460,7 @@ class WasmCompiler:
         self.emit('(import "env" "sleep" (func $sleep (param f64)))', 1)
 
     def _emit_globals(self):
-        """Emit global variable declarations"""
-        # Always emit heap pointer for struct allocation
-        self.emit_comment("Heap pointer for struct allocation", 1)
-        self.emit(f"(global $heap_ptr (mut i32) (i32.const {self.heap_offset}))", 1)
-
+        """Emit global variable declarations (excluding heap_ptr, which is emitted later)"""
         # Exception handling globals
         self.emit_comment("Exception handling globals", 1)
         self.emit("(global $exception_active (mut i32) (i32.const 0))", 1)
@@ -871,8 +879,21 @@ class WasmCompiler:
                     value_type_tracker[len(type_stack_sim) - 1] = 'str'
 
                 else:
-                    # List indexing: assume i64 result
+                    # List indexing: check if list holds structs
+                    list_holds_struct = None
+                    if len(type_stack_sim) >= 2:
+                        list_pos = len(type_stack_sim) - 2
+                        if list_pos in value_type_tracker:
+                            list_tag = value_type_tracker[list_pos]
+                            if list_tag and isinstance(list_tag, str) and list_tag.startswith('struct:'):
+                                list_holds_struct = list_tag
+                    
+                    type_stack_sim.pop()  # index
+                    type_stack_sim.pop()  # list
+                    # List indexing: assume i64 result but track struct type if known
                     type_stack_sim.append('i64')
+                    if list_holds_struct:
+                        value_type_tracker[len(type_stack_sim) - 1] = list_holds_struct
 
             elif opcode == 'CONST_F64':
                 type_stack_sim.append('f64')
@@ -1240,6 +1261,7 @@ class WasmCompiler:
                             elif call_return_type.startswith('struct:'):
                                 # Struct return is i32 pointer
                                 type_stack_sim.append('i32')
+                                value_type_tracker[len(type_stack_sim) - 1] = call_return_type
                             else:
                                 wasm_ret = self._map_type_to_wasm(call_return_type)
                                 type_stack_sim.append(wasm_ret)
@@ -1409,6 +1431,12 @@ class WasmCompiler:
             self.emit(f"(local $temp_i32_{i} i32)", 2)
             self.emit(f"(local $temp_i64_{i} i64)", 2)
             self.emit(f"(local $temp_f64_{i} f64)", 2)
+        
+        # Add separate temps for _emit_call to avoid conflicts with variadic packing
+        for i in range(4):
+            self.emit(f"(local $call_temp_i32_{i} i32)", 2)
+            self.emit(f"(local $call_temp_i64_{i} i64)", 2)
+            self.emit(f"(local $call_temp_f64_{i} f64)", 2)
 
         # Compile function body
         self._compile_function_body(func_name, bytecode_lines)
@@ -1757,7 +1785,14 @@ class WasmCompiler:
 
     def _compile_instruction(self, inst: str, indent: int):
         """Compile a single bytecode instruction to WASM"""
-        parts = inst.split()
+        # Use shlex to properly parse arguments respecting quoted strings
+        import shlex
+        try:
+            parts = shlex.split(inst)
+        except ValueError:
+            # Fallback to simple split if shlex fails
+            parts = inst.split()
+        
         if not parts:
             return
 
@@ -1772,8 +1807,6 @@ class WasmCompiler:
             except Exception:
                 pass
             return
-
-        print(f"Compiling {opcode} {args} - Stack: {self.type_stack}")
 
         self.emit_comment(inst, indent)
 
@@ -2578,108 +2611,8 @@ class WasmCompiler:
                 param_count = len(params)
                 return_type = func_meta['return_type']
 
-                # Check for variadic
-                is_variadic = False
-                if params and params[-1][1] == 'variadic':
-                    is_variadic = True
-                    fixed_param_count = param_count - 1
-                    variadic_logical_count = arg_count - fixed_param_count
-
-                    if variadic_logical_count >= 0:
-                        # Pack variadic arguments into a list
-                        args_to_pack = []
-                        remaining_args = variadic_logical_count
-                        next_i64_temp = 0
-
-                        while remaining_args > 0:
-                            if not self.type_stack:
-                                break
-
-                            top_type = self.type_stack[-1]
-                            stack_idx = len(self.type_stack) - 1
-
-                            is_str = False
-                            if top_type == 'i32':
-                                # Check extended type stack
-                                if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
-                                    # Debug print
-                                    # print(f"DEBUG: stack_idx={stack_idx}, extended={self.extended_type_stack}")
-                                    if stack_idx < len(self.extended_type_stack) and self.extended_type_stack[stack_idx] == 'str':
-                                        # Check if previous is also str (ptr)
-                                        if stack_idx - 1 >= 0 and self.extended_type_stack[stack_idx-1] == 'str':
-                                            is_str = True
-                            
-                            if is_str:
-                                # Pop 2 values (len, ptr) -> pack into i64
-                                temp = f"$temp_i64_{next_i64_temp}"
-                                next_i64_temp += 1
-
-                                self.emit("local.set $temp", indent) # len
-                                self.type_stack.pop()
-                                # Stack top is ptr
-                                self.emit("i64.extend_i32_u", indent) # ptr -> i64
-                                # Stack top is ptr(i64)
-
-                                self.emit("local.get $temp", indent) # len
-                                self.emit("i64.extend_i32_u", indent) # len -> i64
-                                self.emit("i64.const 32", indent)
-                                self.emit("i64.shl", indent) # len << 32
-
-                                self.emit("i64.or", indent) # ptr | (len << 32)
-
-                                self.emit(f"local.set {temp}", indent)
-                                self.type_stack.pop() # pop ptr
-
-                                args_to_pack.append(('i64', temp))
-                                remaining_args -= 2 # String consumes 2 stack slots
-                            else:
-                                # Single value
-                                if top_type == 'i64':
-                                    temp = f"$temp_i64_{next_i64_temp}"
-                                    next_i64_temp += 1
-                                    self.emit(f"local.set {temp}", indent)
-                                    self.type_stack.pop()
-                                    args_to_pack.append(('i64', temp))
-                                elif top_type == 'f64':
-                                    temp = f"$temp_i64_{next_i64_temp}"
-                                    next_i64_temp += 1
-                                    self.emit("i64.trunc_f64_s", indent)
-                                    self.emit(f"local.set {temp}", indent)
-                                    self.type_stack.pop()
-                                    args_to_pack.append(('i64', temp))
-                                elif top_type == 'i32':
-                                    temp = f"$temp_i64_{next_i64_temp}"
-                                    next_i64_temp += 1
-                                    self.emit("i64.extend_i32_u", indent)
-                                    self.emit(f"local.set {temp}", indent)
-                                    self.type_stack.pop()
-                                    args_to_pack.append(('i64', temp))
-
-                                remaining_args -= 1
-
-                        # Create new list
-                        self._emit_call('list_new', indent)
-                        # Stack: list_ptr (i32)
-
-                        # Append args (in correct order: reverse of args_to_pack)
-                        for _, temp in reversed(args_to_pack):
-                            # Stack: list_ptr
-                            self.emit(f"local.get {temp}", indent) # value
-                            # Stack: list_ptr, value
-
-                            # Update type stack for _emit_call
-                            # list_ptr is already on type_stack (from list_new or previous append)
-                            self.type_stack.append('i64')
-
-                            self._emit_call('list_append', indent)
-                            # Stack: list_ptr (i32)
-
-                        # Result is list_ptr on stack
-                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
-                             self.extended_type_stack[-1] = 'list'
-
-                        self.imports.add('list_new')
-                        self.imports.add('list_append')
+                # Note: Variadic parameter packing is now done in the parser, not here.
+                # Functions with 'type*' parameters receive a list at bytecode level.
 
                 # Convert parameters to match expected types
                 # Walk through params from last to first (stack is LIFO)
@@ -2748,9 +2681,30 @@ class WasmCompiler:
                         self.type_stack.append('i32')  # ptr
                         self.type_stack.append('i32')  # len
                         self._last_i32_source = None  # It's a string, not list/set
+
+                        # Sync extended_type_stack entries created by TypeStackProxy.append
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                            if len(self.extended_type_stack) >= 2:
+                                self.extended_type_stack[-2] = 'str'
+                                self.extended_type_stack[-1] = 'str'
+                    elif return_type.startswith('struct:'):
+                        # Struct return: push i32 pointer
+                        self.type_stack.append('i32')
+                        self._last_i32_source = None
+
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None and self.extended_type_stack:
+                            # TypeStackProxy already added a placeholder; replace it with struct info
+                            self.extended_type_stack[-1] = return_type
+                    elif self._is_struct_name(return_type):
+                        # Bare struct name return: treat like struct pointer and tag it
+                        self.type_stack.append('i32')
+                        self._last_i32_source = None
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None and self.extended_type_stack:
+                            self.extended_type_stack[-1] = f'struct:{return_type}'
                     else:
                         wasm_type = self._map_type_to_wasm(return_type)
                         self.type_stack.append(wasm_type)
+
                         if return_type == 'bool':
                             self._last_i32_source = 'bool'
                         elif return_type == 'list':
@@ -2759,6 +2713,10 @@ class WasmCompiler:
                             self._last_i32_source = 'set'
                         else:
                             self._last_i32_source = None
+
+                        if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None and self.extended_type_stack:
+                            # Replace the placeholder with a meaningful marker for list/set, otherwise None
+                            self.extended_type_stack[-1] = return_type if return_type in ('list', 'set') else None
 
         elif opcode == 'POP':
             # Pop top value from stack (discard)
@@ -3476,7 +3434,9 @@ class WasmCompiler:
                 # Unescape string
                 string_content = self._unescape_string(string_content)
                 offset = self.add_string_constant(string_content)
-                self.emit(f"i32.const {offset}  ;; string: {string_content[:20]}...", indent)
+                # Escape string preview for comment (replace newlines, etc.)
+                preview = string_content[:20].replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                self.emit(f"i32.const {offset}  ;; string: {preview}...", indent)
                 self.emit(f"i32.const {len(string_content.encode('utf-8'))}", indent)
                 self.type_stack.append('i32')
                 self.type_stack.append('i32')
@@ -3739,6 +3699,7 @@ class WasmCompiler:
             # Stack for string value: ... list_ptr ptr len
             # Only treat as string packing when we are sure it is a string
             is_string = False
+            appended_tag = None
             if (len(self.type_stack) >= 3
                 and self.type_stack[-1] == 'i32'
                 and self.type_stack[-2] == 'i32'
@@ -3746,6 +3707,7 @@ class WasmCompiler:
                 
                 # Check extended types if available
                 if hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                    appended_tag = self.extended_type_stack[-1]
                     if (len(self.extended_type_stack) >= 2 
                         and self.extended_type_stack[-1] == 'str' 
                         and self.extended_type_stack[-2] == 'str'):
@@ -3756,6 +3718,9 @@ class WasmCompiler:
                     # Better to be conservative?
                     # Most strings come from CONST_STR or string ops which set extended types.
                     pass
+            elif hasattr(self, 'extended_type_stack') and self.extended_type_stack:
+                # Non-string value, keep track of tag for struct propagation
+                appended_tag = self.extended_type_stack[-1] if self.extended_type_stack else None
 
             if is_string:
                 # Pack (ptr,len) into i64: (len<<32) | ptr
@@ -3796,6 +3761,10 @@ class WasmCompiler:
             if is_string and hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
                 if len(self.extended_type_stack) >= 1:
                     self.extended_type_stack[-1] = 'list_str'
+            elif appended_tag and isinstance(appended_tag, str) and appended_tag.startswith('struct:'):
+                if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    if len(self.extended_type_stack) >= 1:
+                        self.extended_type_stack[-1] = f"list_{appended_tag}"
             self.imports.add('list_append')
 
         elif opcode == 'LIST_GET':
@@ -3810,10 +3779,17 @@ class WasmCompiler:
                 # List indexing - ensure list pointer (second-from-top) is i32
                 self._ensure_second_is_i32(indent)
                 is_list_str = False
+                list_struct_tag: Optional[str] = None
+                self.emit_comment(f"LIST_GET extended_stack={self.extended_type_stack[-2:] if len(self.extended_type_stack) >= 2 else []}", indent)
                 if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
                     # Stack: ... list_ptr(i32) index(i64)
                     if len(self.extended_type_stack) >= 2 and self.extended_type_stack[-2] == 'list_str':
                         is_list_str = True
+                    if len(self.extended_type_stack) >= 2:
+                        tag = self.extended_type_stack[-2]
+                        if isinstance(tag, str) and tag.startswith('list_struct:'):
+                            list_struct_tag = tag.replace('list_', '', 1)
+                            self.emit_comment(f"Found list_struct tag: {list_struct_tag}", indent)
                 # _emit_call handles popping params and pushing result
                 self._emit_call('list_get', indent)
                 self.imports.add('list_get')
@@ -3822,6 +3798,15 @@ class WasmCompiler:
                 if is_list_str and hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
                     if len(self.extended_type_stack) >= 1:
                         self.extended_type_stack[-1] = 'str'
+                elif list_struct_tag and hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
+                    # Struct pointer was extended to i64 during append; convert back to i32 for STRUCT_GET
+                    # Must wrap NOW before next instruction (STORE) processes the stack
+                    self.emit_comment(f"Wrapping struct from list_get: {list_struct_tag}", indent)
+                    if self.type_stack and self.type_stack[-1] == 'i64':
+                        self.emit("i32.wrap_i64", indent)
+                        self.type_stack[-1] = 'i32'
+                    if len(self.extended_type_stack) >= 1:
+                        self.extended_type_stack[-1] = list_struct_tag
 
         elif opcode == 'LIST_NEW':
             self._emit_call('list_new', indent)
@@ -4242,7 +4227,18 @@ class WasmCompiler:
                     if local_type_fr == 'list' or local_type_fr == 'variadic':
                         self._last_i32_source = 'list'
                         if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
-                            self.extended_type_stack[-1] = 'list'
+                            # Check if this is a variadic with known element type
+                            if local_type_fr == 'variadic' and self.current_function:
+                                variadic_key = (self.current_function, local_idx)
+                                self.emit_comment(f"LOAD variadic key={variadic_key} in={variadic_key in self.variadic_param_types}", indent)
+                                if variadic_key in self.variadic_param_types:
+                                    elem_type = self.variadic_param_types[variadic_key]
+                                    self.emit_comment(f"Tagging variadic param as list_{elem_type}", indent)
+                                    self.extended_type_stack[-1] = f'list_{elem_type}'
+                                else:
+                                    self.extended_type_stack[-1] = 'list'
+                            else:
+                                self.extended_type_stack[-1] = 'list'
                     elif local_type_fr == 'set':
                         self._last_i32_source = 'set'
                         if hasattr(self, 'extended_type_stack') and self.extended_type_stack is not None:
@@ -4611,6 +4607,7 @@ class WasmCompiler:
 
         if params := sig.get(name):
             # Use smart argument preparation logic (same as in CALL opcode)
+            # Use different temp variable names to avoid conflicts with variadic packing
             param_types = params
             param_idx = len(param_types) - 1
             stack_idx = len(self.type_stack) - 1
@@ -4627,7 +4624,7 @@ class WasmCompiler:
 
                 if param_type == 'i32':
                     if stack_type == 'i32':
-                        temp = f"$temp_i32_{next_i32_temp}"
+                        temp = f"$call_temp_i32_{next_i32_temp}"
                         next_i32_temp += 1
                         ops.append(('i32', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
                         param_idx -= 1
@@ -4640,7 +4637,7 @@ class WasmCompiler:
 
                         if (is_packed_str_i64 or allow_i64_unpack_to_i32_pair) and param_idx > 0 and param_types[param_idx-1] == 'i32':
                             # Unpack packed string i64 -> i32(ptr), i32(len)
-                            temp = f"$temp_i64_{next_i64_temp}"
+                            temp = f"$call_temp_i64_{next_i64_temp}"
                             next_i64_temp += 1
 
                             def push_unpack(t):
@@ -4656,13 +4653,13 @@ class WasmCompiler:
                             stack_idx -= 1 # Consumed 1 stack item
                         else:
                             # Truncate i64 -> i32
-                            temp = f"$temp_i64_{next_i64_temp}"
+                            temp = f"$call_temp_i64_{next_i64_temp}"
                             next_i64_temp += 1
                             ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.wrap_i64", indent))))
                             param_idx -= 1
                             stack_idx -= 1
                     else: # f64
-                        temp = f"$temp_f64_{next_f64_temp}"
+                        temp = f"$call_temp_f64_{next_f64_temp}"
                         next_f64_temp += 1
                         ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i32.trunc_f64_s", indent))))
                         param_idx -= 1
@@ -4670,30 +4667,30 @@ class WasmCompiler:
 
                 elif param_type == 'i64':
                     if stack_type == 'i64':
-                        temp = f"$temp_i64_{next_i64_temp}"
+                        temp = f"$call_temp_i64_{next_i64_temp}"
                         next_i64_temp += 1
                         ops.append(('i64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
                     elif stack_type == 'i32':
-                        temp = f"$temp_i32_{next_i32_temp}"
+                        temp = f"$call_temp_i32_{next_i32_temp}"
                         next_i32_temp += 1
                         ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.extend_i32_u", indent))))
                     elif stack_type == 'f64':
-                        temp = f"$temp_f64_{next_f64_temp}"
+                        temp = f"$call_temp_f64_{next_f64_temp}"
                         next_f64_temp += 1
                         ops.append(('f64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("i64.trunc_f64_s", indent))))
                     param_idx -= 1
                     stack_idx -= 1
                 elif param_type == 'f64':
                     if stack_type == 'f64':
-                        temp = f"$temp_f64_{next_f64_temp}"
+                        temp = f"$call_temp_f64_{next_f64_temp}"
                         next_f64_temp += 1
                         ops.append(('f64', temp, lambda t=temp: self.emit(f"local.get {t}", indent)))
                     elif stack_type == 'i32':
-                        temp = f"$temp_i32_{next_i32_temp}"
+                        temp = f"$call_temp_i32_{next_i32_temp}"
                         next_i32_temp += 1
                         ops.append(('i32', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i32_s", indent))))
                     elif stack_type == 'i64':
-                        temp = f"$temp_i64_{next_i64_temp}"
+                        temp = f"$call_temp_i64_{next_i64_temp}"
                         next_i64_temp += 1
                         ops.append(('i64', temp, lambda t=temp: (self.emit(f"local.get {t}", indent), self.emit("f64.convert_i64_s", indent))))
                     param_idx -= 1

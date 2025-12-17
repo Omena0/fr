@@ -483,6 +483,7 @@ typedef struct
     int start_pc;
     int end_pc;
     ValueType return_type;
+    int has_varargs;  // 1 if last arg is variadic
 } Function;
 
 // Label info
@@ -2510,6 +2511,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             current_func->name = strdup(name);
             current_func->start_pc = vm->code_count;
             current_func->return_type = VAL_INT; // Default
+            current_func->has_varargs = 0;  // Default to no varargs
             arg_count = 0;
             local_count = safe_atoi(total_vars ? total_vars : "0");
         }
@@ -2520,6 +2522,13 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             if (current_func)
             {
                 current_func->arg_count = arg_count;
+                // Check if this arg is variadic
+                strtok(NULL, " ");  // Skip arg name
+                char *arg_type = strtok(NULL, " \n\r");
+                if (arg_type && strcmp(arg_type, "variadic") == 0)
+                {
+                    current_func->has_varargs = 1;
+                }
             }
             continue;
         }
@@ -4709,13 +4718,53 @@ L_CALL: // OP_CALL
         {
             frame->vars.vars[i] = value_make_int_si(0);
         }
-        // Pop arguments and store in reverse order
-        for (int i = func->arg_count - 1; i >= 0; i--)
+        
+        // Handle variadic functions
+        if (func->has_varargs && arg_count > func->arg_count - 1)
         {
-            Value arg = vm_pop(vm);
-            value_free(frame->vars.vars[i]);
-            frame->vars.vars[i] = arg;
+            // Number of extra arguments to pack into list
+            int vararg_count = arg_count - (func->arg_count - 1);
+            
+            // Pop all extra arguments and pack into a list (in correct order)
+            Value *varargs = malloc(vararg_count * sizeof(Value));
+            for (int i = vararg_count - 1; i >= 0; i--)
+            {
+                varargs[i] = vm_pop(vm);
+            }
+            
+            // Create list and populate
+            List *list = list_new();
+            for (int i = 0; i < vararg_count; i++)
+            {
+                list_append(list, varargs[i]);
+            }
+            free(varargs);
+            
+            // Store the list as the last argument
+            Value list_val = {.type = VAL_LIST, .as.list = list};
+            value_free(frame->vars.vars[func->arg_count - 1]);
+            frame->vars.vars[func->arg_count - 1] = list_val;
+            
+            // Pop and store regular arguments in reverse order
+            for (int i = func->arg_count - 2; i >= 0; i--)
+            {
+                Value arg = vm_pop(vm);
+                value_free(frame->vars.vars[i]);
+                frame->vars.vars[i] = arg;
+            }
         }
+        else
+        {
+            // Regular function call or variadic with no extra args
+            // Pop arguments and store in reverse order
+            for (int i = func->arg_count - 1; i >= 0; i--)
+            {
+                Value arg = vm_pop(vm);
+                value_free(frame->vars.vars[i]);
+                frame->vars.vars[i] = arg;
+            }
+        }
+        
         vm->pc = func->start_pc;
         // Update cached frame pointer
         current_frame = frame;

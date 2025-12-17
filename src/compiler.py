@@ -240,7 +240,8 @@ class BytecodeCompiler:
             return f'struct:{type_str}'  # Return struct name with prefix
 
         if type_str.endswith('*'):
-            return 'variadic'
+            # Variadic params are just lists at bytecode level
+            return 'list'
 
         type_map = {
             'int': 'i64',

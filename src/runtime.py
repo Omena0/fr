@@ -194,7 +194,21 @@ def _bind_function_args(func_args: list, arg_values: list):
     """Bind function arguments to variables in the current scope"""
     from parser import get_type
     
-    for func_arg, arg_value in zip(func_args, arg_values):
+    # Check if last argument is variadic (type ends with * or **)
+    has_varargs = False
+    if func_args and isinstance(func_args[-1], tuple) and len(func_args[-1]) == 2:
+        _, last_type = func_args[-1]
+        has_varargs = isinstance(last_type, str) and (last_type.endswith('*') or last_type.endswith('**'))
+    
+    num_regular_args = len(func_args) - (1 if has_varargs else 0)
+    
+    # Bind regular arguments
+    for i, func_arg in enumerate(func_args[:num_regular_args]):
+        if i >= len(arg_values):
+            break
+            
+        arg_value = arg_values[i]
+        
         # Handle both tuple (name, type) and legacy string formats
         if isinstance(func_arg, tuple) and len(func_arg) == 2:
             arg_name, arg_type = func_arg
@@ -207,6 +221,16 @@ def _bind_function_args(func_args: list, arg_values: list):
             vars[arg_name] = {
                 "type": get_type(arg_value),
                 "value": arg_value
+            }
+    
+    # Bind variadic argument (collect remaining args into a list)
+    if has_varargs and func_args:
+        vararg_name, _ = func_args[-1]
+        rest_values = list(arg_values[num_regular_args:])
+        if isinstance(vararg_name, str):
+            vars[vararg_name] = {
+                "type": "list",
+                "value": rest_values
             }
 
 def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:

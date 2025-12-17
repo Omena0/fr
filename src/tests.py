@@ -12,6 +12,7 @@ import os
 import json
 import fnmatch
 
+
 def load_config():
     """Load test configuration from cases/config.json"""
     config_path = Path('cases/config.json')

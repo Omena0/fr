@@ -621,6 +621,14 @@ def wasm_cmd(args):
         traceback.print_exc()
         sys.exit(1)
 
+    # Optimize WAT code
+    from wasm_optimizer import optimize_wat, remove_unused_locals, remove_unused_imports, remove_empty_lines, remove_comments
+    wat_code = optimize_wat(wat_code)
+    wat_code = remove_unused_locals(wat_code)
+    wat_code = remove_unused_imports(wat_code)
+    wat_code = remove_comments(wat_code)
+    wat_code = remove_empty_lines(wat_code)
+
     # Write WAT file
     wat_path = output_path.with_suffix('.wat')
     with open(wat_path, 'w') as f:
@@ -698,7 +706,7 @@ def wasm_cmd(args):
             
             # Use imports that are actually used by the WASM binary
             used_imports = set(metadata.get('imports', []))
-            js_glue = generate_js_glue(used_imports, for_inline=True)
+            js_glue = generate_js_glue(used_imports, for_inline=True, metadata=metadata)
             
             # Read WASM binary and encode as base64
             with open(output_path, 'rb') as f:

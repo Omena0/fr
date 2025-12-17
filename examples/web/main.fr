@@ -1,21 +1,176 @@
 import weblib
 
 void main() {
-    Element div = element(
-        'div',
-        'Div 1',
-        element('h1', 'Bing chilling 1').styles(
-            "margin-top: 100px"
-        ),
-        element('h2', 'Bing chilling 2'),
-        element('h3', 'Bing chilling 3'),
-        element('h4', 'Bing chilling 4'),
-        element('h5', 'Bing chilling 5'),
-        element('h6', 'Bing chilling 6')
-
-    ).styles(
-        "margin-left: 30px"
+    // Define reusable CSS classes
+    class('badge',
+        "color: white",
+        "padding: 8px 20px",
+        "border-radius: 20px",
+        "margin: 5px",
+        "display: inline-block"
     )
 
-    dom_append(dom_query("#output"), div.id)
+    class('feature-card',
+        "background: white",
+        "padding: 30px",
+        "border-radius: 15px",
+        "flex: 1",
+        "margin: 10px",
+        "min-width: 250px"
+    )
+
+    class('section-title',
+        "text-align: center",
+        "color: #333",
+        "margin-bottom: 30px"
+    )
+
+    // Hero section
+    Element hero = element(
+        'div',
+        '',
+        element('h1', '',
+            element('span', '🚀 ').styles(
+                "font-size: 4rem"
+            ),
+            element('span', 'FrScript').styles(
+                "font-size: 4rem",
+                "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                "-webkit-background-clip: text",
+                "-webkit-text-fill-color: transparent"
+            )
+        ).styles(
+            "margin: 0",
+            "animation: pulse 2s infinite"
+        ),
+        element('p', 'A fast, modern bytecode-compiled language').styles(
+            "font-size: 1.5rem",
+            "color: #666",
+            "margin-top: 10px"
+        ),
+        element('div', '',
+            element('span', '⚡ Fast').classes('badge').styles("background: #667eea", "color: white", "padding: 8px 20px", "border-radius: 20px"),
+            element('span', '🎯 Simple').classes('badge').styles("background: #764ba2", "color: white", "padding: 8px 20px", "border-radius: 20px"),
+            element('span', '🌐 Web-Ready').classes('badge').styles("background: #f093fb", "color: white", "padding: 8px 20px", "border-radius: 20px")
+        ).styles("margin-top: 30px", "display: flex", "gap: 15px", "justify-content: center", "flex-wrap: wrap")
+    ).styles(
+        "text-align: center",
+        "padding: 80px 20px",
+        "background: linear-gradient(180deg, #f8f9ff 0%, #ffffff 100%)"
+    )
+
+    // Features section
+    Element features = element(
+        'div',
+        '',
+        element('h2', '✨ Features').classes('section-title').styles("font-size: 2.5rem", "text-align: center"),
+        element('div', '',
+            element('div', '',
+                element('h3', '🔥 Blazing Fast').styles("color: #667eea", "margin: 0"),
+                element('p', 'Compiles to optimized bytecode for maximum performance').styles("color: #666")
+            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(102, 126, 234, 0.1)"),
+            element('div', '',
+                element('h3', '🎨 Clean Syntax').styles("color: #764ba2", "margin: 0"),
+                element('p', 'Write beautiful, readable code with modern syntax').styles("color: #666")
+            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(118, 75, 162, 0.1)"),
+            element('div', '',
+                element('h3', '🌍 Cross-Platform').styles("color: #f093fb", "margin: 0"),
+                element('p', 'Run on native, Python runtime, or compile to WebAssembly').styles("color: #666")
+            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(240, 147, 251, 0.1)")
+        ).styles(
+            "display: flex",
+            "flex-wrap: wrap",
+            "justify-content: center",
+            "max-width: 1000px",
+            "margin: 0 auto"
+        )
+    ).styles(
+        "padding: 60px 20px",
+        "background: #f8f9ff"
+    )
+
+    // Code example section
+    Element codeSection = element(
+        'div',
+        '',
+        element('h2', '💻 Simple & Elegant').classes('section-title').styles("font-size: 2rem", "text-align: center"),
+        element('pre', '',
+            // void main() {
+            element('span', 'void').styles("color: #569CD6"),
+            element('span', ' '),
+            element('span', 'main').styles("color: #DCDCAA"),
+            element('span', '(').styles("color: #ffd700"),
+            element('span', ')').styles("color: #ffd700"),
+            element('span', ' '),
+            element('span', '{').styles("color: #ffd700"),
+            element('span', '\n'),
+            // println("Hello, World!")
+            element('span', '    '),
+            element('span', 'println').styles("color: #DCDCAA"),
+            element('span', '(').styles("color: #da70d6"),
+            element('span', '"Hello, World!"').styles("color: #CE9178"),
+            element('span', ')').styles("color: #da70d6"),
+            element('span', '\n\n'),
+            // for (i..5) {
+            element('span', '    '),
+            element('span', 'for').styles("color: #C586C0"),
+            element('span', ' '),
+            element('span', '(').styles("color: #da70d6"),
+            element('span', 'i').styles("color: #9CDCFE"),
+            element('span', '..'),
+            element('span', '5').styles("color: #B5CEA8"),
+            element('span', ')').styles("color: #da70d6"),
+            element('span', ' '),
+            element('span', '{').styles("color: #da70d6"),
+            element('span', '\n'),
+            // println("Count: " + str(i))
+            element('span', '        '),
+            element('span', 'println').styles("color: #DCDCAA"),
+            element('span', '(').styles("color: #179fff"),
+            element('span', '"Count: "').styles("color: #CE9178"),
+            element('span', ' + '),
+            element('span', 'str').styles("color: #DCDCAA"),
+            element('span', '(').styles("color: #ffd700"),
+            element('span', 'i').styles("color: #9CDCFE"),
+            element('span', ')').styles("color: #ffd700"),
+            element('span', ')').styles("color: #179fff"),
+            element('span', '\n'),
+            // closing braces
+            element('span', '    '),
+            element('span', '}').styles("color: #da70d6"),
+            element('span', '\n'),
+            element('span', '}').styles("color: #ffd700")
+        ).styles(
+            "background: #1E1E1E",
+            "color: #D4D4D4",
+            "padding: 30px",
+            "border-radius: 15px",
+            "font-family: monospace",
+            "font-size: 1.1rem",
+            "overflow-x: auto",
+            "max-width: 600px",
+            "margin: 0 auto",
+            "box-shadow: 0 20px 40px rgba(0,0,0,0.2)",
+            "white-space: pre",
+            "text-align: left"
+        )
+    ).styles(
+        "padding: 60px 20px",
+        "background: white"
+    )
+
+    // Footer
+    Element footer = element(
+        'div',
+        '',
+        element('p', '🌟 Built with FrScript WASM backend').styles(
+            "margin: 0",
+            "font-size: 1.1rem"
+        )
+    ).styles(
+        "text-align: center",
+        "padding: 40px 20px",
+        "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+        "color: white"
+    )
 }

@@ -26,3 +26,7 @@ runtime/target
 *.wasm
 *.o
 a.fr
+
+# Node
+node_modules
+package*

@@ -442,6 +442,7 @@ JS_RUNTIME_FUNCTIONS = {
         'wasm_signature': '(param i32 i32)',
     },
 }
+
 # Web-specific DOM and JS interop functions
 JS_WEB_FUNCTIONS = {
     # DOM Query
@@ -1151,7 +1152,8 @@ def generate_js_glue(
         used_imports: Set[str],
         js_imports: Optional[Dict[str, str]] = None,
         output_element_id: Optional[str] = None,
-        for_inline: bool = False
+        for_inline: bool = False,
+        metadata: Optional[Dict] = None
     ) -> str:
     """
     Generate JavaScript glue code for a Fr WASM module.
@@ -1160,6 +1162,7 @@ def generate_js_glue(
         used_imports: Set of import names used by the WASM module
         js_imports: Optional dict mapping Fr function names to JS module paths
         output_element_id: Optional DOM element ID to write output to
+        metadata: Optional metadata dictionary containing memory_size
 
     Returns:
         JavaScript module code as a string
@@ -1206,7 +1209,7 @@ def generate_js_glue(
         'let memory = null;',
         'let wasmInstance = null;',
         'let metadata = null;',
-        'let stringOffset = 1024;',
+        f'let stringOffset = {metadata.get("memory_size", 1024) if metadata else 1024};',
         'let outputBuffer = "";',
         'const functionCallStack = [];',  # Track function calls and their arguments
     ]
@@ -1360,7 +1363,7 @@ def generate_js_glue(
 
     return '\n'.join(js_lines)
 
-def generate_html_template(wasm_filename: str, js_glue_code: str, wasm_base64: str = "", title: str = "", metadata: dict = None) -> str:
+def generate_html_template(wasm_filename: str, js_glue_code: str, wasm_base64: str = "", title: str = "", metadata: dict|None = None) -> str:
     """Generate an HTML file with inlined JavaScript glue code and optionally embedded WASM."""
     # Serialize metadata as JSON
     metadata_json = json.dumps(metadata) if metadata else '{}'

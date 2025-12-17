@@ -49,6 +49,8 @@ class X86Compiler:
         self.source_lines_dict: Dict[int, str] = {}  # Maps line numbers to source text from .line directives
         self.has_main: bool = False  # Track if main function exists
         self.internal_functions: set[str] = set()  # Track Fr functions (not external C)
+        self.variadic_functions: set[str] = set()  # Track functions with variadic params
+        self.function_arg_counts: dict[str, int] = {}  # Track declared arg counts
 
     def emit(self, line: str, indent: int = 1):
         """Emit a line of assembly code"""
@@ -406,6 +408,7 @@ class X86Compiler:
         total_args = int(args[2]) if len(args) > 2 else 0
 
         self.internal_functions.add(func_name)  # Track as internal Fr function
+        self.function_arg_counts[func_name] = total_args  # Track declared arg count
         self.current_function = {
             'name': func_name,
             'stack_offset': 0,
@@ -541,6 +544,12 @@ class X86Compiler:
         #                              = [rbp + 16 + (total_args - 2) * 8]
 
         if self.current_function:
+            # Check if this is a variadic parameter
+            arg_type = args[1] if len(args) > 1 else ''
+            if arg_type == 'variadic':
+                func_name = self.current_function['name']
+                self.variadic_functions.add(func_name)
+            
             arg_idx = self.current_function['arg_count']
             total_args = self.current_function.get('total_args', 0)
             self.current_function['arg_count'] += 1
@@ -1109,10 +1118,50 @@ class X86Compiler:
                 if self.stack_types:
                     self.stack_types.pop()
         else:
-            # Internal Fr function - arguments stay on stack, but we still need to track stack_types
-            for i in range(arg_count):
-                if self.stack_types:
-                    self.stack_types.pop()
+            # Internal Fr function - check if it's variadic
+            is_variadic = func_name in self.variadic_functions
+            declared_arg_count = self.function_arg_counts.get(func_name, arg_count)
+            
+            if is_variadic and arg_count > declared_arg_count - 1:
+                # Variadic function with extra arguments
+                # We need to: pop extra args, create list, push list back
+                # Extra args = arg_count - (declared_arg_count - 1)
+                extra_count = arg_count - (declared_arg_count - 1)
+                
+                self.emit_comment(f"Pack {extra_count} extra args into list for variadic")
+                
+                # Pop extra args into a temporary array on stack
+                # We'll use runtime_list_new_i64(values_ptr, count)
+                # First, allocate space for the array
+                self.emit(f"sub rsp, {extra_count * 8}  # Space for vararg values")
+                
+                # Pop values into the array (in correct order)
+                for i in range(extra_count):
+                    # Pop from where they were pushed, store in array
+                    offset = (extra_count - 1 - i) * 8
+                    self.emit(f"pop rax")
+                    self.emit(f"mov [rsp + {offset}], rax")
+                
+                # Call runtime_list_new_i64(rsp, extra_count)
+                self.emit("mov rdi, rsp  # values array")
+                self.emit(f"mov rsi, {extra_count}  # count")
+                self.emit_runtime_call("runtime_list_new_i64")
+                
+                # Clean up temp array space
+                self.emit(f"add rsp, {extra_count * 8}")
+                
+                # Push the list pointer as the variadic argument
+                self.emit("push rax  # Push list pointer")
+                
+                # Track stack types properly
+                for i in range(arg_count):
+                    if self.stack_types:
+                        self.stack_types.pop()
+            else:
+                # Regular function call or variadic with no extra args
+                for i in range(arg_count):
+                    if self.stack_types:
+                        self.stack_types.pop()
 
         # If more than 6 args, leave remaining on stack (already in correct order)
         # TODO: handle > 6 arguments properly
