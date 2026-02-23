@@ -92,8 +92,8 @@ class BuildCRuntime(build_ext):
         
         compile_cmd = [
             cc,
-            '-Wall', '-Wextra', '-Ofast', '-std=c11',
-            '-march=native', '-flto', '-ffast-math',
+            '-Wall', '-Wextra', '-O3', '-std=c11',
+            '-march=native', '-flto',
             '-funroll-loops', '-finline-functions',
             '-fomit-frame-pointer',
         ] + python_cflags.split() + [

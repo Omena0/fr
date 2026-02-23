@@ -151,6 +151,7 @@ typedef struct List
     Value *items; // Dynamic array of values
     int length;   // Current number of items
     int capacity; // Allocated capacity
+    bool is_static; // Static list flag (no dynamic growth)
 } List;
 
 // Struct structure
@@ -296,6 +297,7 @@ typedef enum
     OP_LOAD_MULTI,       // Load multiple variables at once (LOAD_MULTI n v1 v2 ... vn)
     OP_FUSED_LOAD_STORE, // Interleaved load/store (FUSED_LOAD_STORE n src1 dst1 src2 dst2 ...)
     OP_FUSED_STORE_LOAD, // Interleaved store/load (FUSED_STORE_LOAD n dst1 src1 dst2 src2 ...)
+    OP_FUSED_GET_STORE_LOAD, // Fused STRUCT_GET+STORE+LOAD triplets (FUSED_GET_STORE_LOAD field1 dst1 src1 ...)
     // Fused load + arithmetic operations (reduce dispatch overhead in hot loops)
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
@@ -320,6 +322,7 @@ typedef enum
 
     // List/Array operations
     OP_LIST_NEW,    // Create new empty list
+    OP_LIST_NEW_CAP, // Create list with reserved capacity (capacity elem_type -> list)
     OP_LIST_APPEND, // Append value to list (list, value -> list)
     OP_LIST_GET,    // Get element at index (list, index -> value)
     OP_LIST_SET,    // Set element at index (list, index, value -> list)
@@ -329,6 +332,7 @@ typedef enum
     OP_LIST_NEW_F64,    // Create list with float64 values (count val1 val2 ... -> list)
     OP_LIST_NEW_STR,    // Create list with string values (count val1 val2 ... -> list)
     OP_LIST_NEW_BOOL,   // Create list with boolean values (count val1 val2 ... -> list)
+    OP_LIST_NEW_STACK,  // Create list from values on stack (count val1 val2 ... -> list)
 
     // Set operations (hash table for O(1) operations)
     OP_SET_NEW,      // Create new empty set (-> set)
@@ -336,6 +340,12 @@ typedef enum
     OP_SET_REMOVE,   // Remove value from set (set, value -> set)
     OP_SET_CONTAINS, // Check if set contains value (set, value -> bool)
     OP_SET_LEN,      // Get set length (set -> int)
+
+    // Dict operations
+    OP_DICT_NEW,      // Create new empty dict (-> dict)
+    OP_DICT_GET,      // Get value by key (dict, key -> value)
+    OP_DICT_SET,      // Set value by key (dict, key, value -> dict)
+    OP_DICT_CONTAINS, // Check if dict contains key (dict, key -> bool)
 
     // Container membership check
     OP_CONTAINS,     // Generic membership check (container, value -> bool)
@@ -806,29 +816,46 @@ Value value_make_void()
 }
 
 // List helper functions
-List *list_new() {
+List *list_new_with_capacity(int capacity, bool is_static) {
     List *list = malloc(sizeof(List));
     if (!list)
     {
         fprintf(stderr, "Error: Failed to allocate list\n");
         exit(1);
     }
-    list->capacity = 8; // Start with capacity of 8
+    if (capacity < 0) {
+        capacity = 0;
+    }
+    list->capacity = capacity > 0 ? capacity : 0;
     list->length = 0;
-    list->items = malloc(sizeof(Value) * list->capacity);
-    if (!list->items)
-    {
-        fprintf(stderr, "Error: Failed to allocate list items\n");
-        exit(1);
+    list->is_static = is_static;
+    if (list->capacity > 0) {
+        list->items = malloc(sizeof(Value) * list->capacity);
+        if (!list->items)
+        {
+            fprintf(stderr, "Error: Failed to allocate list items\n");
+            exit(1);
+        }
+    } else {
+        list->items = NULL;
     }
     return list;
+}
+
+List *list_new() {
+    return list_new_with_capacity(8, false);
 }
 
 void list_append(List *list, Value value) {
     if (list->length >= list->capacity)
     {
+        if (list->is_static)
+        {
+            fprintf(stderr, "Error: Cannot append beyond static list capacity\n");
+            exit(1);
+        }
         // Double capacity
-        list->capacity *= 2;
+        list->capacity = list->capacity > 0 ? list->capacity * 2 : 8;
         list->items = realloc(list->items, sizeof(Value) * list->capacity);
         if (!list->items)
         {
@@ -906,6 +933,16 @@ void list_set(List *list, int index, Value value) {
     if (index < 0)
     {
         index = list->length + index;
+    }
+
+    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity)
+    {
+        // Extend length and initialize intermediate slots to void
+        for (int i = list->length; i < index; i++)
+        {
+            list->items[i] = value_make_void();
+        }
+        list->length = index + 1;
     }
 
     if (index < 0 || index >= list->length)
@@ -1757,8 +1794,9 @@ Value value_to_string(Value val)
         break;
     case VAL_LIST:
     {
-        // Build string representation of list
-        char *buffer = malloc(4096);
+        // Build string representation of list with dynamic buffer
+        size_t buf_size = 256;
+        char *buffer = malloc(buf_size);
         int offset = 0;
         offset += sprintf(buffer + offset, "[");
         for (int i = 0; i < val.as.list->length; i++)
@@ -1766,6 +1804,13 @@ Value value_to_string(Value val)
             if (i > 0)
                 offset += sprintf(buffer + offset, ", ");
             Value str_val = value_to_string(val.as.list->items[i]);
+            size_t elem_len = strlen(str_val.as.str);
+            // Grow buffer if needed (elem + ", " + "]" + null)
+            while ((size_t)offset + elem_len + 4 > buf_size)
+            {
+                buf_size *= 2;
+                buffer = realloc(buffer, buf_size);
+            }
             offset += sprintf(buffer + offset, "%s", str_val.as.str);
             value_free(str_val);
         }
@@ -1776,8 +1821,9 @@ Value value_to_string(Value val)
     }
     case VAL_SET:
     {
-        // Build string representation of set
-        char *buffer = malloc(4096);
+        // Build string representation of set with dynamic buffer
+        size_t buf_size = 256;
+        char *buffer = malloc(buf_size);
         int offset = 0;
         offset += sprintf(buffer + offset, "{");
         int count = 0;
@@ -1788,6 +1834,12 @@ Value value_to_string(Value val)
                 if (count > 0)
                     offset += sprintf(buffer + offset, ", ");
                 Value str_val = value_to_string(val.as.set->entries[i].key);
+                size_t elem_len = strlen(str_val.as.str);
+                while ((size_t)offset + elem_len + 4 > buf_size)
+                {
+                    buf_size *= 2;
+                    buffer = realloc(buffer, buf_size);
+                }
                 offset += sprintf(buffer + offset, "%s", str_val.as.str);
                 value_free(str_val);
                 count++;
@@ -1830,6 +1882,16 @@ static inline bool would_add_overflow(int64_t a, int64_t b)
     if (b > 0 && a > INT64_MAX - b)
         return true;
     if (b < 0 && a < INT64_MIN - b)
+        return true;
+    return false;
+}
+
+// Helper: Check if int64 subtraction would overflow
+static inline bool would_sub_overflow(int64_t a, int64_t b)
+{
+    if (b < 0 && a > INT64_MAX + b)
+        return true;
+    if (b > 0 && a < INT64_MIN + b)
         return true;
     return false;
 }
@@ -1952,7 +2014,21 @@ Value value_sub(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
-        // Fast path: native int64 subtraction
+        // Fast path: native int64 subtraction with overflow detection
+        if (would_sub_overflow(a.as.int64, b.as.int64))
+        {
+            // Overflow detected - promote to bigint
+            Value a_big = promote_to_bigint(a.as.int64);
+            Value b_big = promote_to_bigint(b.as.int64);
+            Value result;
+            result.type = VAL_BIGINT;
+            result.as.bigint = malloc(sizeof(mpz_t));
+            mpz_init(*result.as.bigint);
+            mpz_sub(*result.as.bigint, *a_big.as.bigint, *b_big.as.bigint);
+            value_free(a_big);
+            value_free(b_big);
+            return result;
+        }
         Value result;
         result.type = VAL_INT;
         result.as.int64 = a.as.int64 - b.as.int64;
@@ -3052,6 +3128,16 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_LIST_LEN;
             else if (strcmp(token, "LIST_POP") == 0)
                 inst.op = OP_LIST_POP;
+            else if (strcmp(token, "LIST_NEW_STACK") == 0)
+            {
+                char *count_str = strtok(NULL, " ");
+                if (count_str == NULL) {
+                    fprintf(stderr, "Error: LIST_NEW_STACK requires count\n");
+                    exit(1);
+                }
+                inst.op = OP_LIST_NEW_STACK;
+                inst.operand.index = safe_atoi(count_str);
+            }
             else if (strcmp(token, "SET_NEW") == 0)
                 inst.op = OP_SET_NEW;
             else if (strcmp(token, "SET_ADD") == 0)
@@ -3062,6 +3148,14 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_SET_CONTAINS;
             else if (strcmp(token, "SET_LEN") == 0)
                 inst.op = OP_SET_LEN;
+            else if (strcmp(token, "DICT_NEW") == 0)
+                inst.op = OP_DICT_NEW;
+            else if (strcmp(token, "DICT_GET") == 0)
+                inst.op = OP_DICT_GET;
+            else if (strcmp(token, "DICT_SET") == 0)
+                inst.op = OP_DICT_SET;
+            else if (strcmp(token, "DICT_CONTAINS") == 0)
+                inst.op = OP_DICT_CONTAINS;
             else if (strcmp(token, "CONTAINS") == 0)
                 inst.op = OP_CONTAINS;
             else if (strcmp(token, "LIST_NEW_I64") == 0)
@@ -3074,8 +3168,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                // Parse count and values
-                int64_t values[10000];  // Support up to 10000 elements
+                // Parse count first, then heap-allocate values array
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3085,9 +3178,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
+                int64_t *values = malloc(count * sizeof(int64_t));
 
                 // Now read the values
-                for (int j = 0; j < count && j < 10000; j++) {
+                for (int j = 0; j < count; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_I64 missing value %d\n", j);
@@ -3103,6 +3197,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
+                free(values);
 
                 inst.op = OP_LIST_NEW_I64;
                 inst.operand.ptr = multi;
@@ -3117,7 +3212,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                double values[10000];
+                double *values = NULL;
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3127,8 +3222,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
+                values = malloc(count * sizeof(double));
 
-                for (int j = 0; j < count && j < 10000; j++) {
+                for (int j = 0; j < count; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_F64 missing value %d\n", j);
@@ -3143,6 +3239,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
+                free(values);
 
                 inst.op = OP_LIST_NEW_F64;
                 inst.operand.ptr = multi;
@@ -3157,7 +3254,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                char *strings[10000];
+                char **strings = NULL;
                 int count = 0;
 
                 // Parse count
@@ -3167,9 +3264,10 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 while (*p && *p != ' ' && *p != '\t') p++;
                 if (*p) *p++ = '\0';
                 count = safe_atoi(count_start);
+                strings = malloc(count * sizeof(char*));
 
                 // Parse quoted strings
-                for (int j = 0; j < count && j < 10000; j++) {
+                for (int j = 0; j < count; j++) {
                     while (*p == ' ' || *p == '\t') p++;
                     if (*p != '"') {
                         fprintf(stderr, "Error: LIST_NEW_STR expects quoted strings\n");
@@ -3203,8 +3301,30 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = strings[j];
                 }
+                free(strings);
 
                 inst.op = OP_LIST_NEW_STR;
+                inst.operand.ptr = multi;
+            }
+            else if (strcmp(token, "LIST_NEW_CAP") == 0)
+            {
+                // LIST_NEW_CAP capacity elem_type
+                char *cap_str = strtok(NULL, " ");
+                char *type_str = strtok(NULL, " ");
+                if (cap_str == NULL || type_str == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_CAP requires capacity and elem_type\n");
+                    exit(1);
+                }
+                inst.op = OP_LIST_NEW_CAP;
+                MultiInt *multi = malloc(sizeof(MultiInt) + sizeof(int) * 2);
+                if (!multi) {
+                    fprintf(stderr, "Error: Failed to allocate LIST_NEW_CAP args\n");
+                    exit(1);
+                }
+                multi->count = 2;
+                multi->values[0] = safe_atoi(cap_str);
+                multi->values[1] = safe_atoi(type_str);
                 inst.operand.ptr = multi;
             }
             else if (strcmp(token, "LIST_NEW_BOOL") == 0)
@@ -3217,7 +3337,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                int values[10000];
+                int *values = NULL;
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3227,8 +3347,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
+                values = malloc(count * sizeof(int));
 
-                for (int j = 0; j < count && j < 10000; j++) {
+                for (int j = 0; j < count; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_BOOL missing value %d\n", j);
@@ -3246,6 +3367,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
+                free(values);
 
                 inst.op = OP_LIST_NEW_BOOL;
                 inst.operand.ptr = multi;
@@ -3767,6 +3889,34 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
                 inst.operand.ptr = multi;
             }
+            // Fused STRUCT_GET+STORE+LOAD triplets
+            else if (strcmp(token, "FUSED_GET_STORE_LOAD") == 0)
+            {
+                inst.op = OP_FUSED_GET_STORE_LOAD;
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: FUSED_GET_STORE_LOAD requires arguments\n");
+                    exit(1);
+                }
+
+                int temp_args[256];
+                int arg_count = 0;
+                char *arg_str = strtok(rest_of_line, " ");
+                while (arg_str != NULL && arg_count < 256)
+                {
+                    temp_args[arg_count++] = safe_atoi(arg_str);
+                    arg_str = strtok(NULL, " ");
+                }
+
+                MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
+                multi->count = arg_count;
+                for (int j = 0; j < arg_count; j++)
+                {
+                    multi->values[j] = temp_args[j];
+                }
+                inst.operand.ptr = multi;
+            }
             // Fused LOAD2 + arithmetic instructions
             else if (strcmp(token, "LOAD2_ADD_I64") == 0)
             {
@@ -4110,6 +4260,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD_MULTI] = &&L_LOAD_MULTI,
         [OP_FUSED_LOAD_STORE] = &&L_FUSED_LOAD_STORE,
         [OP_FUSED_STORE_LOAD] = &&L_FUSED_STORE_LOAD,
+        [OP_FUSED_GET_STORE_LOAD] = &&L_FUSED_GET_STORE_LOAD,
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
@@ -4127,6 +4278,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD2_CMP_NE] = &&L_LOAD2_CMP_NE,
         [OP_SELECT] = &&L_SELECT,
         [OP_LIST_NEW] = &&L_LIST_NEW,
+        [OP_LIST_NEW_CAP] = &&L_LIST_NEW_CAP,
         [OP_LIST_APPEND] = &&L_LIST_APPEND,
         [OP_LIST_GET] = &&L_LIST_GET,
         [OP_LIST_SET] = &&L_LIST_SET,
@@ -4136,11 +4288,16 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LIST_NEW_F64] = &&L_LIST_NEW_F64,
         [OP_LIST_NEW_STR] = &&L_LIST_NEW_STR,
         [OP_LIST_NEW_BOOL] = &&L_LIST_NEW_BOOL,
+        [OP_LIST_NEW_STACK] = &&L_LIST_NEW_STACK,
         [OP_SET_NEW] = &&L_SET_NEW,
         [OP_SET_ADD] = &&L_SET_ADD,
         [OP_SET_REMOVE] = &&L_SET_REMOVE,
         [OP_SET_CONTAINS] = &&L_SET_CONTAINS,
         [OP_SET_LEN] = &&L_SET_LEN,
+        [OP_DICT_NEW] = &&L_DICT_NEW,
+        [OP_DICT_GET] = &&L_DICT_GET,
+        [OP_DICT_SET] = &&L_DICT_SET,
+        [OP_DICT_CONTAINS] = &&L_DICT_CONTAINS,
         [OP_CONTAINS] = &&L_CONTAINS,
         [OP_STRUCT_NEW] = &&L_STRUCT_NEW,
         [OP_STRUCT_GET] = &&L_STRUCT_GET,
@@ -4886,7 +5043,7 @@ L_BUILTIN_SQRT: // OP_BUILTIN_SQRT
         }
         else if (v.type == VAL_INT)
         {
-            double d = mpz_get_d(*v.as.bigint);
+            double d = (double)v.as.int64;
             vm_push(vm, value_make_f64(sqrt(d)));
         }
         value_free(v);
@@ -6071,6 +6228,17 @@ L_LIST_NEW: // OP_LIST_NEW
     DISPATCH();
 }
 
+L_LIST_NEW_CAP: // OP_LIST_NEW_CAP
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
+    int capacity = multi->count > 0 ? multi->values[0] : 0;
+
+    List *list = list_new_with_capacity(capacity, true);
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
 L_LIST_APPEND: // OP_LIST_APPEND
 {
     Value value = vm_pop(vm);
@@ -6301,6 +6469,116 @@ L_SET_LEN: // OP_SET_LEN
     DISPATCH();
 }
 
+// Dict operations (Python dict backing)
+L_DICT_NEW: // OP_DICT_NEW
+{
+    PyObject *dict_obj = PyDict_New();
+    if (!dict_obj) {
+        fprintf(stderr, "Error: Failed to create dict\n");
+        exit(1);
+    }
+    Value dict_val;
+    dict_val.type = VAL_PYOBJECT;
+    dict_val.as.pyobj = dict_obj;
+    vm_push(vm, dict_val);
+    DISPATCH();
+}
+
+L_DICT_GET: // OP_DICT_GET
+{
+    Value key_val = vm_pop(vm);
+    Value dict_val = vm_pop(vm);
+
+    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
+    {
+        fprintf(stderr, "Error: Cannot get item from non-dict type\n");
+        value_free(key_val);
+        value_free(dict_val);
+        exit(1);
+    }
+
+    PyObject *py_key = fr_value_to_python(key_val);
+    PyObject *py_val = PyDict_GetItemWithError(dict_val.as.pyobj, py_key);
+    Py_DECREF(py_key);
+
+    if (!py_val)
+    {
+        if (PyErr_Occurred())
+        {
+            PyErr_Clear();
+        }
+        fprintf(stderr, "Error: Key error\n");
+        value_free(key_val);
+        value_free(dict_val);
+        exit(1);
+    }
+
+    Value result = python_to_fr_value(py_val);
+    value_free(key_val);
+    value_free(dict_val);
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_DICT_SET: // OP_DICT_SET
+{
+    Value value_val = vm_pop(vm);
+    Value key_val = vm_pop(vm);
+    Value dict_val = vm_pop(vm);
+
+    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
+    {
+        fprintf(stderr, "Error: Cannot set item on non-dict type\n");
+        value_free(value_val);
+        value_free(key_val);
+        value_free(dict_val);
+        exit(1);
+    }
+
+    PyObject *py_key = fr_value_to_python(key_val);
+    PyObject *py_val = fr_value_to_python(value_val);
+    int rc = PyDict_SetItem(dict_val.as.pyobj, py_key, py_val);
+    Py_DECREF(py_key);
+    Py_DECREF(py_val);
+
+    if (rc != 0)
+    {
+        fprintf(stderr, "Error: Failed to set dict item\n");
+        value_free(value_val);
+        value_free(key_val);
+        value_free(dict_val);
+        exit(1);
+    }
+
+    value_free(value_val);
+    value_free(key_val);
+    vm_push(vm, dict_val);
+    DISPATCH();
+}
+
+L_DICT_CONTAINS: // OP_DICT_CONTAINS
+{
+    Value key_val = vm_pop(vm);
+    Value dict_val = vm_pop(vm);
+
+    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
+    {
+        fprintf(stderr, "Error: Cannot check containment on non-dict type\n");
+        value_free(key_val);
+        value_free(dict_val);
+        exit(1);
+    }
+
+    PyObject *py_key = fr_value_to_python(key_val);
+    int contains = PyDict_Contains(dict_val.as.pyobj, py_key);
+    Py_DECREF(py_key);
+
+    value_free(key_val);
+    value_free(dict_val);
+    vm_push(vm, value_make_bool(contains == 1));
+    DISPATCH();
+}
+
 L_CONTAINS: // OP_CONTAINS - Generic membership check
 {
     Value value = vm_pop(vm);
@@ -6402,6 +6680,44 @@ L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
         Value val = value_make_bool(multi->values[i] != 0);
         list_append(list, val);
         value_free(val);
+    }
+
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
+L_LIST_NEW_STACK: // OP_LIST_NEW_STACK - Create list from stack values
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    int count = inst.operand.index;
+
+    // Collect values from stack in reverse order
+    Value values[256];
+    if (count > 256)
+    {
+        fprintf(stderr, "Error: LIST_NEW_STACK count too large: %d\n", count);
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    }
+    for (int i = count - 1; i >= 0; i--)
+    {
+        if (vm->stack_top < 1)
+        {
+            fprintf(stderr, "Stack underflow at PC=%d\n", vm->pc - 1);
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        values[i] = vm_pop(vm);
+    }
+
+    // Create list and add values in correct order
+    List *list = list_new();
+    for (int i = 0; i < count; i++)
+    {
+        list_append(list, values[i]);
+        value_free(values[i]);
     }
 
     vm_push(vm, value_wrap_list(list));
@@ -7775,7 +8091,17 @@ L_ABS: // OP_ABS - Absolute value
 
     if (v.type == VAL_INT)
     {
-        result = value_make_int_si(llabs(v.as.int64));
+        // Handle INT64_MIN: llabs(INT64_MIN) is undefined behavior
+        if (v.as.int64 == INT64_MIN)
+        {
+            Value big = promote_to_bigint(v.as.int64);
+            mpz_abs(*big.as.bigint, *big.as.bigint);
+            result = big;
+        }
+        else
+        {
+            result = value_make_int_si(llabs(v.as.int64));
+        }
     }
     else if (v.type == VAL_F64)
     {
@@ -7952,9 +8278,18 @@ L_NEG: // OP_NEG - Unary negation
 
     if (a.type == VAL_INT)
     {
-        // Negate small integer
-        a.as.int64 = -a.as.int64;
-        vm_push(vm, a);
+        // Negate small integer - handle INT64_MIN overflow
+        if (a.as.int64 == INT64_MIN)
+        {
+            Value big = promote_to_bigint(a.as.int64);
+            mpz_neg(*big.as.bigint, *big.as.bigint);
+            vm_push(vm, big);
+        }
+        else
+        {
+            a.as.int64 = -a.as.int64;
+            vm_push(vm, a);
+        }
     }
     else if (a.type == VAL_BIGINT)
     {
@@ -8119,6 +8454,50 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
     DISPATCH();
 }
 
+L_FUSED_GET_STORE_LOAD: // OP_FUSED_GET_STORE_LOAD
+{
+    // Fused STRUCT_GET + STORE + LOAD triplets
+    // Args: field1 dst1 src1 field2 dst2 src2 ...
+    // Each triplet: pop struct, get field, store to dst, load from src
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
+
+    for (int i = 0; i + 2 < multi->count; i += 3)
+    {
+        int field_idx = multi->values[i];
+        int store_var = multi->values[i + 1];
+        int load_var = multi->values[i + 2];
+
+        // STRUCT_GET: pop struct, push field value
+        Value struct_val = vm_pop(vm);
+        if (unlikely(struct_val.type != VAL_STRUCT))
+        {
+            fprintf(stderr, "Error: FUSED_GET_STORE_LOAD: Cannot get field from non-struct type\n");
+            value_free(struct_val);
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        Value field_val = value_copy(struct_val.as.struct_val->fields[field_idx]);
+        value_free(struct_val);
+
+        // STORE: store field value to dst var
+        value_free(current_frame->vars.vars[store_var]);
+        current_frame->vars.vars[store_var] = field_val;
+
+        // LOAD: push src var onto stack
+        Value v = current_frame->vars.vars[load_var];
+        if (likely(v.type == VAL_INT || v.type == VAL_F64 ||
+                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
+            vm_push(vm, v);
+        } else {
+            vm_push(vm, value_copy(v));
+        }
+    }
+
+    DISPATCH();
+}
+
 // Fused LOAD2 + arithmetic operations (hot loop optimizations)
 L_LOAD2_ADD_I64: // OP_LOAD2_ADD_I64
 {
@@ -8178,7 +8557,7 @@ L_LOAD2_DIV_I64: // OP_LOAD2_DIV_I64
     Value b = current_frame->vars.vars[idx2];
 
     // Check for division by zero
-    if (likely(b.type == VAL_INT && b.as.int64 == 0))
+    if (unlikely(b.type == VAL_INT && b.as.int64 == 0))
     {
         vm_runtime_error(vm, "division by zero", 0);
         DISPATCH();

@@ -1,0 +1,7 @@
+Optimization results (LoC)
+
+| ------ | ASM  | Bytecode |
+| before | 3586 |    612   |
+| after  | 2063 |    581   |
+| now    | 2463 |    595   |
+| super  |  ?   |    ?     |

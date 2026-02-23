@@ -84,7 +84,7 @@ def detect_file_type(filepath):
 
     if header[:4] == b'L2AS':
         return 'binary_ast'
-    
+
     # Check for WASM magic number (0x00 0x61 0x73 0x6d)
     if header[:4] == b'\x00asm':
         return 'wasm'
@@ -140,7 +140,7 @@ def run_cmd(cmd, args):
             print("Error: WASM runner not found. Build it with:", file=sys.stderr)
             print("  cd runtime && cargo build --release", file=sys.stderr)
             sys.exit(1)
-        
+
         # Run the WASM file with program arguments
         result = subprocess.run([str(runner_path), cmd] + program_args)
         sys.exit(result.returncode)
@@ -496,7 +496,7 @@ def native_cmd(args):
                 print(f"Compiling C file: {c_file}")
                 result = subprocess.run([
                     'gcc', '-c', c_file, '-o', c_obj,
-                    '-Ofast', '-march=native', '-mtune=native',
+                    '-O3', '-march=native', '-mtune=native',
                     '-finline-functions', '-funroll-loops',
                     '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
                     '-ffunction-sections', '-fdata-sections'
@@ -525,15 +525,6 @@ def native_cmd(args):
                 runtime_dir = 'runtime'
             runtime_lib = f'{runtime_dir}/runtime_lib.c'
 
-            # Use full runtime with static linking of C imports
-            # Note: Using -O0 with selected optimizations (-finline-functions, -funroll-loops)
-            # because -O2 and higher cause crashes with handwritten assembly code.
-            # This appears to be a GCC issue with how it optimizes code that interacts
-            # with inline assembly and calling conventions.
-            # -fno-strict-aliasing: prevents type-punning issues
-            # -fwrapv: ensures defined overflow behavior
-            # -fno-tree-pre: prevents partial redundancy elimination that can break calling conventions
-            # -fno-ipa-cp: prevents interprocedural constant propagation that assumes things about callers
             gcc_flags = [
                 'gcc', obj_file, *c_obj_files, str(runtime_lib), '-o', exe_file,
                 f'-I{runtime_dir}', '-O3', '-march=native', '-mtune=native',
@@ -577,6 +568,7 @@ def wasm_cmd(args):
     output_path = Path('out.wasm')
     run_after = '-r' in args or '--run' in args
     web_mode = '-w' in args or '--web' in args
+
     if '-o' in args:
         idx = args.index('-o')
         if idx + 1 >= len(args):
@@ -622,12 +614,8 @@ def wasm_cmd(args):
         sys.exit(1)
 
     # Optimize WAT code
-    from wasm_optimizer import optimize_wat, remove_unused_locals, remove_unused_imports, remove_empty_lines, remove_comments
+    from wasm_optimizer import optimize_wat
     wat_code = optimize_wat(wat_code)
-    wat_code = remove_unused_locals(wat_code)
-    wat_code = remove_unused_imports(wat_code)
-    wat_code = remove_comments(wat_code)
-    wat_code = remove_empty_lines(wat_code)
 
     # Write WAT file
     wat_path = output_path.with_suffix('.wat')
@@ -679,6 +667,7 @@ def wasm_cmd(args):
                 print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
 
             metadata['wasm_binary'] = False
+
     except FileNotFoundError:
         print("Note: wat2wasm not found. Install WABT to generate .wasm binary.")
         print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
@@ -689,6 +678,7 @@ def wasm_cmd(args):
 
     # Clean up intermediate files if -d not specified
     if '-d' not in args:
+        print('Cleaning up intermediate files. (run with -d to keep them)')
         if wat_path.exists():
             os.remove(wat_path)
             os.remove(metadata_path)
@@ -703,27 +693,29 @@ def wasm_cmd(args):
         try:
             import base64
             from wasm_js_glue import generate_js_glue, generate_html_template
-            
+
             # Use imports that are actually used by the WASM binary
             used_imports = set(metadata.get('imports', []))
             js_glue = generate_js_glue(used_imports, for_inline=True, metadata=metadata)
-            
-            # Read WASM binary and encode as base64
+
+            # Read WASM binary, compress, and encode as base64
+            import gzip
             with open(output_path, 'rb') as f:
                 wasm_bytes = f.read()
-            wasm_base64 = base64.b64encode(wasm_bytes).decode('ascii')
-            
+
+            wasm_compressed = gzip.compress(wasm_bytes)
+            wasm_base64 = base64.b64encode(wasm_compressed).decode('ascii')
+
             # Determine output filenames
-            wasm_filename = output_path.name
             html_filename = output_path.with_suffix('.html').name
-            
+
             # Write HTML file with embedded WASM
             html_path = output_path.with_name(html_filename)
-            html_content = generate_html_template(wasm_filename, js_glue, wasm_base64, metadata=metadata)
+            html_content = generate_html_template(js_glue, wasm_base64, metadata=metadata)
             with open(html_path, 'w') as f:
                 f.write(html_content)
             print(f"Generated HTML: {html_path}")
-            
+
         except ImportError as e:
             print(f"Error: Could not import WASM JS glue generator: {e}", file=sys.stderr)
             sys.exit(1)

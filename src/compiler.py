@@ -161,6 +161,14 @@ class BytecodeCompiler:
         self.c_link_flags: List[str] = []  # Track linker flags from c_link directives
         self.source_lines: List[str] = []  # Source code lines for .line directives
         self.source_file: str = ""  # Source filename for error messages
+        self.memo_global_map: Dict[str, str] = {}  # func_name -> global memo list name
+        self.memo_tables: Dict[str, list] = {}  # func_name -> memo list values
+        self.memo_temp_local: str = "__memo_tmp"
+        self.struct_field_temps: Dict[str, Dict[tuple[str, str], str]] = {}
+        self.temp_local_types: Dict[str, str] = {}
+        self.current_struct_field_cache: Dict[tuple[str, str], str] = {}
+        self.current_struct_field_initialized: set[tuple[str, str]] = set()
+        self.current_function_name: str = ""
 
     def get_label(self, prefix: str = "L") -> str:
         """Generate a unique label"""
@@ -215,6 +223,100 @@ class BytecodeCompiler:
         else:
             self.emit(f"STORE {var_id}")
 
+    def _collect_struct_field_reads(self, node: Any, counts: Dict[tuple[str, str], int]) -> None:
+        """Collect repeated struct field reads of the form var.field within a node."""
+        if isinstance(node, dict):
+            if 'attr' in node and 'value' in node:
+                value_node = node.get('value')
+                if is_var_ref(value_node):
+                    var_name = value_node['id']
+                    if self.var_types.get(var_name) != 'pyobject':
+                        field_name = node.get('attr')
+                        if isinstance(field_name, str):
+                            key = (var_name, field_name)
+                            counts[key] = counts.get(key, 0) + 1
+
+            for value in node.values():
+                if isinstance(value, dict) or isinstance(value, list):
+                    self._collect_struct_field_reads(value, counts)
+        elif isinstance(node, list):
+            for item in node:
+                self._collect_struct_field_reads(item, counts)
+
+    def _collect_struct_field_writes(self, node: Any, writes: set[tuple[str, str]]) -> None:
+        """Collect struct field writes of the form var.field = ... within a node."""
+        if isinstance(node, dict):
+            if node.get('type') == 'field_assign':
+                target_name = node.get('target')
+                field_name = node.get('field')
+                if isinstance(target_name, str) and isinstance(field_name, str):
+                    writes.add((target_name, field_name))
+            for value in node.values():
+                if isinstance(value, dict) or isinstance(value, list):
+                    self._collect_struct_field_writes(value, writes)
+        elif isinstance(node, list):
+            for item in node:
+                self._collect_struct_field_writes(item, writes)
+
+    def _get_struct_field_type(self, var_name: str, field_name: str) -> Optional[str]:
+        """Get mapped bytecode type for a struct field if known."""
+        struct_type = self.var_types.get(var_name)
+        if isinstance(struct_type, str) and struct_type.startswith('struct:'):
+            struct_type = struct_type.split(':', 1)[1]
+        if not struct_type or struct_type not in self.struct_defs:
+            return None
+        struct_def = self.struct_defs[struct_type]
+        field_map = struct_def.get('field_map', {})
+        field_types = struct_def.get('field_types', [])
+        if field_name not in field_map:
+            return None
+        idx = field_map[field_name]
+        if idx >= len(field_types):
+            return None
+        return self.map_type(field_types[idx])
+
+    def _get_struct_field_index(self, var_name: str, field_name: str) -> Optional[int]:
+        """Get field index for a struct field if known."""
+        struct_type = self.var_types.get(var_name)
+        if isinstance(struct_type, str) and struct_type.startswith('struct:'):
+            struct_type = struct_type.split(':', 1)[1]
+        if not struct_type or struct_type not in self.struct_defs:
+            return None
+        struct_def = self.struct_defs[struct_type]
+        field_map = struct_def.get('field_map', {})
+        return field_map.get(field_name)
+
+    def _ensure_struct_field_temp(self, func_name: str, var_name: str, field_name: str, field_type: str) -> str:
+        """Create or reuse a temp local for a struct field cache."""
+        key = (var_name, field_name)
+        if func_name not in self.struct_field_temps:
+            self.struct_field_temps[func_name] = {}
+        if key in self.struct_field_temps[func_name]:
+            return self.struct_field_temps[func_name][key]
+
+        temp_name = f"__sf_{var_name}_{field_name}_{len(self.struct_field_temps[func_name])}"
+        self.struct_field_temps[func_name][key] = temp_name
+        self.temp_local_types[temp_name] = field_type
+        return temp_name
+
+    def _build_struct_field_cache(self, stmt: dict) -> Dict[tuple[str, str], str]:
+        """Build per-statement cache mapping for repeated struct field reads."""
+        counts: Dict[tuple[str, str], int] = {}
+        writes: set[tuple[str, str]] = set()
+        self._collect_struct_field_reads(stmt, counts)
+        self._collect_struct_field_writes(stmt, writes)
+
+        cache: Dict[tuple[str, str], str] = {}
+        for (var_name, field_name), count in counts.items():
+            if count <= 0 or (var_name, field_name) in writes:
+                continue
+            field_type = self._get_struct_field_type(var_name, field_name)
+            if not field_type:
+                continue
+            temp_name = self._ensure_struct_field_temp(self.current_function_name, var_name, field_name, field_type)
+            cache[(var_name, field_name)] = temp_name
+        return cache
+
     def check_function_typed(self, func_node: dict) -> bool:
         """Check if function has all arguments typed"""
         args = func_node.get('args', [])
@@ -262,6 +364,21 @@ class BytecodeCompiler:
 
         return type_map.get(type_str, 'i64')  # Default to i64
 
+    def map_list_elem_type(self, type_str: Optional[str]) -> int:
+        """Map list element type to runtime element type code."""
+        if not type_str:
+            return -1
+        norm = self.normalize_type(type_str)
+        if norm in ('int', 'i64'):
+            return 0
+        if norm in ('str', 'string'):
+            return 1
+        if norm in ('float', 'f64'):
+            return 2
+        if norm == 'bool':
+            return 3
+        return -1
+
     def normalize_type(self, type_str: str) -> str:
         """Normalize type aliases to their canonical form"""
         type_aliases = {
@@ -279,6 +396,8 @@ class BytecodeCompiler:
         if 'id' in expr:
             var_name = expr['id']
             var_type = self.var_types.get(var_name, '')
+            if isinstance(var_type, str) and var_type.startswith('struct:'):
+                var_type = var_type.split(':', 1)[1]
             # Check if this is a struct type
             return var_type if var_type in self.struct_defs else ''
         # If it's a member access (nested struct field)
@@ -373,6 +492,10 @@ class BytecodeCompiler:
         if 'op' in expr and 'left' in expr and 'right' in expr:
             left_type = self.infer_expr_type(expr['left'])
             right_type = self.infer_expr_type(expr['right'])
+            op = expr.get('op')
+            # Division always yields a float (true division)
+            if op in ('/', 'Div'):
+                return 'f64'
             # If either operand is float, result is float
             if left_type in ('f64', 'float') or right_type in ('f64', 'float'):
                 return 'f64'
@@ -419,12 +542,51 @@ class BytecodeCompiler:
 
         # Literal list (Python list object)
         if isinstance(expr, list):
-            # Create new list
-            self.emit("LIST_NEW")
-            # Append each element
-            for elem in expr:
-                self.compile_expr(elem, expr_type)  # Push element
-                self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
+            elements = expr
+            # Check if all elements are literals
+            is_all_literals = True
+            literal_values = []
+            
+            for e in elements:
+                if isinstance(e, (int, float, str, bool)):
+                    literal_values.append(e)
+                elif is_literal_value(e):
+                    literal_values.append(e['value'])
+                else:
+                    is_all_literals = False
+                    break
+            
+            if elements and is_all_literals:
+                # Check types
+                if all(isinstance(v, bool) for v in literal_values):
+                    # LIST_NEW_BOOL
+                    values = ['1' if v else '0' for v in literal_values]
+                    self.emit(f"LIST_NEW_BOOL {len(values)} {' '.join(values)}")
+                    return
+                elif all(isinstance(v, int) and not isinstance(v, bool) for v in literal_values):
+                    # LIST_NEW_I64
+                    values = [str(v) for v in literal_values]
+                    self.emit(f"LIST_NEW_I64 {len(values)} {' '.join(values)}")
+                    return
+                elif all(isinstance(v, float) for v in literal_values):
+                    # LIST_NEW_F64
+                    values = [str(v) for v in literal_values]
+                    self.emit(f"LIST_NEW_F64 {len(values)} {' '.join(values)}")
+                    return
+                elif all(isinstance(v, str) for v in literal_values):
+                    # LIST_NEW_STR
+                    # Need to escape strings
+                    values = [f'"{escape_string_for_bytecode(v)}"' for v in literal_values]
+                    self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
+                    return
+
+            # Create new list using stack values
+            # Push all elements to stack
+            for elem in elements:
+                self.compile_expr(elem, expr_type)
+            
+            # Emit LIST_NEW_STACK count
+            self.emit(f"LIST_NEW_STACK {len(elements)}")
             return
 
         # Literal boolean (must be before int since bool is subclass of int in Python)
@@ -458,6 +620,15 @@ class BytecodeCompiler:
         if is_literal_value(expr):
             value = expr['value']
 
+            # Check for boolean literal in dict format before int handling
+            if expr.get('type') == 'bool':
+                if isinstance(value, str):
+                    bool_val = 1 if value == 'true' else 0
+                else:
+                    bool_val = 1 if bool(value) else 0
+                self.emit(f"CONST_BOOL {bool_val}")
+                return
+
             # Check for bytes literal in dict format
             if expr.get('type') == 'bytes':
                 # Escape the bytes content for bytecode
@@ -478,12 +649,51 @@ class BytecodeCompiler:
 
             # Check for list literal in dict format
             if isinstance(value, list):
-                # Create new list
-                self.emit("LIST_NEW")
-                # Append each element
-                for elem in value:
-                    self.compile_expr(elem, expr_type)  # Push element
-                    self.emit("LIST_APPEND")  # Append and push back list (list, elem -> list)
+                elements = value
+                # Check if all elements are literals
+                is_all_literals = True
+                literal_values = []
+                
+                for e in elements:
+                    if isinstance(e, (int, float, str, bool)):
+                        literal_values.append(e)
+                    elif is_literal_value(e):
+                        literal_values.append(e['value'])
+                    else:
+                        is_all_literals = False
+                        break
+                
+                if elements and is_all_literals:
+                    # Check types
+                    if all(isinstance(v, bool) for v in literal_values):
+                        # LIST_NEW_BOOL
+                        values = ['1' if v else '0' for v in literal_values]
+                        self.emit(f"LIST_NEW_BOOL {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, int) and not isinstance(v, bool) for v in literal_values):
+                        # LIST_NEW_I64
+                        values = [str(v) for v in literal_values]
+                        self.emit(f"LIST_NEW_I64 {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, float) for v in literal_values):
+                        # LIST_NEW_F64
+                        values = [str(v) for v in literal_values]
+                        self.emit(f"LIST_NEW_F64 {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, str) for v in literal_values):
+                        # LIST_NEW_STR
+                        # Need to escape strings
+                        values = [f'"{escape_string_for_bytecode(v)}"' for v in literal_values]
+                        self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
+                        return
+
+                # Create new list using stack values
+                # Push all elements to stack
+                for elem in elements:
+                    self.compile_expr(elem, expr_type)
+                
+                # Emit LIST_NEW_STACK count
+                self.emit(f"LIST_NEW_STACK {len(elements)}")
                 return
 
             if isinstance(value, int):
@@ -610,11 +820,10 @@ class BytecodeCompiler:
                     return
 
                 # Regular struct field access
-                # Compile the struct value (could be a variable, list element, etc.)
-                self.compile_expr(expr['value'], expr_type)
+                value_node = expr['value']
 
                 # Determine which struct this field belongs to
-                struct_type = self.get_expr_struct_type(expr['value'])
+                struct_type = self.get_expr_struct_type(value_node)
                 
                 # Determine field index
                 field_idx = -1
@@ -634,21 +843,82 @@ class BytecodeCompiler:
                 if field_idx < 0:
                     raise ValueError(f"Unknown field: {field_name}")
 
+                if is_var_ref(value_node):
+                    var_name = value_node['id']
+                    cache_key = (var_name, field_name)
+                    if cache_key in self.current_struct_field_cache:
+                        temp_name = self.current_struct_field_cache[cache_key]
+                        self.emit_load(temp_name)
+                        return
+
+                # Compile the struct value (could be a variable, list element, etc.)
+                self.compile_expr(value_node, expr_type)
                 self.emit(f"STRUCT_GET {field_idx}")
                 return
 
-            # List literal in AST format with 'elts'
+            # List literal
+            elements = None
             if 'elts' in expr:
-                # Create new list
-                self.emit("LIST_NEW")
-                # Append each element
-                for elem in expr['elts']:
-                    self.compile_expr(elem, expr_type)  # Push element
-                    self.emit("LIST_APPEND")  # Append: pops value and list, pushes modified list
+                elements = expr['elts']
+            elif expr.get('type') == 'list' and 'value' in expr:
+                elements = expr['value']
+
+            if elements is not None:
+                # Check if all elements are literals
+                is_all_literals = True
+                literal_values = []
+                
+                for e in elements:
+                    if isinstance(e, (int, float, str, bool)):
+                        literal_values.append(e)
+                    elif is_literal_value(e):
+                        literal_values.append(e['value'])
+                    else:
+                        is_all_literals = False
+                        break
+                
+                if elements and is_all_literals:
+                    # Check types
+                    if all(isinstance(v, bool) for v in literal_values):
+                        # LIST_NEW_BOOL
+                        values = ['1' if v else '0' for v in literal_values]
+                        self.emit(f"LIST_NEW_BOOL {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, int) and not isinstance(v, bool) for v in literal_values):
+                        # LIST_NEW_I64
+                        values = [str(v) for v in literal_values]
+                        self.emit(f"LIST_NEW_I64 {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, float) for v in literal_values):
+                        # LIST_NEW_F64
+                        values = [str(v) for v in literal_values]
+                        self.emit(f"LIST_NEW_F64 {len(values)} {' '.join(values)}")
+                        return
+                    elif all(isinstance(v, str) for v in literal_values):
+                        # LIST_NEW_STR
+                        # Need to escape strings
+                        values = [f'"{escape_string_for_bytecode(v)}"' for v in literal_values]
+                        self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
+                        return
+
+                # Create new list using stack values
+                # Push all elements to stack
+                for elem in elements:
+                    self.compile_expr(elem, expr_type)
+                
+                # Emit LIST_NEW_STACK count
+                self.emit(f"LIST_NEW_STACK {len(elements)}")
                 return
 
-            # List/Array indexing (subscript): arr[index]
+            # List/Array/Dict indexing (subscript): arr[index]
             if 'value' in expr and 'slice' in expr:
+                if isinstance(expr['value'], dict) and 'id' in expr['value']:
+                    container_name = expr['value']['id']
+                    if self.var_types.get(container_name) == 'dict':
+                        self.compile_expr(expr['value'], expr_type)
+                        self.compile_expr(expr['slice'], 'i64')
+                        self.emit("DICT_GET")
+                        return
                 # Compile array expression
                 self.compile_expr(expr['value'], expr_type)
                 # Compile index expression
@@ -674,10 +944,14 @@ class BytecodeCompiler:
                         # Stack: container, value -> bool
                         self.compile_expr(right, expr_type)  # container on stack
                         self.compile_expr(left, expr_type)   # value on stack
-                        # Now we need to check the type and emit appropriate opcode
-                        # For now, use STR_CONTAINS for strings, and emit a generic IN check
-                        # We'll emit a CONTAINS opcode that works for all types
-                        self.emit('CONTAINS')
+                        if isinstance(right, dict) and 'id' in right:
+                            container_name = right['id']
+                            if self.var_types.get(container_name) == 'dict':
+                                self.emit('DICT_CONTAINS')
+                            else:
+                                self.emit('CONTAINS')
+                        else:
+                            self.emit('CONTAINS')
                         if op == 'NotIn':
                             self.emit('NOT')
                         return
@@ -906,6 +1180,33 @@ class BytecodeCompiler:
                     func_name = expr.get('name', '')
                     args = expr.get('args', [])
 
+                # Memo table fast path (single int arg)
+                if func_name in self.memo_global_map and len(args) == 1:
+                    memo_name = self.memo_global_map[func_name]
+                    temp_name = self.memo_temp_local
+                    memo_fallback = self.get_label("memo_fallback")
+                    memo_done = self.get_label("memo_done")
+
+                    self.compile_expr(args[0], expr_type)
+                    self.emit_store(temp_name)
+
+                    self.emit_load(temp_name)
+                    self.emit_load(memo_name)
+                    self.emit("BUILTIN_LEN")
+                    self.emit("CMP_LT")
+                    self.emit(f"JUMP_IF_FALSE {memo_fallback}")
+
+                    self.emit_load(memo_name)
+                    self.emit_load(temp_name)
+                    self.emit("LIST_GET")
+                    self.emit(f"JUMP {memo_done}")
+
+                    self.emit(f"LABEL {memo_fallback}")
+                    self.emit_load(temp_name)
+                    self.emit(f"CALL {func_name} 1")
+                    self.emit(f"LABEL {memo_done}")
+                    return
+
                 # Special handling for py_call to resolve aliases
                 if func_name == 'py_call' and len(args) >= 2:
                     # Check if first argument is a string literal (module name or alias)
@@ -1102,6 +1403,18 @@ class BytecodeCompiler:
         if 'line' in node:
             self.current_line = node['line']
 
+        self.current_struct_field_cache = self._build_struct_field_cache(node)
+        self.current_struct_field_initialized = set()
+
+        if self.current_struct_field_cache:
+            for (var_name, field_name), temp_name in sorted(self.current_struct_field_cache.items()):
+                field_idx = self._get_struct_field_index(var_name, field_name)
+                if field_idx is None:
+                    continue
+                self.emit_load(var_name)
+                self.emit(f"STRUCT_GET {field_idx}")
+                self.emit_store(temp_name)
+
         node_type = node.get('type')
 
         # Variable declaration/assignment
@@ -1122,13 +1435,20 @@ class BytecodeCompiler:
                 value.get('type') == 'set'):
                 set_value = value.get('value', [])
                 if len(set_value) == 0:
-                    # Empty dict: create Python dict using py_call("builtins", "dict")
-                    self.emit('CONST_STR "builtins"')
-                    self.emit('CONST_STR "dict"')
-                    self.emit('CONST_I64 0')  # 0 arguments
-                    self.emit('PY_CALL')
+                    # Empty dict: emit DICT_NEW
+                    self.emit('DICT_NEW')
                     self.emit_store(name)
                     return
+
+            # Static list allocation: list name[capacity:type] = []
+            list_capacity = node.get('list_capacity')
+            if list_capacity is not None:
+                if not (isinstance(value, dict) and value.get('type') == 'list' and value.get('value') == []):
+                    raise CompilerError('Static lists must be initialized with an empty list literal []')
+                elem_type_code = self.map_list_elem_type(node.get('list_elem_type'))
+                self.emit(f"LIST_NEW_CAP {list_capacity} {elem_type_code}")
+                self.emit_store(name)
+                return
 
             # Special handling for pop(list) which modifies the list
             if value and is_function_call(value):
@@ -1182,9 +1502,12 @@ class BytecodeCompiler:
             self.compile_expr(index, 'i64')
             # Compile value
             self.compile_expr(value)
-            # Set element and get modified list back
-            self.emit("LIST_SET")
-            # Store modified list back
+            # Set element and get modified container back
+            if self.var_types.get(target_name) == 'dict':
+                self.emit("DICT_SET")
+            else:
+                self.emit("LIST_SET")
+            # Store modified container back
             self.emit_store(target_name)
 
         elif node_type == 'field_assign':
@@ -1256,7 +1579,6 @@ class BytecodeCompiler:
 
             # Store modified struct back
             self.emit_store(target_name)
-
         elif node_type == 'return':
             value = node.get('value')
 
@@ -1909,6 +2231,11 @@ class BytecodeCompiler:
         self.label_counter = 0
         self.var_mapping = {}
         self.next_var_id = 0
+        self.current_function_name = func_name
+        self.struct_field_temps[func_name] = {}
+        self.temp_local_types = {}
+        self.current_struct_field_cache = {}
+        self.current_struct_field_initialized = set()
 
         # DO NOT pre-allocate variable IDs for globals here!
         # Global variables use LOAD_GLOBAL/STORE_GLOBAL with their own indices,
@@ -1928,6 +2255,7 @@ class BytecodeCompiler:
             if isinstance(arg, (tuple, list)) and len(arg) == 2:
                 arg_name, arg_type = arg
                 mapped_type = self.map_type(arg_type)
+                self.var_types[arg_name] = self.normalize_type(arg_type)
                 var_id = self.get_var_id(arg_name)
                 self.emit(f"  .arg {arg_name} {mapped_type}")
 
@@ -1938,6 +2266,45 @@ class BytecodeCompiler:
                 var_name = stmt.get('name', '')
                 if var_name not in self.var_mapping:
                     locals_found.add(var_name)
+
+        # Pre-populate var_types from declarations for struct field caching
+        for stmt in scope:
+            if stmt.get('type') == 'var':
+                var_name = stmt.get('name', '')
+                value_type_str = stmt.get('value_type', 'any')
+                if var_name:
+                    self.var_types[var_name] = self.normalize_type(value_type_str)
+
+        # Pre-scan for repeated struct field reads and allocate temp locals
+        for stmt in scope:
+            if isinstance(stmt, dict):
+                self._build_struct_field_cache(stmt)
+
+        for _key, temp_name in self.struct_field_temps.get(func_name, {}).items():
+            locals_found.add(temp_name)
+            if temp_name in self.temp_local_types:
+                self.var_types[temp_name] = self.temp_local_types[temp_name]
+
+        # Add memo temp local if function uses memoized calls
+        def _has_memo_calls(node: Any) -> bool:
+            if not isinstance(node, dict):
+                return False
+            if node.get('type') == 'call' or 'func' in node:
+                func_info = node.get('func', {}) if 'func' in node else node
+                func_name = func_info.get('id') if isinstance(func_info, dict) else node.get('name')
+                if func_name in self.memo_global_map:
+                    return True
+            for value in node.values():
+                if isinstance(value, dict) and _has_memo_calls(value):
+                    return True
+                if isinstance(value, list):
+                    for item in value:
+                        if _has_memo_calls(item):
+                            return True
+            return False
+
+        if any(_has_memo_calls(stmt) for stmt in scope):
+            locals_found.add(self.memo_temp_local)
         # Add global variables as locals to ALL functions (not just main)
         # Global variable IDs are pre-allocated, so they're already in var_mapping
         # But we DON'T emit them as .local since they're .global
@@ -1956,6 +2323,8 @@ class BytecodeCompiler:
             global_var_node = next((gv for gv in global_vars if gv.get('name') == local_name), None)
             if global_var_node:
                 local_type = self.map_type(global_var_node.get('value_type'))
+            elif local_name in self.temp_local_types:
+                local_type = self.temp_local_types[local_name]
             else:
                 local_type = next(
                     (
@@ -2059,7 +2428,8 @@ class BytecodeCompiler:
                         self.struct_defs[struct_name] = {
                             'id': struct_id,
                             'fields': fields,
-                            'field_map': {f['name']: i for i, f in enumerate(fields)}
+                            'field_map': {f['name']: i for i, f in enumerate(fields)},
+                            'field_types': [f.get('type') for f in fields]
                         }
                     # Handle imported global variables
                     elif imported_type == 'var':
@@ -2117,6 +2487,7 @@ class BytecodeCompiler:
                         'id': struct_id,
                         'fields': fields,
                         'field_map': field_map,
+                        'field_types': [f.get('type') for f in fields],
                         'is_c_struct': True
                     }
             elif node_type == 'c_link':
@@ -2145,7 +2516,8 @@ class BytecodeCompiler:
                 self.struct_defs[struct_name] = {
                     'id': struct_id,
                     'fields': fields,
-                    'field_map': {f['name']: i for i, f in enumerate(fields)}
+                    'field_map': {f['name']: i for i, f in enumerate(fields)},
+                    'field_types': [f.get('type') for f in fields]
                 }
             elif node_type == 'py_import':
                 # Register Python import
@@ -2180,6 +2552,46 @@ class BytecodeCompiler:
                 global_vars.append(node)
                 # Store in global_vars dict for access by all functions
                 self.global_vars[var_name] = node
+            elif node_type == 'function':
+                func_name = node.get('name')
+                memo_entries = node.get('memo_table', []) if isinstance(node, dict) else []
+                if isinstance(func_name, str) and memo_entries:
+                    # Build dense memo table for single int arg functions (prefix only)
+                    table_map: dict[int, Any] = {}
+                    for entry in memo_entries:
+                        args = entry.get('args', []) if isinstance(entry, dict) else []
+                        if len(args) != 1 or not isinstance(args[0], int):
+                            continue
+                        idx = args[0]
+                        if idx < 0:
+                            continue
+                        table_map[idx] = entry.get('value') if isinstance(entry, dict) else None
+
+                    # Find the longest contiguous prefix [0..max_prefix] with safe int64 values
+                    max_prefix = -1
+                    i = 0
+                    while i in table_map:
+                        val = table_map[i]
+                        if not isinstance(val, int):
+                            break
+                        if val < -(2**63) or val > (2**63 - 1):
+                            break
+                        max_prefix = i
+                        i += 1
+
+                    if max_prefix >= 0:
+                        memo_values = [table_map[i] for i in range(max_prefix + 1)]
+                        memo_name = f"__memo_{func_name}"
+                        memo_node = {
+                            "type": "var",
+                            "name": memo_name,
+                            "value": memo_values,
+                            "value_type": "list"
+                        }
+                        global_vars.append(memo_node)
+                        self.global_vars[memo_name] = memo_node
+                        self.memo_global_map[func_name] = memo_name
+                        self.memo_tables[func_name] = memo_values
 
         results.append("# Struct definitions")
         # Emit struct definitions as bytecode directives

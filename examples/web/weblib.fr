@@ -17,10 +17,10 @@ Element element(str name, str text, Element *content) {
     }
     Element elem = Element(new_element, name, new_content)
     elements.append(elem)
-    
+
     // Automatically append to body (will be moved if appended to another element later)
     dom_append(dom_get_body(), new_element)
-    
+
     return elem
 }
 

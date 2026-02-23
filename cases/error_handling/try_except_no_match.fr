@@ -1,4 +1,4 @@
-// ?7,29:float division by zero
+// ?6,29:float division by zero
 
 int main() {
     try {

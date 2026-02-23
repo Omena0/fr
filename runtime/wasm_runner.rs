@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 
     // Runtime error function - prints error to stderr and exits
     // Takes: error_type_ptr, error_type_len, message_ptr, message_len, line_num
-    let runtime_error = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, 
+    let runtime_error = Func::wrap::<_, _, ()>(&mut store, |mut caller: Caller<'_, ()>, 
         error_type_ptr: i32, error_type_len: i32,
         message_ptr: i32, message_len: i32,
         line_num: i32| {
@@ -443,6 +443,32 @@ fn main() -> Result<()> {
         lists_lock.push(Vec::new());
         (lists_lock.len() - 1) as i32
     });
+
+    let lists_clone = lists.clone();
+    let list_from_array = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, ptr: i32, count: i64| -> i32 {
+        let mut lists_lock = lists_clone.lock().unwrap();
+        lists_lock.push(Vec::new());
+        let list_id = (lists_lock.len() - 1) as i32;
+        
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        
+        let start = ptr as usize;
+        let cnt = count as usize;
+        
+        if let Some(list_vec) = lists_lock.get_mut(list_id as usize) {
+            for i in 0..cnt {
+                let offset = start + i * 8;
+                if offset + 8 <= data.len() {
+                    let bytes = &data[offset..offset+8];
+                    let val = i64::from_le_bytes(bytes.try_into().unwrap());
+                    list_vec.push(val);
+                }
+            }
+        }
+        
+        list_id
+    });
     
     let lists_clone = lists.clone();
     let list_append = Func::wrap(&mut store, move |_: Caller<'_, ()>, list: i32, value: i64| -> i32 {
@@ -728,6 +754,7 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "str_join", str_join)?;
     linker.define(&store, "env", "str_split", str_split)?;
     linker.define(&store, "env", "list_new", list_new)?;
+    linker.define(&store, "env", "list_from_array", list_from_array)?;
     linker.define(&store, "env", "list_append", list_append)?;
     linker.define(&store, "env", "list_get", list_get)?;
     linker.define(&store, "env", "list_set", list_set)?;

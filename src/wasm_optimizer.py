@@ -90,6 +90,13 @@ def apply_peephole_optimizations(code: str) -> str:
         code
     )
 
+    # Pattern: i64.extend_i32_u followed by i32.wrap_i64 - remove both
+    code = re.sub(
+        instr_pat('i64.extend_i32_u') + SEP + instr_pat('i32.wrap_i64'),
+        '',
+        code
+    )
+
     # Pattern: local.set followed immediately by local.get of same variable
     # This is a common pattern that can be optimized with local.tee
     # Use word boundary \b after backreference to avoid matching prefixes (e.g., $temp matching $temp3_i64)
@@ -106,29 +113,37 @@ def apply_peephole_optimizations(code: str) -> str:
     code = re.sub(instr_pat('i64.extend_i32_s') + SEP + instr_pat('i32.wrap_i64'), '', code)
     code = re.sub(instr_pat('i64.extend_i32_u') + SEP + instr_pat('i32.wrap_i64'), '', code)
 
-    # Constant folding for simple integer operations
-    code = fold_integer_constants(code)
-
-    # Float constant folding
-    code = fold_float_constants(code)
-
-    # Boolean and comparison optimizations
-    code = optimize_boolean_ops(code)
-
-    # Strength reduction optimizations
-    code = apply_strength_reduction(code)
-
-    # Drop optimizations
-    code = optimize_drops(code)
-
-    # Remove unused blocks
-    code = remove_unused_blocks(code)
-
-    # Block nesting optimizations
-    code = optimize_block_nesting(code)
+    code = run_optimization_passes(code)
 
     # Remove empty lines that were created by removals
     code = re.sub(r'\n\s*\n\s*\n', '\n\n', code)
+
+    return code
+
+def run_optimization_passes(code: str) -> str:
+    passes = [
+        # fold_float_constants,
+        # optimize_boolean_ops,
+        # apply_strength_reduction,
+        optimize_drops,
+        optimize_block_nesting,
+        remove_unused_blocks,
+        remove_unused_locals,
+        remove_empty_lines,
+        remove_comments,
+        remove_duplicate_local_gets,
+        remove_overwritten_local_sets,
+        replace_tee_drop_with_set,
+        # remove_drop_after_call,
+        # remove_zero_address_adjust_before_load,
+        # remove_duplicate_store_value,
+        # inline_trivial_if,
+        remove_empty_blocks,
+        # mark_i64_high_half
+    ]
+
+    for func in passes:
+        code = func(code)
 
     return code
 
@@ -675,12 +690,12 @@ def apply_line_optimizations(lines: List[str]) -> List[str]:
 
     return result
 
-def optimize_function(func_code: str) -> str:
-    """Optimize a single function's code."""
-    return apply_peephole_optimizations(func_code)
-
 def optimize_block_nesting(code: str) -> str:
     """Merge redundant nested blocks."""
+    
+    # Ensure code is a string
+    if isinstance(code, list):
+        code = '\n'.join(code)
     
     # Limit iterations to prevent infinite loops
     for _ in range(500):
@@ -937,7 +952,6 @@ def remove_unused_blocks(code: str) -> str:
 
     return code
 
-
 def remove_unused_locals(code: str) -> str:
     """Remove local variable declarations that are never used."""
     lines = code.split('\n')
@@ -959,13 +973,16 @@ def remove_unused_locals(code: str) -> str:
             in_function = True
             func_lines = [line]
             func_start = i
-            paren_depth = line.count('(') - line.count(')')
+            line_no_comment = line.split(';;')[0]
+            paren_depth = line_no_comment.count('(') - line_no_comment.count(')')
         elif in_function:
             func_lines.append(line)
-            paren_depth += line.count('(') - line.count(')')
+            line_no_comment = line.split(';;')[0]
+            paren_depth += line_no_comment.count('(') - line_no_comment.count(')')
             
             # Check for end of function when paren depth returns to 0
             if paren_depth <= 0:
+                # print(f"Finished function at line {i}, depth {paren_depth}")
                 # Process this function
                 func_code = '\n'.join(func_lines)
                 
@@ -1012,7 +1029,8 @@ def remove_unused_imports(code: str) -> str:
     lines = code.split('\n')
     
     # Find all imported function names
-    import_pattern = re.compile(r'\(import\s+"[^"]+"\s+"[^"]+"\s+\(func\s+\$(\w+)')
+    # Handle imports with or without leading whitespace
+    import_pattern = re.compile(r'^\s*\(import\s+"[^"]+"\s+"[^"]+"\s+\(func\s+\$(\w+)')
     imported_funcs = {}  # name -> line index
     
     for i, line in enumerate(lines):
@@ -1025,6 +1043,10 @@ def remove_unused_imports(code: str) -> str:
     called_funcs = set()
     
     for line in lines:
+        # Strip comments before checking for calls
+        if ';;' in line:
+            line = line[:line.index(';;')]
+            
         for match in call_pattern.finditer(line):
             called_funcs.add(match.group(1))
     
@@ -1037,7 +1059,6 @@ def remove_unused_imports(code: str) -> str:
     
     return '\n'.join(result_lines)
 
-
 def remove_empty_lines(code: str) -> str:
     """Remove excessive empty lines."""
     # Replace multiple consecutive empty lines with single empty line
@@ -1045,7 +1066,6 @@ def remove_empty_lines(code: str) -> str:
     # Remove empty lines before closing parens
     code = re.sub(r'\n\s*\n(\s*\))', r'\n\1', code)
     return code
-
 
 def remove_comments(code: str) -> str:
     """Remove comment lines to reduce output size."""
@@ -1061,3 +1081,80 @@ def remove_comments(code: str) -> str:
             line = line[:line.index(';;')].rstrip()
         result.append(line)
     return '\n'.join(result)
+
+def remove_duplicate_local_gets(code: str) -> str:
+    pat = (
+        instr_pat('local.get', r'(\$\w+)')
+        + SEP +
+        instr_pat('local.get', r'\1\b')
+    )
+    return re.sub(pat, r'local.get \1', code)
+
+def remove_overwritten_local_sets(code: str) -> str:
+    pat = (
+        instr_pat('local.set', r'(\$\w+)')
+        + SEP +
+        instr_pat('local.set', r'\1\b')
+    )
+    return re.sub(pat, r'local.set \1', code)
+
+def replace_tee_drop_with_set(code: str) -> str:
+    pat = (
+        instr_pat('local.tee', r'(\$\w+)')
+        + SEP +
+        instr_pat('drop')
+    )
+    return re.sub(pat, r'local.set \1', code)
+
+def remove_drop_after_call(code: str) -> str:
+    pat = (
+        instr_pat('call', r'(\$\w+)')
+        + SEP +
+        instr_pat('drop')
+    )
+    return re.sub(pat, r'call \1', code)
+
+def remove_zero_address_adjust_before_load(code: str) -> str:
+    pat = (
+        instr_pat('i32.const', '0')
+        + SEP +
+        instr_pat('i32.add')
+        + SEP +
+        r'\(?((i32|i64|f32|f64)\.load)\)?'
+    )
+    return re.sub(pat, r'\1', code)
+
+def remove_duplicate_store_value(code: str) -> str:
+    pat = (
+        instr_pat('local.get', r'(\$\w+)')
+        + SEP +
+        instr_pat('local.get', r'\1\b')
+        + SEP +
+        r'\(?((i32|i64|f32|f64)\.store)\)?'
+    )
+    return re.sub(pat, r'local.get \1\n\2', code)
+
+def inline_trivial_if(code: str) -> str:
+    pat = (
+        r'\(if' + SEP +
+        r'\(then' + SEP +
+        r'([\s\S]*?)' +
+        SEP + r'\)\s*\)'
+    )
+    return re.sub(pat, r'\1', code)
+
+def remove_empty_blocks(code: str) -> str:
+    code = re.sub(r'\(block\s*\)', '', code)
+    code = re.sub(r'\(loop\s*\)', '', code)
+    return code
+
+def mark_i64_high_half(code: str) -> str:
+    return re.sub(
+        instr_pat('i64.extend_i32_u') + SEP +
+        instr_pat('i64.const', '32') + SEP +
+        instr_pat('i64.shl'),
+        '(;; PACK32_HIGH ;;)',
+        code
+    )
+
+

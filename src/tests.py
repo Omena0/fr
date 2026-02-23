@@ -348,7 +348,6 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
                 py_passed = not py_skipped and normalize_line_numbers(py_msg, exp_msg)
                 vm_passed = not vm_skipped and normalize_line_numbers(vm_msg, exp_msg)
                 native_passed = not native_skipped and normalize_line_numbers(native_msg, exp_msg)
-                native_passed = native_skipped or normalize_line_numbers(native_msg, exp_msg)
                 
                 # For WASM, if no runner available, treat as pass for compile-only tests
                 if wasm_output == 'Compiled (no runner)':
@@ -416,6 +415,21 @@ def main():
     # Load configuration
     config = load_config()
 
+    # Pre-flight: verify runtime_lib.c compiles before running hundreds of
+    # tests.  A single syntax error there would cause every native test to
+    # fail with an unhelpful empty-output message.
+    runtime_src = repo_root / 'runtime' / 'runtime_lib.c'
+    runtime_dir = repo_root / 'runtime'
+    if runtime_src.exists() and config.get('native', {}).get('enabled', True):
+        check = subprocess.run(
+            ['gcc', '-fsyntax-only', '-I', str(runtime_dir), str(runtime_src)],
+            capture_output=True, text=True
+        )
+        if check.returncode != 0:
+            print(f"ERROR: runtime_lib.c has syntax errors — all native tests would fail.")
+            print(check.stderr.strip())
+            return 1
+
     # Load all test files recursively from cases/ and subdirectories
     test_files = sorted(glob.glob('cases/**/*.fr', recursive=True))
 
@@ -449,11 +463,11 @@ def main():
     vm_passed = 0
     native_passed = 0
     wasm_passed = 0
+
     python_skipped = 0
     vm_skipped = 0
     native_skipped = 0
     wasm_skipped = 0
-    mismatch_count = 0
 
     for result in results:
         if result['py_passed']:
@@ -496,14 +510,10 @@ def main():
     print("=" * 60)
     print("Test Results:")
     print("=" * 60)
-
-    print(f"Python VM: {python_passed}/{python_total} passed")
+    print(f"Py VM:  {python_passed}/{python_total} passed")
     print(f"C VM:   {vm_passed}/{vm_total} passed")
     print(f"Native: {native_passed}/{native_total} passed")
     print(f"Wasm:   {wasm_passed}/{wasm_total} passed")
-
-    if mismatch_count > 0:
-        print(f"⚠️  Runtime Mismatches: {mismatch_count}")
     print("=" * 60)
 
     all_passed = python_passed == python_total and vm_passed == vm_total and native_passed == native_total and wasm_passed == wasm_total
@@ -512,7 +522,7 @@ def main():
         return 0
     else:
         if python_passed < python_total:
-            print(f"❌ Python VM has {python_total - python_passed} failure(s)")
+            print(f"❌ Py VM has {python_total - python_passed} failure(s)")
         if vm_passed < vm_total:
             print(f"❌ C VM has {vm_total - vm_passed} failure(s)")
         if native_passed < native_total:

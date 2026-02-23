@@ -2,37 +2,35 @@ c_import include/raylib.h
 c_link lib/libraylib.a -lGL -lm -lpthread -ldl -lrt -lwayland-client -lwayland-cursor -lwayland-egl -lxkbcommon
 
 struct Paddle {
-    float x
-    float y
+    int x
+    int y
     int width
     int height
     float speed
 }
 
 struct Ball {
-    float x
-    float y
+    int x
+    int y
     float radius
     float velX
     float velY
 }
 
 Paddle createPaddle(int startX, int startY) {
-    float fx = float(startX)
-    float fy = float(startY)
-    return Paddle(fx, fy, 20, 120, 720.0)
+    return Paddle(startX, startY, 20, 120, 720.0)
 }
 
 Ball createBall(int startX, int startY) {
-    float fx = float(startX)
-    float fy = float(startY)
+    int fx = startX
+    int fy = startY
     return Ball(fx, fy, 20.0, -300.0, 100.0)
 }
 
 Paddle updatePaddle(Paddle p, int upKey, int downKey) {
     float dt = GetFrameTime()
 
-    float newY = p.y
+    int newY = p.y
     if (IsKeyDown(upKey)) {
         newY = p.y - p.speed * dt
     }
@@ -45,14 +43,15 @@ Paddle updatePaddle(Paddle p, int upKey, int downKey) {
     if (newY + p.height > 600) {
         newY = 600 - p.height
     }
-    return Paddle(p.x, newY, p.width, p.height, p.speed)
+    p.y = newY
+    return p
 }
 
 Ball updateBall(Ball b) {
     float dt = GetFrameTime()
 
-    float newX = b.x + b.velX * dt
-    float newY = b.y + b.velY * dt
+    int newX = int(b.x + b.velX * dt)
+    int newY = int(b.y + b.velY * dt)
     float newVelY = b.velY
 
     if (newY < b.radius) {
@@ -64,7 +63,10 @@ Ball updateBall(Ball b) {
         newVelY = 0.0 - newVelY
     }
 
-    return Ball(newX, newY, b.radius, b.velX, newVelY)
+    b.x = newX
+    b.y = newY
+    b.velY = newVelY
+    return b
 }
 
 Ball checkLeftPaddleCollision(Ball b, Paddle p) {
@@ -117,10 +119,10 @@ void main() {
         BeginDrawing()
         ClearBackground(bgColor)
 
-        DrawRectangle(int(leftPaddle.x), int(leftPaddle.y), leftPaddle.width, leftPaddle.height, paddleColor)
-        DrawRectangle(int(rightPaddle.x), int(rightPaddle.y), rightPaddle.width, rightPaddle.height, paddleColor)
+        DrawRectangle(leftPaddle.x, leftPaddle.y, leftPaddle.width, leftPaddle.height, paddleColor)
+        DrawRectangle(rightPaddle.x, rightPaddle.y, rightPaddle.width, rightPaddle.height, paddleColor)
 
-        DrawCircle(int(ball.x), int(ball.y), ball.radius, ballColor)
+        DrawCircle(ball.x, ball.y, ball.radius, ballColor)
 
         DrawText("Pong Game", 450, 20, 40, textColor)
         DrawText(f"Left: {leftScore}", 100, 50, 30, textColor)

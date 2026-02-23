@@ -108,27 +108,13 @@ void runtime_println_str(const char* str) {
 }
 
 void runtime_print(int64_t value) {
-    // Smart print that handles multiple types
-    // Check if value looks like a pointer (is in a valid memory range)
-    if (value > 0x100000) {
-        // Likely a pointer to a string
-        runtime_print_str((const char*)value);
-    } else {
-        // Likely a regular integer
-        runtime_print_int(value);
-    }
+    // Integer print - no longer uses pointer heuristic
+    runtime_print_int(value);
 }
 
 void runtime_println(int64_t value) {
-    // Smart println that handles multiple types
-    // Check if value looks like a pointer (is in a valid memory range)
-    if (value > 0x100000) {
-        // Likely a pointer to a string
-        runtime_println_str((const char*)value);
-    } else {
-        // Likely a regular integer
-        runtime_println_int(value);
-    }
+    // Integer println - no longer uses pointer heuristic
+    runtime_println_int(value);
 }
 
 // ============================================================================
@@ -455,26 +441,42 @@ double runtime_str_to_float(const char* str) {
 // List Operations
 // ============================================================================
 
-RuntimeList* runtime_list_new() {
+RuntimeList* runtime_list_new_capacity(int64_t capacity, int elem_type, int is_static) {
     RuntimeList* list = malloc(sizeof(RuntimeList));
     if (!list) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    list->capacity = 8;
+    if (capacity < 0) {
+        capacity = 0;
+    }
+    list->capacity = capacity;
     list->length = 0;
-    list->elem_type = -1; // Unknown type initially
-    list->items = malloc(list->capacity * sizeof(int64_t));
-    if (!list->items) {
-        fprintf(stderr, "Runtime error: out of memory\n");
-        exit(1);
+    list->elem_type = elem_type;
+    list->is_static = is_static;
+    if (capacity > 0) {
+        list->items = malloc(list->capacity * sizeof(int64_t));
+        if (!list->items) {
+            fprintf(stderr, "Runtime error: out of memory\n");
+            exit(1);
+        }
+    } else {
+        list->items = NULL;
     }
     return list;
 }
 
+RuntimeList* runtime_list_new() {
+    return runtime_list_new_capacity(8, -1, 0);
+}
+
 void runtime_list_append_int(RuntimeList* list, int64_t value) {
     if (list->length >= list->capacity) {
-        list->capacity *= 2;
+        if (list->is_static) {
+            fprintf(stderr, "Runtime error: cannot append beyond static list capacity\n");
+            exit(1);
+        }
+        list->capacity = list->capacity > 0 ? list->capacity * 2 : 8;
         list->items = realloc(list->items, list->capacity * sizeof(int64_t));
         if (!list->items) {
             fprintf(stderr, "Runtime error: out of memory\n");
@@ -566,6 +568,13 @@ void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
         index = list->length + index;
     }
 
+    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity) {
+        for (int64_t i = list->length; i < index; i++) {
+            list->items[i] = 0;
+        }
+        list->length = index + 1;
+    }
+
     if (index < 0 || index >= list->length) {
         fprintf(stderr, "Runtime error: list index out of bounds\n");
         exit(1);
@@ -578,6 +587,13 @@ void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, in
     int64_t original_index = index;
     if (index < 0) {
         index = list->length + index;
+    }
+
+    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity) {
+        for (int64_t i = list->length; i < index; i++) {
+            list->items[i] = 0;
+        }
+        list->length = index + 1;
     }
 
     if (index < 0 || index >= list->length) {
@@ -684,6 +700,92 @@ RuntimeSet* runtime_set_new() {
         exit(1);
     }
     return set;
+}
+
+// ============================================================================
+// Dict Operations (simple linear search)
+// ============================================================================
+
+static int runtime_dict_key_equals(RuntimeDictEntry entry, int64_t key, int key_type) {
+    if (entry.key_type != key_type) {
+        return 0;
+    }
+    if (key_type == 1) {
+        const char* a = (const char*)entry.key;
+        const char* b = (const char*)key;
+        if (!a || !b) {
+            return a == b;
+        }
+        return strcmp(a, b) == 0;
+    }
+    return entry.key == key;
+}
+
+RuntimeDict* runtime_dict_new() {
+    RuntimeDict* dict = malloc(sizeof(RuntimeDict));
+    if (!dict) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        exit(1);
+    }
+    dict->capacity = 8;
+    dict->length = 0;
+    dict->entries = malloc(sizeof(RuntimeDictEntry) * dict->capacity);
+    if (!dict->entries) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        exit(1);
+    }
+    return dict;
+}
+
+int64_t runtime_dict_get(RuntimeDict* dict, int64_t key, int key_type) {
+    if (!dict) {
+        fprintf(stderr, "Runtime error: null dict pointer\n");
+        exit(1);
+    }
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
+            return dict->entries[i].value;
+        }
+    }
+    fprintf(stderr, "Runtime error: key error\n");
+    exit(1);
+}
+
+void runtime_dict_set(RuntimeDict* dict, int64_t key, int key_type, int64_t value) {
+    if (!dict) {
+        fprintf(stderr, "Runtime error: null dict pointer\n");
+        exit(1);
+    }
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
+            dict->entries[i].value = value;
+            return;
+        }
+    }
+    if (dict->length >= dict->capacity) {
+        dict->capacity *= 2;
+        dict->entries = realloc(dict->entries, sizeof(RuntimeDictEntry) * dict->capacity);
+        if (!dict->entries) {
+            fprintf(stderr, "Runtime error: out of memory\n");
+            exit(1);
+        }
+    }
+    dict->entries[dict->length].key = key;
+    dict->entries[dict->length].value = value;
+    dict->entries[dict->length].key_type = key_type;
+    dict->length++;
+}
+
+int runtime_dict_contains(RuntimeDict* dict, int64_t key, int key_type) {
+    if (!dict) {
+        return 0;
+    }
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void runtime_set_add(RuntimeSet* set, int64_t value) {
@@ -1157,57 +1259,78 @@ char* runtime_list_repr(RuntimeList* list) {
         return strdup("[corrupted]");
     }
 
-    char* result = malloc(4096);
+    size_t buf_size = 256;
+    char* result = malloc(buf_size);
     if (!result) return NULL;
 
-    strcpy(result, "[");
+    size_t offset = 0;
+    offset += snprintf(result + offset, buf_size - offset, "[");
     for (int64_t i = 0; i < list->length; i++) {
-        if (i > 0) strcat(result, ", ");
+        if (i > 0) {
+            if (offset + 3 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            offset += snprintf(result + offset, buf_size - offset, ", ");
+        }
 
-        // Use type information to format correctly
+        char tmp[64];
         if (list->elem_type == 1) {
-            // String type
             const char* str = (const char*)list->items[i];
-            strcat(result, str);
+            size_t slen = strlen(str);
+            while (offset + slen + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            memcpy(result + offset, str, slen);
+            offset += slen;
+            result[offset] = '\0';
         } else if (list->elem_type == 2) {
-            // Float type - use union for type-safe punning
             union { int64_t i; double d; } pun;
             pun.i = list->items[i];
-            char tmp[32];
-            snprintf(tmp, 32, "%g", pun.d);
-            strcat(result, tmp);
+            int n = snprintf(tmp, sizeof(tmp), "%g", pun.d);
+            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            memcpy(result + offset, tmp, n);
+            offset += n;
+            result[offset] = '\0';
         } else {
-            // Integer type (or unknown)
-            char tmp[32];
-            snprintf(tmp, 32, "%ld", list->items[i]);
-            strcat(result, tmp);
+            int n = snprintf(tmp, sizeof(tmp), "%ld", list->items[i]);
+            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            memcpy(result + offset, tmp, n);
+            offset += n;
+            result[offset] = '\0';
         }
     }
-    strcat(result, "]");
+    if (offset + 2 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+    offset += snprintf(result + offset, buf_size - offset, "]");
     return result;
 }
 
 char* runtime_set_repr(RuntimeSet* set) {
-    char* result = malloc(4096);
+    size_t buf_size = 256;
+    char* result = malloc(buf_size);
     if (!result) return NULL;
 
-    strcpy(result, "{");
+    size_t offset = 0;
+    offset += snprintf(result + offset, buf_size - offset, "{");
     for (int64_t i = 0; i < set->length; i++) {
-        if (i > 0) strcat(result, ", ");
+        if (i > 0) {
+            if (offset + 3 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            offset += snprintf(result + offset, buf_size - offset, ", ");
+        }
 
-        // Use type information to format correctly
+        char tmp[64];
         if (set->elem_type == 1) {
-            // String type
             const char* str = (const char*)set->items[i];
-            strcat(result, str);
+            size_t slen = strlen(str);
+            while (offset + slen + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            memcpy(result + offset, str, slen);
+            offset += slen;
+            result[offset] = '\0';
         } else {
-            // Integer type (or unknown)
-            char tmp[32];
-            snprintf(tmp, 32, "%ld", set->items[i]);
-            strcat(result, tmp);
+            int n = snprintf(tmp, sizeof(tmp), "%ld", set->items[i]);
+            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+            memcpy(result + offset, tmp, n);
+            offset += n;
+            result[offset] = '\0';
         }
     }
-    strcat(result, "}");
+    if (offset + 2 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
+    offset += snprintf(result + offset, buf_size - offset, "}");
     return result;
 }
 
@@ -1250,9 +1373,20 @@ static FILE* fd_table[MAX_FDS] = {0};
 static int fd_counter = 0;
 
 int64_t runtime_fopen(const char* path, const char* mode) {
-    if (fd_counter >= MAX_FDS) {
-        fprintf(stderr, "Runtime error: too many open files\n");
-        return -1;
+    // Try to reuse a closed slot first
+    int slot = -1;
+    for (int i = 0; i < fd_counter; i++) {
+        if (fd_table[i] == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        if (fd_counter >= MAX_FDS) {
+            fprintf(stderr, "Runtime error: too many open files\n");
+            return -1;
+        }
+        slot = fd_counter++;
     }
     FILE* fp = fopen(path, mode);
     if (!fp) {
@@ -1260,7 +1394,7 @@ int64_t runtime_fopen(const char* path, const char* mode) {
         return -1;
     }
     int64_t handle = (int64_t)fp;
-    fd_table[fd_counter++] = fp;
+    fd_table[slot] = fp;
     return handle;
 }
 
@@ -1280,7 +1414,7 @@ char* runtime_fread(int64_t fd, int64_t size) {
     FILE* fp = (FILE*)fd;
     if (!fp) {
         fprintf(stderr, "Runtime error: invalid file descriptor\n");
-        return "";
+        return strdup("");
     }
 
     // If size is -1, read entire file
@@ -1295,7 +1429,7 @@ char* runtime_fread(int64_t fd, int64_t size) {
         char* buffer = malloc(file_size + 1);
         if (!buffer) {
             fprintf(stderr, "Runtime error: out of memory\n");
-            return "";
+            return strdup("");
         }
 
         size_t read = fread(buffer, 1, file_size, fp);
@@ -1306,7 +1440,7 @@ char* runtime_fread(int64_t fd, int64_t size) {
     char* buffer = malloc(size + 1);
     if (!buffer) {
         fprintf(stderr, "Runtime error: out of memory\n");
-        return "";
+        return strdup("");
     }
     size_t read = fread(buffer, 1, size, fp);
     buffer[read] = '\0';
@@ -1327,3 +1461,28 @@ void runtime_fclose(int64_t fd) {
     }
 }
 
+RuntimeList* runtime_list_from_array(int64_t* values, int64_t count) {
+    RuntimeList* list = malloc(sizeof(RuntimeList));
+    if (!list) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        exit(1);
+    }
+    
+    // Allocate exact capacity needed
+    list->capacity = count > 8 ? count : 8;
+    list->length = count;
+    list->elem_type = -1; // Unknown type
+    
+    list->items = malloc(list->capacity * sizeof(int64_t));
+    if (!list->items) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        exit(1);
+    }
+    
+    // Copy values
+    if (count > 0) {
+        memcpy(list->items, values, count * sizeof(int64_t));
+    }
+    
+    return list;
+}

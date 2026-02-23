@@ -7,6 +7,37 @@ including only the functions that are actually used by the compiled module.
 
 from typing import Set, Dict, List, Optional
 import json
+import gzip
+import base64
+import re
+import subprocess
+import shutil
+import os
+import sys
+
+def minify(code: str) -> str:
+    """Minify JS using terser if available, otherwise simple regex"""
+    # Try using terser from node_modules or PATH
+    terser_path = shutil.which('terser')
+    if not terser_path:
+        # Check local node_modules
+        local_terser = os.path.join(os.getcwd(), 'node_modules', '.bin', 'terser')
+        if os.path.exists(local_terser):
+            terser_path = local_terser
+
+    if not terser_path:
+        return code
+
+    p = subprocess.Popen(
+        [terser_path, '--compress', '--mangle'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    stdout, stderr = p.communicate(input=code)
+
+    return stdout
 
 # All available runtime functions that can be imported from JS
 # Organized by category, excluding file I/O, sockets, and multiprocessing
@@ -70,6 +101,17 @@ JS_RUNTIME_FUNCTIONS = {
             return allocString(s);
         }''',
         'wasm_signature': '(param i64) (result i32 i32)',
+    },
+    'runtime_error': {
+        'signature': '(type_ptr, type_len, msg_ptr, msg_len, line) => {}',
+        'implementation': '''(type_ptr, type_len, msg_ptr, msg_len, line) => {
+            const type = type_len > 0 ? readString(type_ptr, type_len) : "RuntimeError";
+            const msg = readString(msg_ptr, msg_len);
+            const error = new Error(`${type}: ${msg} (line ${line})`);
+            console.error(error);
+            throw error;
+        }''',
+        'wasm_signature': '(param i32 i32 i32 i32 i32)',
     },
     'f64_to_str': {
         'signature': '(value) => [ptr, len]',
@@ -221,6 +263,22 @@ JS_RUNTIME_FUNCTIONS = {
             return id;
         }''',
         'wasm_signature': '(result i32)',
+    },
+    'list_from_array': {
+        'signature': '(ptr, count) => listId',
+        'implementation': '''(ptr, count) => {
+            const id = lists.size;
+            const list = [];
+            const cnt = Number(count);
+            const mem = new BigInt64Array(memory.buffer);
+            const start = ptr / 8;
+            for (let i = 0; i < cnt; i++) {
+                list.push(mem[start + i]);
+            }
+            lists.set(id, list);
+            return id;
+        }''',
+        'wasm_signature': '(param i32 i64) (result i32)',
     },
     'list_append': {
         'signature': '(listId, value) => listId',
@@ -481,10 +539,16 @@ JS_WEB_FUNCTIONS = {
         'signature': '(tagPtr, tagLen) => elementHandle',
         'implementation': '''(tagPtr, tagLen) => {
             const tag = readString(tagPtr, tagLen);
-            const elem = document.createElement(tag);
-            const id = domElements.size + 1;
-            domElements.set(id, elem);
-            return id;
+            console.log(`dom_create: ptr=${tagPtr}, len=${tagLen}, tag="${tag}"`);
+            try {
+                const elem = document.createElement(tag);
+                const id = domElements.size + 1;
+                domElements.set(id, elem);
+                return id;
+            } catch (e) {
+                console.error(`dom_create failed for tag "${tag}" (ptr=${tagPtr}, len=${tagLen})`);
+                throw e;
+            }
         }''',
         'wasm_signature': '(param i32 i32) (result i32)',
         'category': 'dom',
@@ -839,17 +903,17 @@ JS_WEB_FUNCTIONS = {
             // Get the callback function name from metadata
             const callbacks = metadata.callbacks || [];
             if (callbacks.length === 0) return 0;
-            
+
             const funcName = callbacks[0];
             const func = wasmInstance.exports[funcName];
             if (!func) return 0;
-            
+
             // Convert i32 args to BigInt for i64 WASM parameters
             // (WASM functions with i64 parameters expect BigInt)
-            const convertedArgs = args.map(arg => 
+            const convertedArgs = args.map(arg =>
                 typeof arg === 'number' ? BigInt(arg) : arg
             );
-            
+
             // Call the callback with converted arguments
             return setTimeout(() => {
                 try {
@@ -868,14 +932,14 @@ JS_WEB_FUNCTIONS = {
             // Get the callback function name from metadata
             const callbacks = metadata.callbacks || [];
             if (callbacks.length === 0) return 0;
-            
+
             const funcName = callbacks[0];
             const func = wasmInstance.exports[funcName];
             if (!func) return 0;
-            
+
             // Convert i32 args to BigInt for i64 WASM parameters
             // (WASM functions with i64 parameters expect BigInt)
-            const convertedArgs = args.map(arg => 
+            const convertedArgs = args.map(arg =>
                 typeof arg === 'number' ? BigInt(arg) : arg
             );
 
@@ -885,7 +949,7 @@ JS_WEB_FUNCTIONS = {
             // Drive the catch-up loop frequently without starving the event loop.
             const driverInterval = Math.max(1, Math.min(16, targetInterval));
             let next = performance.now() + targetInterval;
-            
+
             const handler = () => {
                 const now = performance.now();
                 let iterations = 0;
@@ -1167,13 +1231,14 @@ def generate_js_glue(
     Returns:
         JavaScript module code as a string
     """
-    # Always include core runtime functions because the WASM module imports them unconditionally
-    used_functions = {**JS_RUNTIME_FUNCTIONS}
+    # Filter functions based on used_imports
+    # Only include functions that are actually imported by the WASM module
+    used_functions = {}
+    all_available_functions = {**JS_RUNTIME_FUNCTIONS, **JS_WEB_FUNCTIONS}
 
-    # Add only the web-specific functions that the module actually needs
-    for name, func in JS_WEB_FUNCTIONS.items():
-        if name in used_imports:
-            used_functions[name] = func
+    for name in used_imports:
+        if name in all_available_functions:
+            used_functions[name] = all_available_functions[name]
 
     # Check which categories are used
     uses_dom = any(f.get('category') == 'dom' for f in used_functions.values())
@@ -1363,37 +1428,96 @@ def generate_js_glue(
 
     return '\n'.join(js_lines)
 
-def generate_html_template(wasm_filename: str, js_glue_code: str, wasm_base64: str = "", title: str = "", metadata: dict|None = None) -> str:
-    """Generate an HTML file with inlined JavaScript glue code and optionally embedded WASM."""
-    # Serialize metadata as JSON
-    metadata_json = json.dumps(metadata) if metadata else '{}'
-    
-    # If WASM is provided as base64, use it; otherwise load from file
-    if wasm_base64:
-        wasm_loader = f'''            const wasmBase64 = '{wasm_base64}';
-            const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
-            const wasmBuffer = wasmBytes.buffer;
-            const wasmPath = null; // Not needed since we have bytes
-            
-            // Set metadata before loading module
-            metadata = {metadata_json};
-            
-            const fr = await loadFrModuleFromBytes(wasmBuffer, {{
-                outputElementId: 'output',
-                autoFlush: true
-            }});'''
-    else:
-        wasm_loader = f'''            const wasmPath = './{wasm_filename}';
-            
-            // Set metadata before loading module
-            metadata = {metadata_json};
-            
-            const fr = await loadFrModule(wasmPath, {{
-                outputElementId: 'output',
-                autoFlush: true
-            }});'''
+def minify_js(code: str) -> str:
+    """Minify JS using terser if available, otherwise simple regex"""
+    # Try using terser from node_modules or PATH
+    terser_path = shutil.which('terser')
+    if not terser_path:
+        # Check local node_modules
+        local_terser = os.path.join(os.getcwd(), 'node_modules', '.bin', 'terser')
+        if os.path.exists(local_terser):
+            terser_path = local_terser
 
-    return f'''<!DOCTYPE html>
+    if terser_path:
+        try:
+            p = subprocess.Popen(
+                [terser_path, '--compress', '--mangle'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = p.communicate(input=code)
+            if p.returncode == 0:
+                return stdout
+        except Exception:
+            pass
+
+    # Fallback to regex minification
+    # Remove single-line comments
+    code = re.sub(r'//.*', '', code)
+    # Remove multi-line comments
+    code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
+    # Remove whitespace around punctuation
+    code = re.sub(r'\s*([\{\}\(\)\[\];,=:\?])\s*', r'\1', code)
+    # Collapse whitespace
+    code = re.sub(r'\s+', ' ', code)
+    return code.strip()
+
+def generate_html_template(js_glue_code: str, wasm_base64: str = "", title: str = "", metadata: dict|None = None) -> str:
+    """Generate an HTML file with inlined JavaScript glue code and optionally embedded WASM."""
+    # Compress metadata
+    metadata_json = json.dumps(metadata) if metadata else '{}'
+    metadata_compressed = gzip.compress(metadata_json.encode('utf-8'))
+    metadata_base64 = base64.b64encode(metadata_compressed).decode('ascii')
+
+    wasm_loader = f'''            const wasmBase64 = '{wasm_base64}';
+        const wasmCompressed = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
+
+        // Decompress WASM
+        const dsWasm = new DecompressionStream('gzip');
+        const writerWasm = dsWasm.writable.getWriter();
+        writerWasm.write(wasmCompressed);
+        writerWasm.close();
+        const responseWasm = new Response(dsWasm.readable);
+        const wasmBuffer = await responseWasm.arrayBuffer();
+
+        // Decompress metadata
+        const metadataBase64 = '{metadata_base64}';
+        const metadataBytes = Uint8Array.from(atob(metadataBase64), c => c.charCodeAt(0));
+        const ds = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        writer.write(metadataBytes);
+        writer.close();
+        const response = new Response(ds.readable);
+        metadata = await response.json();
+
+        const fr = await loadFrModuleFromBytes(wasmBuffer, {{
+            outputElementId: 'output',
+            autoFlush: true
+        }});'''
+
+    js = f'''{js_glue_code}
+    // Load and run Fr WASM module
+    (async function() {{
+        const output = document.getElementById('body');
+        try {{
+    {wasm_loader}
+
+            const result = fr.run();
+            if (!result.success) {{
+                output.innerHTML += '<span class="error">\\nProgram exited with code ' + result.exitCode + '</span>';
+            }}
+        }} catch (e) {{
+            output.innerHTML += '<span class="error">Error: ' + e.message + '</span>';
+            console.error(e);
+        }}
+    }})();'''
+
+    if '-O0' not in sys.argv:
+        js = minify_js(js).strip()
+
+    template = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1402,29 +1526,16 @@ def generate_html_template(wasm_filename: str, js_glue_code: str, wasm_base64: s
 <body id="body">
     <div id="output"></div>
     <script>
-// Fr WASM Runtime - Auto-generated JavaScript glue
-// Only includes functions used by this specific module
-{js_glue_code}
-
-// Load and run Fr WASM module
-(async function() {{
-    const output = document.getElementById('body');
-    try {{
-{wasm_loader}
-
-        const result = fr.run();
-        if (!result.success) {{
-            output.innerHTML += '<span class="error">\\nProgram exited with code ' + result.exitCode + '</span>';
-        }}
-    }} catch (e) {{
-        output.innerHTML += '<span class="error">Error: ' + e.message + '</span>';
-        console.error(e);
-    }}
-}})();
+{js}
     </script>
 </body>
 </html>
 '''
+
+    if '-O0' in sys.argv:
+        return template
+
+    return ''.join([line.strip() for line in template.splitlines()])
 
 def get_all_import_names() -> Set[str]:
     """Get all available import function names."""

@@ -1,6 +1,6 @@
 from builtin_funcs import funcs
 from parser import parse_expr, get_type, vars
-from typing import Any, cast
+from typing import Any, cast, Callable
 import sys
 import threading
 
@@ -45,6 +45,40 @@ def set_error_char(char: int):
     global _runtime_current_char
     _runtime_current_char = char
 
+def _set_error_char_for_operator(op: str):
+    """Set error char position based on operator location in current source line"""
+    ctx = get_runtime_context()
+    if not ctx['source'] or ctx['line'] <= 0:
+        return
+
+    lines = ctx['source'].split('\n')
+    if not (0 < ctx['line'] <= len(lines)):
+        return
+
+    source_line = lines[ctx['line'] - 1]
+    expanded_line = source_line.expandtabs(4)
+
+    # Prefer spaced operator to avoid matching in other contexts
+    op_index = expanded_line.find(f" {op} ")
+    if op_index != -1:
+        op_index += 1  # move to actual operator
+    else:
+        op_index = expanded_line.find(op)
+
+    if op_index == -1:
+        return
+
+    # For division/modulo, point at the RHS token if possible
+    if op in ('/', '%'):
+        idx = op_index + 1
+        while idx < len(expanded_line) and expanded_line[idx] == ' ':
+            idx += 1
+        if idx < len(expanded_line):
+            set_error_char(idx)
+            return
+
+    set_error_char(op_index)
+
 def format_runtime_exception(e: Exception) -> str:
     """Format a runtime exception similar to parse-time exceptions"""
     ctx = get_runtime_context()
@@ -84,6 +118,29 @@ sys.setrecursionlimit(1000000000)
 sys.set_int_max_str_digits(100000000)
 
 runtime = False
+eval_timeout_checker: Callable[[], None] | None = None
+
+class StaticList(list):
+    def __init__(self, capacity: int, iterable=None):
+        super().__init__(iterable or [])
+        self.capacity = capacity
+
+    def append(self, value):
+        if len(self) >= self.capacity:
+            raise RuntimeError("Cannot append beyond static list capacity")
+        return super().append(value)
+
+    def __setitem__(self, index, value):
+        if isinstance(index, int):
+            if index < 0:
+                index = len(self) + index
+            if index < 0 or index >= self.capacity:
+                raise RuntimeError(f"Index {index} out of range for static list capacity {self.capacity}")
+            if index >= len(self):
+                super().extend([None] * (index - len(self)))
+                super().append(value)
+                return
+        return super().__setitem__(index, value)
 
 AstType = list[dict[str, Any]]
 
@@ -193,22 +250,22 @@ def _preserve_struct_definitions() -> dict:
 def _bind_function_args(func_args: list, arg_values: list):
     """Bind function arguments to variables in the current scope"""
     from parser import get_type
-    
+
     # Check if last argument is variadic (type ends with * or **)
     has_varargs = False
     if func_args and isinstance(func_args[-1], tuple) and len(func_args[-1]) == 2:
         _, last_type = func_args[-1]
         has_varargs = isinstance(last_type, str) and (last_type.endswith('*') or last_type.endswith('**'))
-    
+
     num_regular_args = len(func_args) - (1 if has_varargs else 0)
-    
+
     # Bind regular arguments
     for i, func_arg in enumerate(func_args[:num_regular_args]):
         if i >= len(arg_values):
             break
-            
+
         arg_value = arg_values[i]
-        
+
         # Handle both tuple (name, type) and legacy string formats
         if isinstance(func_arg, tuple) and len(func_arg) == 2:
             arg_name, arg_type = func_arg
@@ -216,17 +273,25 @@ def _bind_function_args(func_args: list, arg_values: list):
             arg_name = func_arg
         else:
             continue
-        
+
         if isinstance(arg_name, str):
             vars[arg_name] = {
                 "type": get_type(arg_value),
                 "value": arg_value
             }
-    
+
     # Bind variadic argument (collect remaining args into a list)
     if has_varargs and func_args:
         vararg_name, _ = func_args[-1]
-        rest_values = list(arg_values[num_regular_args:])
+
+        # If the parser already packed the varargs into a list (which it does now),
+        # we should use that list directly instead of wrapping it again.
+        # We check if we have exactly one extra argument and it is a list.
+        if len(arg_values) == num_regular_args + 1 and isinstance(arg_values[-1], list):
+            rest_values = arg_values[-1]
+        else:
+            rest_values = list(arg_values[num_regular_args:])
+
         if isinstance(vararg_name, str):
             vars[vararg_name] = {
                 "type": "list",
@@ -249,6 +314,19 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
 
     func = funcs[name]
 
+    def _memo_key(value: Any):
+        if isinstance(value, dict):
+            if 'value' in value:
+                return _memo_key(value['value'])
+            return repr(value)
+        if isinstance(value, list):
+            return tuple(_memo_key(v) for v in value)
+        if isinstance(value, tuple):
+            return tuple(_memo_key(v) for v in value)
+        if isinstance(value, (int, float, str, bool)) or value is None:
+            return value
+        return repr(value)
+
     if not runtime and not func.get('can_eval', True):
         raise SyntaxError(f'Cannot eval function {name} at runtime')
 
@@ -256,6 +334,25 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
 
     # Process all arguments to extract their values
     processed_args = [_process_function_arg(arg, old_vars) for arg in args]
+
+    # Parse-time memoization for const functions (stores into parser cache)
+    func_mods = func.get('mods', []) if isinstance(func, dict) else []
+    is_const = isinstance(func_mods, list) and 'const' in func_mods
+    if not runtime and is_const and func.get('type') == 'func':
+        try:
+            from parser import _eval_cache_key, _eval_cache
+            cache_key = _eval_cache_key(name, [{"value": v} for v in processed_args])
+            if cache_key in _eval_cache:
+                return _eval_cache[cache_key]
+        except Exception:
+            pass
+
+    # Parse-time memo table lookup for timed-out const functions
+    memo_table = func.get('memo_table') if isinstance(func, dict) else None
+    if memo_table and isinstance(memo_table, dict):
+        memo_key = tuple(_memo_key(arg) for arg in processed_args)
+        if memo_key in memo_table:
+            return memo_table[memo_key]
 
     # Only notify debugger for user-defined functions (not built-ins)
     is_builtin = func['type'] == NODE_TYPE_BUILTIN
@@ -289,6 +386,15 @@ def run_func(name: str, args, level=0) -> int|float|bool|str|None|dict|list|Any:
 
         out = run_scope(cast(AstType, func_body), level+1)
 
+    # Store parse-time memoization result for const functions
+    if not runtime and is_const and func.get('type') == 'func':
+        try:
+            from parser import _eval_cache_key, _eval_cache
+            cache_key = _eval_cache_key(name, [{"value": v} for v in processed_args])
+            _eval_cache[cache_key] = out
+        except Exception:
+            pass
+
     vars = old_vars
     if not is_builtin:
         _current_runtime_vars = vars  # Only restore if we changed it
@@ -306,7 +412,13 @@ class CompiletimeEvalException(Exception): ...
 
 def _get_indexed_value(target: Any, index: Any) -> Any:
     """Get value from target at index, handling various types"""
-    # Ensure index is numeric
+    if isinstance(target, dict):
+        try:
+            return target[index]
+        except KeyError as e:
+            raise RuntimeError(f"Key error: {index}") from e
+
+    # Ensure index is numeric for list/string
     if not isinstance(index, int):
         index = ensure_int(index, "Index")
 
@@ -353,22 +465,22 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
 def _handle_list_indexing(node: dict) -> Any:
     """Handle list/string indexing: arr[index]"""
     global _runtime_current_line
-    
+
     # Update current line if this node has line info
     if 'line' in node:
         _runtime_current_line = node['line']
-    
+
     target = eval_expr_node(node['value'])
     index = eval_expr_node(node['slice'])
-    
+
     # Extract value if index is still a dict
     index = extract_value(index)
-    
+
     # Handle variable references
     if isinstance(target, str) and target in vars:
         target_val = vars[target].get('value')
         return _get_indexed_value(target_val, index)
-    
+
     return _get_indexed_value(target, index)
 
 def _handle_field_access(node: dict) -> Any:
@@ -445,6 +557,9 @@ def _handle_unary_op(node: dict) -> Any:
 def eval_expr_node(node) -> int|float|bool|str|None|Any:
     from parser import get_type
 
+    if not runtime and eval_timeout_checker:
+        eval_timeout_checker()
+
     if not isinstance(node, dict):
         return node
 
@@ -475,6 +590,7 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
         # At parse time, if variable not found, return the node unchanged
         # This prevents treating undefined variables as string literals
         return value if runtime else node
+
     # Function call (from parse_expr - has 'func' key)
     # OR call from f-string expansion (has 'name' key)
     if 'func' in node or ('name' in node and 'type' in node and node['type'] == 'call'):
@@ -540,7 +656,34 @@ def eval_expr_node(node) -> int|float|bool|str|None|Any:
             func_id = node.get('name')
 
         if isinstance(func_id, str):
-            return run_func(func_id, new_args)
+            # Parse-time memoization for const calls before runtime execution
+            if not runtime:
+                try:
+                    from parser import _eval_cache_key, _eval_cache, funcs as parser_funcs
+                    func_info = parser_funcs.get(func_id)
+                    func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
+                    if isinstance(func_mods, list) and 'const' in func_mods:
+                        cache_key = _eval_cache_key(func_id, new_args)
+                        if cache_key in _eval_cache:
+                            return _eval_cache[cache_key]
+                except Exception:
+                    pass
+
+            result = run_func(func_id, new_args)
+
+            # Memoize const function results during parse-time evaluation
+            if not runtime:
+                try:
+                    from parser import _eval_cache_key, _eval_cache, funcs as parser_funcs
+                    func_info = parser_funcs.get(func_id)
+                    func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
+                    if isinstance(func_mods, list) and 'const' in func_mods:
+                        cache_key = _eval_cache_key(func_id, new_args)
+                        _eval_cache[cache_key] = result
+                except Exception:
+                    pass
+
+            return result
         raise RuntimeError(f"Invalid function call: {func}")
 
     # Binary expression (left op right)
@@ -625,15 +768,27 @@ def eval_expr_calc(left, op, right):
     elif op in ['Mult', '*']:
         return left * right
     elif op in ['Div', '/']:
+        if isinstance(right, (int, float, bool)) and right == 0:
+            _set_error_char_for_operator('/')
+            if isinstance(left, float) or isinstance(right, float):
+                raise ZeroDivisionError('float division by zero')
+            raise ZeroDivisionError('division by zero')
         return left / right
     elif op in ['Pow', '**']:
         return left** right
     elif op in ['Mod', '%']:
+        if isinstance(right, (int, float, bool)) and right == 0:
+            _set_error_char_for_operator('%')
+            if isinstance(left, float) or isinstance(right, float):
+                raise ZeroDivisionError('float modulo')
+            raise ZeroDivisionError('integer division or modulo by zero')
         return left % right
     else:
         raise RuntimeError(f'Invalid operator: {op}')
 
 def eval_expr(expr, level=0) -> int|float|bool|str|None:
+    if not runtime and eval_timeout_checker:
+        eval_timeout_checker()
     # Handle non-dict expressions
     if not isinstance(expr, dict):
         if isinstance(expr, str) and runtime:
@@ -646,7 +801,7 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
 
     # Delegate to eval_expr_node if it's a value node
     if 'op' not in expr and 'ops' not in expr and (
-        'id' in expr or 'func' in expr or 'left' in expr or 
+        'id' in expr or 'func' in expr or 'left' in expr or
         'value' in expr or 'type' in expr
     ):
         return eval_expr_node(expr)
@@ -674,6 +829,8 @@ def eval_expr(expr, level=0) -> int|float|bool|str|None:
 
     # Evaluate comparison/operation chain
     for op, comp in zip(ops, comps):
+        if not runtime and eval_timeout_checker:
+            eval_timeout_checker()
         comp = eval_expr_node(comp)
 
         # Resolve variable references
@@ -710,7 +867,7 @@ def _execute_node_function(node: dict, level: int):
     """Handle function definition node"""
     if level >= 1:
         raise RuntimeError('Non-global level function declaration not allowed.')
-    
+
     funcs[node['name']] = {
         "type": "func",
         "args": node['args'],
@@ -731,13 +888,13 @@ def _execute_node_py_import(node: dict):
     module_name = node.get('module', '')
     alias = node.get('alias')
     name = node.get('name')
-    
+
     if not module_name:
         return
-    
+
     # Call the py_import builtin to import the module
     run_func('py_import', [module_name])
-    
+
     # Track the import for alias resolution
     if name:
         # "from module py_import name" or "from module py_import name as alias"
@@ -759,9 +916,9 @@ def _execute_node_var(node: dict):
     """Handle variable declaration node"""
     from parser import cast_value
     import copy
-    
+
     value = cast_value(node['value'], node['value_type'])
-    
+
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
         # Check if it's a set/list literal that needs evaluation
@@ -774,29 +931,44 @@ def _execute_node_var(node: dict):
             value = eval_expr_node(value)
         else:
             value = value['value']
-    
+
+    # Instantiate static list if requested
+    if node.get('list_static') and node.get('list_capacity') is not None:
+        if isinstance(value, list) and len(value) == 0:
+            value = StaticList(node['list_capacity'])
+        else:
+            raise RuntimeError('Static lists must be initialized with an empty list literal []')
+
     # Make a deep copy of mutable objects to avoid mutating the AST
-    if isinstance(value, (list, dict, set)):
+    if isinstance(value, (list, dict, set)) and not isinstance(value, StaticList):
         value = copy.deepcopy(value)
 
     vars[node['name']] = {
         "type": node['value_type'],
         "value": value
     }
+    if node.get('list_static') and node.get('list_capacity') is not None:
+        vars[node['name']]['list_capacity'] = node.get('list_capacity')
+        vars[node['name']]['list_static'] = True
 
 def _execute_node_index_assign(node: dict):
     """Handle array/list index assignment: arr[i] = value"""
     target_name = node['target']
     if target_name not in vars:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
-    
+
     target = vars[target_name]['value']
     index = ensure_int(eval_expr(node['index']), "Index")
     value = eval_expr(node['value'])
-    
+
     if isinstance(target, list):
-        if index < 0 or index >= len(target):
-            raise RuntimeError(f"Index {index} out of range for list of length {len(target)}")
+        if isinstance(target, StaticList):
+            target[index] = value
+        else:
+            if index < 0 or index >= len(target):
+                raise RuntimeError(f"Index {index} out of range for list of length {len(target)}")
+            target[index] = value
+    elif isinstance(target, dict):
         target[index] = value
     else:
         raise RuntimeError(f"Cannot index into type {type(target).__name__}")
@@ -804,7 +976,7 @@ def _execute_node_index_assign(node: dict):
 def _execute_node_field_assign(node: dict):
     """Handle struct field assignment: obj.field = value"""
     target_name = node['target']
-    
+
     # Check if it's a Python module import alias
     if target_name in py_imports:
         # Setting attribute on a Python module
@@ -814,29 +986,29 @@ def _execute_node_field_assign(node: dict):
         import sys
         import_info = py_imports[target_name]
         module_name = import_info['module']
-        
+
         # Import the module to get reference
         if module_name not in sys.modules:
             __import__(module_name)
         module = sys.modules[module_name]
         setattr(module, field_name, value)
         return
-    
+
     if target_name not in vars:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
-    
+
     target = vars[target_name]['value']
     target_type = vars[target_name]['type']
     field_name = node['field']
     value = eval_expr(node['value'])
-    
+
     # Handle pyobject types using py_setattr
     if target_type in ('pyobject', 'pyobj'):
         from builtin_funcs import funcs as builtin_funcs
         py_setattr_func = cast(Any, builtin_funcs['py_setattr']['func'])
         py_setattr_func(target, field_name, value)
         return
-    
+
     if isinstance(target, dict) and field_name in target:
         target[field_name] = value
     else:
@@ -884,8 +1056,10 @@ def _execute_node_for(node: dict, level: int):
     start_val = ensure_int(eval_expr(node['start']), "Start value")
     end_val = ensure_int(eval_expr(node['end']), "End value")
     step_val = ensure_int(eval_expr(node.get('step', 1)), "Step value") if 'step' in node else 1
-    
+
     for i in range(start_val, end_val, step_val):
+        if not runtime and eval_timeout_checker:
+            eval_timeout_checker()
         vars[node['var']] = {"type": "int", "value": i}
         try:
             run_scope(node['scope'], level+1)
@@ -900,15 +1074,17 @@ def _execute_node_for_in(node: dict, level: int):
     """Handle for-in loop (iterate over list/string)"""
     iterable_expr = node['iterable']
     iterable = eval_expr_node(iterable_expr) if isinstance(iterable_expr, dict) else iterable_expr
-    
+
     # Handle variable references
     if isinstance(iterable, str) and iterable in vars:
         iterable = vars[iterable]['value']
-    
+
     if not isinstance(iterable, (list, str)):
         raise RuntimeError(f'Cannot iterate over non-iterable type: {type(iterable).__name__}')
-    
+
     for item in iterable:
+        if not runtime and eval_timeout_checker:
+            eval_timeout_checker()
         vars[node['var']] = {"type": get_type(item), "value": item}
         try:
             run_scope(node['scope'], level+1)
@@ -922,6 +1098,8 @@ def _execute_node_for_in(node: dict, level: int):
 def _execute_node_while(node: dict):
     """Handle while loop"""
     while eval_expr(node['condition']):
+        if not runtime and eval_timeout_checker:
+            eval_timeout_checker()
         try:
             run_scope(node['scope'])
         except (BreakException, ContinueException) as e:
@@ -959,18 +1137,18 @@ def _execute_node_try(node: dict, level: int) -> Any:
 def _execute_node_raise(node: dict):
     """Handle raise statement"""
     global _runtime_current_char
-    
+
     exc_type = node.get('exc_type')
     message = node.get('message', '')
-    
+
     # Update character position for error reporting
     if 'char' in node:
         _runtime_current_char = node['char']
-    
+
     if not exc_type:
         # Bare raise - re-raise current exception
         raise
-    
+
     # Map exception type string to Python exception class
     exc_classes = {
         'ZeroDivisionError': ZeroDivisionError,
@@ -983,12 +1161,12 @@ def _execute_node_raise(node: dict):
         'AssertionError': AssertionError,
         'Exception': Exception,
     }
-    
+
     exc_class = exc_classes.get(exc_type, RuntimeError)
-    
+
     # Include exception type in message for better error reporting
     full_message = f"[{exc_type}] {message}" if message else f"[{exc_type}]"
-    
+
     raise exc_class(full_message)
 
 def run_scope(ast: AstType, level=0):
@@ -997,12 +1175,14 @@ def run_scope(ast: AstType, level=0):
     result = None
 
     for idx, node in enumerate(ast):
+        if not runtime and eval_timeout_checker:
+            eval_timeout_checker()
         # Update current line for error context
         if isinstance(node, dict):
             _runtime_current_line = node.get('line', idx + 1)
         else:
             _runtime_current_line = idx + 1
-            
+
         if debug_runtime := get_debug_runtime():
             debug_runtime.notify_line(_runtime_current_line)
 
@@ -1081,12 +1261,12 @@ def run(ast:AstType, file:str='', source:str=''):
     with _runtime_lock:
         global vars, runtime, funcs, py_imports, _current_runtime_vars
         global _runtime_file, _runtime_source, _runtime_current_func
-        
+
         # Initialize runtime context for error formatting
         _runtime_file = file
         _runtime_source = source
         _runtime_current_func = '<module>'
-        
+
         runtime = True
         # Reset vars to clear any state from previous runs (critical for parallel test execution)
         vars.clear()
@@ -1096,7 +1276,7 @@ def run(ast:AstType, file:str='', source:str=''):
         # Reset funcs to only include builtin functions (remove user-defined functions from previous runs)
         # Remove any functions that are not in the original builtin set
         # BUT keep C-imported functions (they are defined in c_import statements)
-        user_func_names = [name for name in funcs.keys() 
+        user_func_names = [name for name in funcs.keys()
                           if name not in builtin_func_names and funcs[name].get('type') != 'c_function']
         for name in user_func_names:
             del funcs[name]
@@ -1110,6 +1290,7 @@ def run(ast:AstType, file:str='', source:str=''):
         # If main returns an integer, use it as the exit code
         if isinstance(exit_code, int):
             sys.exit(exit_code)
+
 __all__ = [
     'run',
     'eval_expr',

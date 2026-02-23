@@ -1,0 +1,12 @@
+// !7
+
+struct Box {
+    int v
+}
+
+int main() {
+    Box b = Box(7)
+    Box c = b
+    println(c.v)
+    return 0
+}

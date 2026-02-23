@@ -1,5 +1,3 @@
-import random
-import string
 
 class InputStream:
     def __init__(self, text:str, parent_stream=None, offset_in_parent:int=0):
@@ -221,9 +219,10 @@ def strip_all(all:list[str]):
     return [i.strip() for i in all]
 
 def split_multi(text:str, seps:str, maxsplit:int=-1):
-    sep = '.'
-    while sep in text:
-        sep += random.choice(string.ascii_letters+'0123456789')
+    # Use a Unicode private-use character as separator (cannot appear in source)
+    sep = '\x00'
+    if sep in text:
+        sep = '\ufdd0'
 
     for s in seps:
         text = text.replace(s, sep)

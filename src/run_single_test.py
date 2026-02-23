@@ -27,18 +27,40 @@ from native import compile as compile_to_native
 
 RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
 RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
+RUNTIME_HDR = RUNTIME_DIR / 'runtime_lib.h'
 RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
 RUNTIME_OBJ = Path(tempfile.gettempdir()) / 'frscript_runtime_lib.o'
 
 def ensure_runtime_object():
-    """Compile runtime_lib.c to an object file and reuse it across tests."""
+    """Compile runtime_lib.c to an object file and reuse it across tests.
+
+    Invalidates the cached object when either the .c or .h file is newer.
+    Runs a syntax-only pre-check first so that a broken runtime_lib.c
+    produces a clear error message instead of silently failing every native
+    test with an empty output string.
+    """
     src_mtime = RUNTIME_SRC.stat().st_mtime
+    hdr_mtime = RUNTIME_HDR.stat().st_mtime if RUNTIME_HDR.exists() else 0
+    newest = max(src_mtime, hdr_mtime)
+
     if RUNTIME_OBJ.exists():
         try:
-            if RUNTIME_OBJ.stat().st_mtime >= src_mtime:
+            if RUNTIME_OBJ.stat().st_mtime >= newest:
                 return str(RUNTIME_OBJ)
         except OSError:
             pass
+
+    # Syntax pre-check: catch broken C source early with clear diagnostics
+    syntax_cmd = [
+        'gcc', '-fsyntax-only',
+        '-I', RUNTIME_INCLUDE_DIR,
+        str(RUNTIME_SRC)
+    ]
+    syntax_result = subprocess.run(syntax_cmd, capture_output=True, text=True)
+    if syntax_result.returncode != 0:
+        raise RuntimeError(
+            f'runtime_lib.c has syntax errors:\n{syntax_result.stderr.strip()}'
+        )
 
     tmp_obj = RUNTIME_OBJ.with_suffix('.o.tmp')
     compile_cmd = [
@@ -306,13 +328,10 @@ def main():
             py_output = string_io.getvalue().strip()
         except Exception as e:
             py_output = None
-            # Format runtime errors properly
-            if isinstance(e, RuntimeError):
-                formatted_error = format_runtime_exception(e)
-                # Extract the message in ?line:message format
-                py_error = extract_error_message(formatted_error)
-            else:
-                py_error = str(e)
+            # Format runtime errors properly with location info
+            formatted_error = format_runtime_exception(e)
+            # Extract the message in ?line:message format
+            py_error = extract_error_message(formatted_error)
         finally:
             sys.stdout = old_stdout
     else:

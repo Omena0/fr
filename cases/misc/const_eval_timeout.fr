@@ -1,0 +1,14 @@
+// !199990000
+#pragma eval_timeout 0
+
+const int slow_sum(int n) {
+    int s = 0
+    for (i, n) {
+        s += i
+    }
+    return s
+}
+
+void main() {
+    println(slow_sum(20000))
+}

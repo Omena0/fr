@@ -7,11 +7,31 @@ import sys
 import threading
 import os
 import re
+import time
+import signal
 
 AstType = list[dict[str, Any]]
 VarType = dict[str, dict[str, Any]]
 
+
 # Base types
+
+# Parse-time evaluation cache and timeout tracking
+_eval_cache: dict[tuple[str, tuple[Any, ...]], Any] = {}
+_eval_failed_cache: set[tuple[str, tuple[Any, ...]]] = set()
+_eval_timeout_funcs: set[str] = set()
+_runtime_call_funcs: set[str] = set()
+_eval_deadline: float | None = None
+
+I64_MIN = -(2 ** 63)
+I64_MAX = (2 ** 63) - 1
+
+def _fits_i64(value: int) -> bool:
+    return I64_MIN <= value <= I64_MAX
+
+def _is_large_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and not _fits_i64(value)
+
 types = ['bool', 'int', 'float', 'string', 'str', 'bytes', 'set', 'list', 'dict', 'pyobject', 'pyobj', 'any']
 
 # Const: Value will not change and cannot be changed
@@ -34,6 +54,8 @@ _imported_files: set[str] = set()
 
 # Track if #pragma no_eval is active - disables constant evaluation at parse time
 disable_eval: bool = False
+# Parse-time evaluation timeout (seconds)
+eval_timeout_seconds: float = 0.5
 
 def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     with open(c_file, 'r') as f:
@@ -538,7 +560,7 @@ def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int
         else:
             raise SyntaxError(f'Invalid argument "{arg}".')
 
-def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool = False) -> list[tuple[str, str | None]]:
+def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool = False) -> list[tuple[str, str | None, Any]]:
     """Parse function arguments.
 
     Args:
@@ -589,7 +611,7 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
 
     # Parse arguments based on parse_types flag
     if not parse_types:
-        return [(arg, None) for arg in args]
+        return [(arg, None, None) for arg in args]
 
     parsed_args: list[tuple[str, str | None, Any]] = []
     seen_default = False
@@ -639,6 +661,331 @@ def _normalize_operators(text: str) -> str:
     result = result.replace('\n', ' ')
     return result
 
+def _ast_to_dict(node):
+    """Convert AST node to dictionary representation."""
+    if not node._fields:
+        return str(get_type(node))
+
+    # Handle Set literal: {1, 2, 3}
+    if isinstance(node, ast.Set):
+        # Convert set elements
+        elements = [_ast_to_dict(elem) for elem in node.elts]
+        return {"type": "set", "value": elements}
+
+    # Handle Dict literal: {} or {k: v} - treat empty dict as empty set
+    if isinstance(node, ast.Dict):
+        # If it's an empty dict, treat it as an empty set
+        if len(node.keys) == 0:
+            return {"type": "set", "value": []}
+        # Otherwise it's a dict, which we don't support yet
+        # For now, treat non-empty dicts as sets (will fail with proper error later)
+        # This shouldn't happen often since Python dict syntax requires keys
+
+    # Check if this is a method call on a variable (x.method(args))
+    # We want to convert it to method(x, args) if method is a builtin function
+    if (isinstance(node, ast.Call) and
+        isinstance(node.func, ast.Attribute) and
+        isinstance(node.func.value, ast.Name)):
+
+        # Get the method name
+        method_name = node.func.attr
+
+        # Check if this method name is a builtin function
+        if method_name in funcs:
+            # Transform x.method(args) into method(x, args)
+            obj_name = node.func.value.id
+
+            # Convert args to dict representation
+            converted_args = [_ast_to_dict(arg) for arg in node.args]
+
+            # Check if this function has varargs and pack them
+            func_info = funcs[method_name]
+            func_args = func_info.get('args')
+            if func_args and isinstance(func_args, list) and func_args:
+                last_param_name, last_param_type = func_args[-1]
+                if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                    # Has varargs - pack converted_args (NOT including the object)
+                    # The function signature is: func(obj, fixed_param1, ..., varargs)
+                    # num_fixed is how many fixed params (excluding the varargs)
+                    num_fixed = len(func_args) - 1  # -1 for varargs param
+                    # But the first param is the object itself, so we need num_fixed - 1 fixed args
+                    num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
+                    fixed_args = converted_args[:num_fixed_args]
+                    varargs = converted_args[num_fixed_args:]
+                    varargs_list = {
+                        'type': 'list',
+                        'value': varargs
+                    }
+                    return {
+                        'func': {'id': method_name},
+                        'args': [{'id': obj_name}] + fixed_args + [varargs_list]
+                    }
+
+            # Create new function call: method(x, ...)
+            return {
+                'func': {'id': method_name},
+                'args': [{'id': obj_name}] + converted_args
+            }
+
+    # Check if this is a method call on an expression (expr.method(args))
+    # These are kept as-is but we need to transform varargs
+    if (isinstance(node, ast.Call) and
+        isinstance(node.func, ast.Attribute)):
+
+        method_name = node.func.attr
+
+        # Check if this is a known function with varargs
+        if method_name in funcs:
+            func_info = funcs[method_name]
+            func_args = func_info.get('args')
+            if func_args and isinstance(func_args, list) and func_args:
+                last_param_name, last_param_type = func_args[-1]
+                if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                    # Has varargs - transform the call node to pack varargs
+                    # Convert the object expression
+                    obj_expr = _ast_to_dict(node.func.value)
+                    # Convert args
+                    converted_args = [_ast_to_dict(arg) for arg in node.args]
+                    
+                    # Pack varargs
+                    num_fixed = len(func_args) - 1
+                    num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
+                    fixed_args = converted_args[:num_fixed_args]
+                    varargs = converted_args[num_fixed_args:]
+                    varargs_list = {
+                        'type': 'list',
+                        'value': varargs
+                    }
+                    
+                    return {
+                        'func': {'id': method_name},
+                        'args': [obj_expr] + fixed_args + [varargs_list]
+                    }
+
+    # Handle varargs parameter packing for regular function calls
+    # Transform func(a, b, c, d) where func has signature func(a, b, type *rest)
+    # into func(a, b, [c, d])
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        func_name = node.func.id
+        
+        if func_name in funcs:
+            func_info = funcs[func_name]
+            
+            # Check if function has varargs - handle different formats
+            has_varargs = False
+            num_fixed = 0
+            
+            # Format 1: regular functions with 'args' key as list of tuples
+            if 'args' in func_info:
+                func_args = func_info['args']
+                # Check if it's a list (regular functions) vs dict (builtin functions)
+                if isinstance(func_args, list) and func_args:
+                    last_param_name, last_param_type = func_args[-1]
+                    if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                        has_varargs = True
+                        num_fixed = len(func_args) - 1
+                elif isinstance(func_args, dict):
+                    # Builtin functions use dict format - check last value
+                    param_types = list(func_args.values())
+                    if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
+                        has_varargs = True
+                        num_fixed = len(param_types) - 1
+            
+            # Format 2: C functions with 'params' key (list of dicts)
+            elif 'params' in func_info:
+                params = func_info['params']
+                params_list = params if isinstance(params, list) else []
+                if params_list:
+                    last_param = params_list[-1]
+                    last_param_type = last_param.get('type', '') if isinstance(last_param, dict) else ''
+                    if last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                        has_varargs = True
+                        num_fixed = len(params_list) - 1
+            
+            if has_varargs:
+                # Convert all args to dict representation
+                converted_args = [_ast_to_dict(arg) for arg in node.args]
+                
+                # Split into fixed and varargs
+                fixed_args = converted_args[:num_fixed]
+                varargs = converted_args[num_fixed:]
+                
+                # Create a list literal for the varargs
+                varargs_list = {
+                    'type': 'list',
+                    'value': varargs
+                }
+                
+                # Return function call with fixed args + varargs list
+                return {
+                    'func': {'id': func_name},
+                    'args': fixed_args + [varargs_list]
+                }
+
+    result = {}
+    for field in node._fields:
+        # Skip "ctx" field as it's not needed for execution
+        if field == 'ctx':
+            continue
+
+        value = getattr(node, field)
+
+        # Recursively convert AST nodes
+        if hasattr(value, '_fields'):
+            value = _ast_to_dict(value)
+        elif isinstance(value, list):
+            value = [_ast_to_dict(item) for item in value]
+
+        if value is not None:
+            result[field] = value
+
+    return result
+
+def _validate_function_calls(node):
+    """Recursively validate all function calls in the expression tree."""
+    if not isinstance(node, dict):
+        return node
+
+    # Validate this node if it's a function call
+    if 'func' in node and 'args' in node:
+        func_ref = node['func']
+        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+
+        if func_name and func_name in funcs:
+            func_info = funcs[func_name]
+
+            # Apply defaults for non-C functions when args are missing
+            if func_info.get('type') != 'c_function':
+                node['args'] = _apply_default_args(func_info, list(node.get('args', [])), None, func_name)
+
+            # Validate argument count for C functions (skip if function has varargs)
+            if func_info.get('type') == 'c_function':
+                params = func_info.get('params', [])
+                params_list = params if isinstance(params, list) else []
+                has_varargs = any(
+                    isinstance(p, dict) and isinstance(p.get('type', ''), str) and
+                    (p.get('type', '').endswith('*') or p.get('type', '').endswith('**'))
+                    for p in params_list
+                )
+                if not has_varargs:
+                    expected = func_info.get('param_count', 0)
+                    actual = len(node.get('args', []))
+                    if actual != expected:
+                        param_names = ', '.join(
+                            f"{p.get('type', '')} {p.get('name', '')}" for p in params_list if isinstance(p, dict)
+                        ) if params_list else 'void'
+                        raise SyntaxError(
+                            f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
+                            f"({param_names}), got {actual}"
+                        )
+
+    # Recursively validate nested structures
+    for key, value in node.items():
+        if isinstance(value, dict):
+            _validate_function_calls(value)
+        elif isinstance(value, list):
+            for item in value:
+                _validate_function_calls(item)
+
+    return node
+
+def _replace_const_calls(node):
+    """Recursively replace const function calls with their evaluated values."""
+    if not isinstance(node, dict):
+        return node
+
+    # First, recursively process all nested structures
+    result = {}
+    for key, value in node.items():
+        if isinstance(value, dict):
+            result[key] = _replace_const_calls(value)
+        elif isinstance(value, list):
+            result[key] = [_replace_const_calls(item) for item in value]
+        else:
+            result[key] = value
+
+    # Now check if THIS node is a const function call that can be evaluated
+    if 'func' in result and 'args' in result:
+        func_ref = result['func']
+        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+
+        if func_name and func_name in funcs:
+            func = funcs[func_name]
+            func_mods = func.get('mods', [])
+
+            # Check if this is a const function
+            if isinstance(func_mods, list) and 'const' in func_mods:
+                # Try to evaluate the const function call
+                try:
+                    # Extract literal values from argument nodes
+                    arg_values = result.get('args', [])
+
+                    # Check if all args are literals (have 'value' key with non-dict value, or are primitives)
+                    all_literal = True
+                    for arg in arg_values:
+                        if isinstance(arg, dict):
+                            if 'value' not in arg:
+                                all_literal = False
+                                break
+                            # Check if the value is itself a dict (complex expression)
+                            val = arg.get('value')
+                            if isinstance(val, dict) and ('op' in val or 'func' in val or 'id' in val):
+                                all_literal = False
+                                break
+
+                    if all_literal:
+                        cache_key = _eval_cache_key(func_name, arg_values)
+                        if cache_key in _eval_cache:
+                            cached_value = _eval_cache[cache_key]
+                            if _is_large_int(cached_value):
+                                _runtime_call_funcs.add(func_name)
+                                return result
+                            return {'value': cached_value, 'type': get_type(cached_value)}
+
+                        if func_name not in _eval_timeout_funcs and cache_key not in _eval_failed_cache:
+                            # Evaluate the const function at parse time with timeout
+                            with _with_eval_timeout(eval_timeout_seconds):
+                                _check_eval_timeout()
+                                _warmup_const_cache(func_name, func, arg_values)
+                                evaluated = _eval_func_at_parse_time(func_name, func, arg_values)
+                                _check_eval_timeout()
+                            if _is_large_int(evaluated):
+                                _runtime_call_funcs.add(func_name)
+                                _eval_failed_cache.add(cache_key)
+                                return result
+                            _eval_cache[cache_key] = evaluated
+                            # Return the evaluated value as a literal node
+                            return {'value': evaluated, 'type': get_type(evaluated)}
+                except _ParseEvalTimeout:
+                    _eval_timeout_funcs.add(func_name)
+                    _runtime_call_funcs.add(func_name)
+                    _eval_failed_cache.add(_eval_cache_key(func_name, result.get('args', [])))
+                except Exception:
+                    _eval_failed_cache.add(_eval_cache_key(func_name, result.get('args', [])))
+
+    return result
+
+def _contains_variable_refs(node):
+    """Recursively check if a node contains any variable references ('id' key)."""
+    if not isinstance(node, dict):
+        return False
+
+    if 'id' in node and 'func' not in node:  # Variable reference (not a function name)
+        return True
+
+    # Recursively check nested structures
+    for key, value in node.items():
+        if key == 'func':  # Skip function names
+            continue
+        if isinstance(value, dict):
+            if _contains_variable_refs(value):
+                return True
+        elif isinstance(value, list):
+            for item in value:
+                if _contains_variable_refs(item):
+                    return True
+    return False
+
 def parse_expr(text: str):
     """Parse an expression using Python's AST parser and optionally evaluate constants."""
     from runtime import eval_expr # type: ignore
@@ -674,332 +1021,26 @@ def parse_expr(text: str):
             # Re-raise other syntax errors as-is
             raise
 
-        def _ast_to_dict(node):
-            """Convert AST node to dictionary representation."""
-            if not node._fields:
-                return str(get_type(node))
-
-            # Handle Set literal: {1, 2, 3}
-            if isinstance(node, ast.Set):
-                # Convert set elements
-                elements = [_ast_to_dict(elem) for elem in node.elts]
-                return {"type": "set", "value": elements}
-
-            # Handle Dict literal: {} or {k: v} - treat empty dict as empty set
-            if isinstance(node, ast.Dict):
-                # If it's an empty dict, treat it as an empty set
-                if len(node.keys) == 0:
-                    return {"type": "set", "value": []}
-                # Otherwise it's a dict, which we don't support yet
-                # For now, treat non-empty dicts as sets (will fail with proper error later)
-                # This shouldn't happen often since Python dict syntax requires keys
-
-            # Check if this is a method call on a variable (x.method(args))
-            # We want to convert it to method(x, args) if method is a builtin function
-            if (isinstance(node, ast.Call) and
-                isinstance(node.func, ast.Attribute) and
-                isinstance(node.func.value, ast.Name)):
-
-                # Get the method name
-                method_name = node.func.attr
-
-                # Check if this method name is a builtin function
-                if method_name in funcs:
-                    # Transform x.method(args) into method(x, args)
-                    obj_name = node.func.value.id
-
-                    # Convert args to dict representation
-                    converted_args = [_ast_to_dict(arg) for arg in node.args]
-
-                    # Check if this function has varargs and pack them
-                    func_info = funcs[method_name]
-                    func_args = func_info.get('args')
-                    if func_args and isinstance(func_args, list) and func_args:
-                        last_param_name, last_param_type = func_args[-1]
-                        if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
-                            # Has varargs - pack converted_args (NOT including the object)
-                            # The function signature is: func(obj, fixed_param1, ..., varargs)
-                            # num_fixed is how many fixed params (excluding the varargs)
-                            num_fixed = len(func_args) - 1  # -1 for varargs param
-                            # But the first param is the object itself, so we need num_fixed - 1 fixed args
-                            num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
-                            fixed_args = converted_args[:num_fixed_args]
-                            varargs = converted_args[num_fixed_args:]
-                            varargs_list = {
-                                'type': 'list',
-                                'value': varargs
-                            }
-                            return {
-                                'func': {'id': method_name},
-                                'args': [{'id': obj_name}] + fixed_args + [varargs_list]
-                            }
-
-                    # Create new function call: method(x, ...)
-                    return {
-                        'func': {'id': method_name},
-                        'args': [{'id': obj_name}] + converted_args
-                    }
-
-            # Check if this is a method call on an expression (expr.method(args))
-            # These are kept as-is but we need to transform varargs
-            if (isinstance(node, ast.Call) and
-                isinstance(node.func, ast.Attribute)):
-
-                method_name = node.func.attr
-
-                # Check if this is a known function with varargs
-                if method_name in funcs:
-                    func_info = funcs[method_name]
-                    func_args = func_info.get('args')
-                    if func_args and isinstance(func_args, list) and func_args:
-                        last_param_name, last_param_type = func_args[-1]
-                        if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
-                            # Has varargs - transform the call node to pack varargs
-                            # Convert the object expression
-                            obj_expr = _ast_to_dict(node.func.value)
-                            # Convert args
-                            converted_args = [_ast_to_dict(arg) for arg in node.args]
-                            
-                            # Pack varargs
-                            num_fixed = len(func_args) - 1
-                            num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
-                            fixed_args = converted_args[:num_fixed_args]
-                            varargs = converted_args[num_fixed_args:]
-                            varargs_list = {
-                                'type': 'list',
-                                'value': varargs
-                            }
-                            
-                            return {
-                                'func': {'id': method_name},
-                                'args': [obj_expr] + fixed_args + [varargs_list]
-                            }
-
-            # Handle varargs parameter packing for regular function calls
-            # Transform func(a, b, c, d) where func has signature func(a, b, type *rest)
-            # into func(a, b, [c, d])
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                func_name = node.func.id
-                
-                if func_name in funcs:
-                    func_info = funcs[func_name]
-                    
-                    # Check if function has varargs - handle different formats
-                    has_varargs = False
-                    num_fixed = 0
-                    
-                    # Format 1: regular functions with 'args' key as list of tuples
-                    if 'args' in func_info:
-                        func_args = func_info['args']
-                        # Check if it's a list (regular functions) vs dict (builtin functions)
-                        if isinstance(func_args, list) and func_args:
-                            last_param_name, last_param_type = func_args[-1]
-                            if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
-                                has_varargs = True
-                                num_fixed = len(func_args) - 1
-                        elif isinstance(func_args, dict):
-                            # Builtin functions use dict format - check last value
-                            param_types = list(func_args.values())
-                            if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
-                                has_varargs = True
-                                num_fixed = len(param_types) - 1
-                    
-                    # Format 2: C functions with 'params' key (list of dicts)
-                    elif 'params' in func_info:
-                        params = func_info['params']
-                        if params and len(params) > 0:
-                            last_param_type = params[-1].get('type', '')
-                            if last_param_type.endswith('*') and not last_param_type.endswith('**'):
-                                has_varargs = True
-                                num_fixed = len(params) - 1
-                    
-                    if has_varargs:
-                        # Convert all args to dict representation
-                        converted_args = [_ast_to_dict(arg) for arg in node.args]
-                        
-                        # Split into fixed and varargs
-                        fixed_args = converted_args[:num_fixed]
-                        varargs = converted_args[num_fixed:]
-                        
-                        # Create a list literal for the varargs
-                        varargs_list = {
-                            'type': 'list',
-                            'value': varargs
-                        }
-                        
-                        # Return function call with fixed args + varargs list
-                        return {
-                            'func': {'id': func_name},
-                            'args': fixed_args + [varargs_list]
-                        }
-                        fixed_args = converted_args[:num_fixed]
-                        varargs = converted_args[num_fixed:]
-                        
-                        # Create a list literal for the varargs
-                        varargs_list = {
-                            'type': 'list',
-                            'value': varargs
-                        }
-                        
-                        # Return function call with fixed args + varargs list
-                        return {
-                            'func': {'id': func_name},
-                            'args': fixed_args + [varargs_list]
-                        }
-
-            result = {}
-            for field in node._fields:
-                # Skip "ctx" field as it's not needed for execution
-                if field == 'ctx':
-                    continue
-
-                value = getattr(node, field)
-
-                # Recursively convert AST nodes
-                if hasattr(value, '_fields'):
-                    value = _ast_to_dict(value)
-                elif isinstance(value, list):
-                    value = [_ast_to_dict(item) for item in value]
-
-                if value is not None:
-                    result[field] = value
-
-            return result
 
         expr_dict = _ast_to_dict(expr)
-
-        def _validate_function_calls(node):
-            """Recursively validate all function calls in the expression tree."""
-            if not isinstance(node, dict):
-                return node
-
-            # Validate this node if it's a function call
-            if 'func' in node and 'args' in node:
-                func_ref = node['func']
-                func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
-
-                if func_name and func_name in funcs:
-                    func_info = funcs[func_name]
-
-                    # Apply defaults for non-C functions when args are missing
-                    if func_info.get('type') != 'c_function':
-                        node['args'] = _apply_default_args(func_info, list(node.get('args', [])), None, func_name)
-
-                    # Validate argument count for C functions (skip if function has varargs)
-                    if func_info.get('type') == 'c_function':
-                        has_varargs = any(param_type.endswith('*') or param_type.endswith('**') for _, param_type in func_info.get('params', []))
-                        if not has_varargs:
-                            expected = func_info.get('param_count', 0)
-                            actual = len(node.get('args', []))
-                            if actual != expected:
-                                params = func_info.get('params', [])
-                                param_names = ', '.join(f"{p['type']} {p['name']}" for p in params) if params else 'void'
-                                raise SyntaxError(
-                                    f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
-                                    f"({param_names}), got {actual}"
-                                )
-
-            # Recursively validate nested structures
-            for key, value in node.items():
-                if isinstance(value, dict):
-                    _validate_function_calls(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        _validate_function_calls(item)
-
-            return node
 
         # Validate all function calls
         expr_dict = _validate_function_calls(expr_dict)
 
-        def _replace_const_calls(node):
-            """Recursively replace const function calls with their evaluated values."""
-            if not isinstance(node, dict):
-                return node
-
-            # First, recursively process all nested structures
-            result = {}
-            for key, value in node.items():
-                if isinstance(value, dict):
-                    result[key] = _replace_const_calls(value)
-                elif isinstance(value, list):
-                    result[key] = [_replace_const_calls(item) for item in value]
-                else:
-                    result[key] = value
-
-            # Now check if THIS node is a const function call that can be evaluated
-            if 'func' in result and 'args' in result:
-                func_ref = result['func']
-                func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
-
-                if func_name and func_name in funcs:
-                    func = funcs[func_name]
-                    func_mods = func.get('mods', [])
-
-                    # Check if this is a const function
-                    if isinstance(func_mods, list) and 'const' in func_mods:
-                        # Try to evaluate the const function call
-                        try:
-                            # Extract literal values from argument nodes
-                            arg_values = result.get('args', [])
-
-                            # Check if all args are literals (have 'value' key with non-dict value, or are primitives)
-                            all_literal = True
-                            for arg in arg_values:
-                                if isinstance(arg, dict):
-                                    if 'value' not in arg:
-                                        all_literal = False
-                                        break
-                                    # Check if the value is itself a dict (complex expression)
-                                    val = arg.get('value')
-                                    if isinstance(val, dict) and ('op' in val or 'func' in val or 'id' in val):
-                                        all_literal = False
-                                        break
-
-                            if all_literal:
-                                # Evaluate the const function at parse time
-                                evaluated = _eval_func_at_parse_time(func_name, func, arg_values)
-                                # Return the evaluated value as a literal node
-                                return {'value': evaluated, 'type': get_type(evaluated)}
-                        except Exception:
-                            # Can't evaluate - return the recursively processed node
-                            pass
-
-            return result
-
         # Replace const function calls with their values
         expr_dict = _replace_const_calls(expr_dict)
-
-        # Helper to check if a node contains variable references
-        def _contains_variable_refs(node):
-            """Recursively check if a node contains any variable references ('id' key)."""
-            if not isinstance(node, dict):
-                return False
-            if 'id' in node and 'func' not in node:  # Variable reference (not a function name)
-                return True
-            # Recursively check nested structures
-            for key, value in node.items():
-                if key == 'func':  # Skip function names
-                    continue
-                if isinstance(value, dict):
-                    if _contains_variable_refs(value):
-                        return True
-                elif isinstance(value, list):
-                    for item in value:
-                        if _contains_variable_refs(item):
-                            return True
-            return False
 
         # Try to evaluate constant expressions at parse time
         try:
             # Skip evaluation if #pragma no_eval is active
             if disable_eval:
                 return expr_dict
-            
+
             # Don't evaluate if it contains variable references (unless it's a set/list literal)
             is_set_or_list_literal = expr_dict.get('type') in ('set', 'list')
             if not is_set_or_list_literal and _contains_variable_refs(expr_dict):
                 return expr_dict
+
             # Don't evaluate struct constructors at parse time
             if 'func' in expr_dict:
                 func_name = expr_dict['func'].get('id') if isinstance(expr_dict['func'], dict) else None # type: ignore
@@ -1007,6 +1048,7 @@ def parse_expr(text: str):
                     # Check if it's a direct struct constructor
                     if func_name in vars and vars[func_name].get('type') == 'struct_def':
                         return expr_dict
+
                     # Check if it's a function that returns a struct type
                     if func_name in funcs:
                         return_type = funcs[func_name].get('return_type')
@@ -1017,22 +1059,30 @@ def parse_expr(text: str):
             if expr_dict.get('type') == 'set':
                 return expr_dict
 
-            evaluated = eval_expr(expr_dict)
+            with _with_eval_timeout(eval_timeout_seconds):
+                _check_eval_timeout()
+                evaluated = eval_expr(expr_dict)
+                _check_eval_timeout()
+
+            # Note: keep evaluation silent to avoid polluting stdout
+
             # Only use evaluated result if it's a proper constant (not a variable name)
             # and the expression doesn't contain operators (already constant)
             # Don't evaluate if it's just a variable reference ('id' key indicates a Name node)
             if (evaluated is not None
                 and not isinstance(evaluated, str)
-                and 'op' not in expr_dict
                 and 'ops' not in expr_dict
                 and 'id' not in expr_dict):  # Variable reference - keep as expr_dict
+                if _is_large_int(evaluated):
+                    return expr_dict
                 return evaluated
+
         except Exception:
             pass  # Can't evaluate at parse time, return the expression dict
 
         return expr_dict
     finally:
-        runtime_module.runtime = old_runtime
+        setattr(runtime_module, 'runtime', old_runtime)
 
 def parse_scope(stream: InputStream, level: int = 0) -> AstType:
     """Parse a code block enclosed in braces { }."""
@@ -1059,7 +1109,7 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     args: list[tuple[str, str | None]] = []
 
     for arg_entry in parsed_args:
-        arg_name, arg_type, default_value = arg_entry if len(arg_entry) == 3 else (*arg_entry, None)
+        arg_name, arg_type, default_value = arg_entry
 
         defaults.append(default_value)
         args.append((arg_name, arg_type))
@@ -1072,11 +1122,13 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
     scope = parse_scope(stream)
     stream.strip()
 
-    # Check if this is a const function with non-evaluable builtins
+    # Check if this is a const function with non-evaluable builtins or bytecode blocks
     if 'const' in mods:
         has_non_eval, builtin_name = _has_non_evaluable_builtins(scope)
+        has_non_eval = has_non_eval or _scope_has_non_evaluable_nodes(scope, {name})
         if has_non_eval:
-            print(f"Warning: const function '{name}' contains non-evaluable builtin '{builtin_name}()'. Treating as regular function.")
+            warning_detail = f"builtin '{builtin_name}()'" if builtin_name else 'non-evaluable bytecode'
+            print(f"Warning: const function '{name}' contains {warning_detail}. Treating as regular function.")
             # Remove 'const' from mods to treat it as a regular function
             mods = [m for m in mods if m != 'const']
 
@@ -1088,9 +1140,6 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
         "mods": mods,
         "return_type": type
     }
-
-    if 'const' in mods:
-        return SkipNode
 
     return make_node(stream,
         type="function",
@@ -1143,7 +1192,14 @@ def _consume_expression(stream: InputStream) -> str:
         
     return expr
 
-def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list = []) -> dict[str, Any] | type[SkipNode]:
+def parse_var(
+    stream: InputStream,
+    var_type: str | None,
+    name: str,
+    mods: list = [],
+    list_capacity: int | None = None,
+    list_elem_type: str | None = None
+) -> dict[str, Any] | type[SkipNode]:
     """Parse a variable declaration or assignment.
 
     Args:
@@ -1180,6 +1236,11 @@ def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list =
         "mods": mods
     }
 
+    if list_capacity is not None or list_elem_type is not None:
+        var_info["list_capacity"] = list_capacity
+        var_info["list_elem_type"] = list_elem_type
+        var_info["list_static"] = True
+
     # Store in global vars table
     vars[name] = var_info
 
@@ -1195,6 +1256,10 @@ def parse_var(stream: InputStream, var_type: str | None, name: str, mods: list =
         value=value,
         mods=mods
     )
+    if list_capacity is not None or list_elem_type is not None:
+        node["list_capacity"] = list_capacity
+        node["list_elem_type"] = list_elem_type
+        node["list_static"] = True
     # Override with the line where the value starts
     node['line'] = value_line
     return node
@@ -1395,8 +1460,131 @@ def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
 
     return False, None
 
+def _eval_cache_key(name: str, arg_values: list) -> tuple[str, tuple[Any, ...]]:
+    def to_key(value: Any):
+        if isinstance(value, dict):
+            if 'value' in value:
+                return to_key(value['value'])
+            return repr(value)
+        if isinstance(value, list):
+            return tuple(to_key(v) for v in value)
+        if isinstance(value, tuple):
+            return tuple(to_key(v) for v in value)
+        if isinstance(value, (int, float, str, bool)) or value is None:
+            return value
+        return repr(value)
+
+    return name, tuple(to_key(arg) for arg in arg_values)
+
+class _ParseEvalTimeout(Exception):
+    """Raised when parse-time evaluation exceeds time budget."""
+
+def _check_eval_timeout():
+    """Raise if parse-time evaluation exceeded the deadline."""
+    if _eval_deadline is not None and time.monotonic() >= _eval_deadline:
+        # Parse-time eval timeout - handled silently
+        raise _ParseEvalTimeout()
+
+def _with_eval_timeout(seconds: float):
+    """Context manager to enforce a time limit on parse-time evaluation."""
+    class _TimeoutCtx:
+        def __enter__(self):
+            import runtime as runtime_module
+
+            self._runtime_module = runtime_module
+            self._old_checker = getattr(runtime_module, 'eval_timeout_checker', None)
+            setattr(runtime_module, 'eval_timeout_checker', _check_eval_timeout)
+
+            global _eval_deadline
+            _eval_deadline = time.monotonic() + max(0.0, seconds)
+
+            self._signal_installed = False
+            try:
+                if threading.current_thread() is threading.main_thread():
+                    def _handler(_signum, _frame):
+                        raise _ParseEvalTimeout()
+                    self._old_handler = signal.signal(signal.SIGALRM, _handler)
+                    signal.setitimer(signal.ITIMER_REAL, seconds)
+                    self._signal_installed = True
+            except Exception:
+                self._signal_installed = False
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if self._signal_installed:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, self._old_handler)
+
+            setattr(self._runtime_module, 'eval_timeout_checker', self._old_checker)
+            global _eval_deadline
+            _eval_deadline = None
+            return False
+
+    return _TimeoutCtx()
+
+def _scope_has_non_evaluable_nodes(scope: list, visited_funcs: set[str]) -> bool:
+    """Recursively check for nodes that cannot be evaluated at parse time."""
+    def check_node(node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+
+        node_type = node.get('type')
+        if node_type in {'bytecode_block', 'import', 'c_import', 'py_import'}:
+            return True
+
+        # Direct call node
+        if node_type == 'call':
+            func_name = node.get('name')
+            if func_name in funcs:
+                func = funcs[func_name]
+                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                    return True
+                if func.get('type') == 'c_function':
+                    return True
+                if func.get('type') == 'func':
+                    if func_name in visited_funcs:
+                        return False
+                    visited_funcs.add(func_name)
+                    func_body = func.get('func')
+                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(func_body, visited_funcs):
+                        return True
+                    visited_funcs.remove(func_name)
+
+        # Expression call node
+        if 'func' in node and 'args' in node:
+            func_ref = node.get('func')
+            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+            if func_name in funcs:
+                func = funcs[func_name]
+                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                    return True
+                if func.get('type') == 'c_function':
+                    return True
+                if func.get('type') == 'func':
+                    if func_name in visited_funcs:
+                        return False
+                    visited_funcs.add(func_name)
+                    func_body = func.get('func')
+                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(func_body, visited_funcs):
+                        return True
+                    visited_funcs.remove(func_name)
+
+        for value in node.values():
+            if isinstance(value, dict) and check_node(value):
+                return True
+            if isinstance(value, list):
+                for item in value:
+                    if check_node(item):
+                        return True
+        return False
+
+    return any(check_node(statement) for statement in scope)
+
 def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
     """Check if a function call can be evaluated at parse time."""
+    if disable_eval:
+        return False
+
     # C functions cannot be evaluated at parse time
     if func.get('type') == 'c_function':
         return False
@@ -1412,6 +1600,10 @@ def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
     # (C VM needs runtime calls for struct constructors)
     return_type = func.get('return_type', 'none')
     if isinstance(return_type, str) and return_type in vars and vars[return_type].get('type') == 'struct_def':
+        return False
+
+    # Skip functions with non-evaluable nodes (bytecode blocks or non-evaluable builtins)
+    if func.get('type') == 'func' and _scope_has_non_evaluable_nodes(func.get('func', []), set()):
         return False
 
     # Function must allow evaluation and all args must be literals
@@ -1438,8 +1630,8 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
         return func_callable(*func_args)
 
     # Evaluate user-defined const function
-    from runtime import run_scope
-    import runtime
+    from runtime import run_scope  # type: ignore
+    import runtime as runtime_module
 
     # Set up function arguments in vars
     func_arg_names = func.get('args', [])
@@ -1452,14 +1644,40 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
                 }
 
     # Execute function body
-    runtime.vars = vars
-    runtime.runtime = False
+    setattr(runtime_module, 'vars', vars)
+    setattr(runtime_module, 'runtime', False)
 
     func_body = func.get('func')
     if not isinstance(func_body, list):
         raise SyntaxError(f"Function {name} has invalid body")
 
     return run_scope(cast(AstType, func_body))
+
+def _warmup_const_cache(func_name: str, func: dict, arg_values: list):
+    """Best-effort warmup to populate parse-time cache within the current time budget."""
+    if not arg_values or not isinstance(func, dict):
+        return
+
+    # Only warm up for single integer literal argument
+    if len(arg_values) != 1:
+        return
+
+    arg0 = arg_values[0]
+    arg_val = arg0.get('value') if isinstance(arg0, dict) else arg0
+    if not isinstance(arg_val, int) or arg_val < 0:
+        return
+
+    for i in range(arg_val + 1):
+        _check_eval_timeout()
+        cache_key = _eval_cache_key(func_name, [{"value": i}])
+        if cache_key in _eval_cache:
+            continue
+        try:
+            _eval_func_at_parse_time(func_name, func, [{"value": i}])
+        except _ParseEvalTimeout:
+            break
+        except Exception:
+            break
 
 def parse_func_call(stream: InputStream, name: str) -> dict:
     """Parse a function call and optionally evaluate it at compile time."""
@@ -1472,7 +1690,7 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
     args = parse_args(stream, check_comma=False)
     arg_values = []
 
-    for arg_text, _ in args:
+    for arg_text, _, _ in args:
         arg_text = arg_text.strip()
         if not arg_text:
             continue
@@ -1520,10 +1738,12 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
                 }
                 arg_values = fixed_args + [varargs_list]
     elif func_params:  # C functions
-        if func_params:
-            last_param_type = func_params[-1].get('type', '')
+        params_list = func_params if isinstance(func_params, list) else []
+        if params_list:
+            last_param = params_list[-1]
+            last_param_type = last_param.get('type', '') if isinstance(last_param, dict) else ''
             if last_param_type.endswith('*') and not last_param_type.endswith('**'):
-                num_fixed = len(func_params) - 1
+                num_fixed = len(params_list) - 1
                 fixed_args = arg_values[:num_fixed]
                 varargs = arg_values[num_fixed:]
                 varargs_list = {
@@ -1537,9 +1757,10 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
 
     # Try to evaluate at parse time if possible
     if _can_eval_at_parse_time(func, arg_values):
-        try:
-            value = _eval_func_at_parse_time(name, func, arg_values)
-            if value is None and func.get('return_type') == 'void':
+        cache_key = _eval_cache_key(name, arg_values)
+        if cache_key in _eval_cache:
+            cached_value = _eval_cache[cache_key]
+            if cached_value is None and func.get('return_type') == 'void':
                 node = make_node(stream,
                     type="call",
                     name=name,
@@ -1548,15 +1769,44 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
                 )
             else:
                 node = make_node(stream,
-                    type=get_type(value),
-                    value=value
+                    type=get_type(cached_value),
+                    value=cached_value
                 )
             node['line'] = call_line
             return node
-        except Exception:
-            pass
+
+        if name not in _eval_timeout_funcs and cache_key not in _eval_failed_cache:
+            try:
+                with _with_eval_timeout(eval_timeout_seconds):
+                    # Warm up cache for const calls before full eval
+                    func_mods = func.get('mods', []) if isinstance(func, dict) else []
+                    if isinstance(func_mods, list) and 'const' in func_mods:
+                        _warmup_const_cache(name, func, arg_values)
+                    value = _eval_func_at_parse_time(name, func, arg_values)
+                _eval_cache[cache_key] = value
+                if value is None and func.get('return_type') == 'void':
+                    node = make_node(stream,
+                        type="call",
+                        name=name,
+                        args=arg_values,
+                        return_type="void"
+                    )
+                else:
+                    node = make_node(stream,
+                        type=get_type(value),
+                        value=value
+                    )
+                node['line'] = call_line
+                return node
+            except _ParseEvalTimeout:
+                _eval_timeout_funcs.add(name)
+                _runtime_call_funcs.add(name)
+                _eval_failed_cache.add(cache_key)
+            except Exception:
+                _eval_failed_cache.add(cache_key)
 
     # Return runtime function call node
+    _runtime_call_funcs.add(name)
     node = make_node(stream,
         type="call",
         name=name,
@@ -1935,12 +2185,12 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
                 # Also register as a callable (struct constructor)
                 if struct_name not in funcs:
-                    funcs[struct_name] = {
+                    funcs[struct_name] = cast(Any, {
                         'type': 'c_struct_constructor',
                         'return_type': struct_name,
                         'params': struct_info['fields'],
                         'param_count': len(struct_info['fields'])
-                    }
+                    })
 
             node = make_node(stream,
                 type='c_import',
@@ -2062,6 +2312,37 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             type = stream.consume_word()
 
         name = stream.consume_word()
+        list_capacity = None
+        list_elem_type = None
+
+        # Static list declaration: list name[capacity:type]
+        stream.strip()
+        if type == 'list' and stream.peek(1) == '[':
+            stream.consume('[')
+            spec_text = stream.consume_until(']')
+            if not stream.consume(']'):
+                raise SyntaxError(stream.format_error('Expected "]" after list capacity spec'))
+
+            spec_text = spec_text.strip()
+            if ':' not in spec_text:
+                raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+
+            size_text, elem_type = [part.strip() for part in spec_text.split(':', 1)]
+            if not size_text or not elem_type:
+                raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+
+            size_node = parse_expr(size_text)
+            size_value = _eval_const_node(size_node)
+            if not isinstance(size_value, int):
+                raise SyntaxError(stream.format_error('List capacity must be an integer constant'))
+            if size_value < 0:
+                raise SyntaxError(stream.format_error('List capacity must be >= 0'))
+
+            if elem_type not in types and elem_type not in vars:
+                raise SyntaxError(stream.format_error(f'Unknown list element type: {elem_type}'))
+
+            list_capacity = size_value
+            list_elem_type = elem_type
 
         if not (type and name):
             # Check if this is a function with missing name: "void () {"
@@ -2078,7 +2359,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         # Is var
         elif stream.peek(1) == '=':
-            node = parse_var(stream, type, name, mods)
+            node = parse_var(stream, type, name, mods, list_capacity, list_elem_type)
             if node is not SkipNode and isinstance(node, dict):
                 node['line'] = decl_line
             return node
@@ -2197,12 +2478,20 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
                 # Validate argument count for C functions (skip if function has varargs)
                 if func_info.get('type') == 'c_function':
-                    has_varargs = any(param_type.endswith('*') or param_type.endswith('**') for _, param_type in func_info.get('params', []))
+                    params = func_info.get('params', [])
+                    params_list = params if isinstance(params, list) else []
+                    has_varargs = any(
+                        isinstance(p, dict) and isinstance(p.get('type', ''), str) and
+                        (p.get('type', '').endswith('*') or p.get('type', '').endswith('**'))
+                        for p in params_list
+                    )
                     if not has_varargs:
                         expected = func_info.get('param_count', 0)
                         actual = len(result.get('args', []))
                         if actual != expected:
-                            param_names = ', '.join(f"{p['type']} {p['name']}" for p in func_info.get('params', []))
+                            param_names = ', '.join(
+                                f"{p.get('type', '')} {p.get('name', '')}" for p in params_list if isinstance(p, dict)
+                            )
                             raise SyntaxError(stream.format_error(
                                 f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
                                 f"({param_names or 'void'}), got {actual}"
@@ -2368,8 +2657,38 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         elif word in types:
             name = stream.consume_word()
+            list_capacity = None
+            list_elem_type = None
 
-            node = parse_var(stream, word, name)
+            stream.strip()
+            if word == 'list' and stream.peek(1) == '[':
+                stream.consume('[')
+                spec_text = stream.consume_until(']')
+                if not stream.consume(']'):
+                    raise SyntaxError(stream.format_error('Expected "]" after list capacity spec'))
+
+                spec_text = spec_text.strip()
+                if ':' not in spec_text:
+                    raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+
+                size_text, elem_type = [part.strip() for part in spec_text.split(':', 1)]
+                if not size_text or not elem_type:
+                    raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+
+                size_node = parse_expr(size_text)
+                size_value = _eval_const_node(size_node)
+                if not isinstance(size_value, int):
+                    raise SyntaxError(stream.format_error('List capacity must be an integer constant'))
+                if size_value < 0:
+                    raise SyntaxError(stream.format_error('List capacity must be >= 0'))
+
+                if elem_type not in types and elem_type not in vars:
+                    raise SyntaxError(stream.format_error(f'Unknown list element type: {elem_type}'))
+
+                list_capacity = size_value
+                list_elem_type = elem_type
+
+            node = parse_var(stream, word, name, [], list_capacity, list_elem_type)
             if node is not SkipNode and isinstance(node, dict):
                 node['line'] = stmt_line
             return node
@@ -2401,7 +2720,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     stream.consume('elif')
                     args = parse_args(stream)
                     # Extract argument values (ignore types) and join them
-                    arg_values = [arg_name for arg_name, _ in args]
+                    arg_values = [arg_name for arg_name, _, _ in args]
                     args = parse_expr(''.join(arg_values))
                     scope = parse_scope(stream, level+1)
                     node['elifs'].append(
@@ -2827,14 +3146,23 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
 
 def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
-    global loop_depth, vars, types, _imported_files, disable_eval
+    global loop_depth, vars, types, _imported_files, disable_eval, eval_timeout_seconds
+    global _eval_cache, _eval_failed_cache, _eval_timeout_funcs, _runtime_call_funcs
+
+    is_imported_file = bool(file) and file in _imported_files
 
     # Reset global state for top-level parse
     if level == 0:
         loop_depth = 0
         vars = {}
-        _imported_files.clear()  # Reset import tracking for each top-level parse
+        if not is_imported_file:
+            _imported_files.clear()  # Reset import tracking for each top-level parse
         disable_eval = False  # Reset pragma state for each top-level parse
+        eval_timeout_seconds = 0.5
+        _eval_cache.clear()
+        _eval_failed_cache.clear()
+        _eval_timeout_funcs.clear()
+        _runtime_call_funcs.clear()
 
     if not isinstance(text, InputStream):
         # Check for #pragma directives before removing comments
@@ -2844,6 +3172,13 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             if stripped.startswith('#pragma'):
                 if stripped == '#pragma no_eval':
                     disable_eval = True
+                elif stripped.startswith('#pragma eval_timeout'):
+                    parts = stripped.split()
+                    if len(parts) >= 3:
+                        try:
+                            eval_timeout_seconds = float(parts[2])
+                        except ValueError:
+                            pass
             elif stripped and not stripped.startswith('#'):
                 # Stop after first non-pragma, non-empty line
                 break
@@ -2898,6 +3233,525 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                 ast.extend(node.get('statements', []))
             else:
                 ast.append(node)
+
+        if level == 0 and not is_imported_file:
+            def _collect_calls_from_scope(scope: list) -> set[str]:
+                names: set[str] = set()
+
+                def walk(node: Any):
+                    if not isinstance(node, dict):
+                        return
+                    if node.get('type') == 'call':
+                        func_name = node.get('name')
+                        if func_name:
+                            names.add(func_name)
+                    if 'func' in node and 'args' in node:
+                        func_ref = node.get('func')
+                        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                        if func_name:
+                            names.add(func_name)
+                    for value in node.values():
+                        if isinstance(value, dict):
+                            walk(value)
+                        elif isinstance(value, list):
+                            for item in value:
+                                walk(item)
+
+                for stmt in scope:
+                    walk(stmt)
+                return names
+
+            def _is_evaluable_function(name: str, func: dict) -> bool:
+                if func.get('type') != 'func':
+                    return False
+                if name in _eval_timeout_funcs:
+                    return False
+                return_type = func.get('return_type', 'none')
+                if isinstance(return_type, str) and return_type in vars and vars[return_type].get('type') == 'struct_def':
+                    return False
+                if _scope_has_non_evaluable_nodes(func.get('func', []), {name}):
+                    return False
+                return func.get('can_eval', True)
+
+            def _is_inlineable_const_value(value: Any) -> bool:
+                if isinstance(value, dict):
+                    if _is_runtime_expression(value):
+                        return False
+                    value_type = value.get('type')
+                    return value_type in {'int', 'float', 'bool', 'string', 'str', 'bytes'} and 'value' in value
+                return isinstance(value, (int, float, bool))
+
+            def _normalize_literal_value(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return value
+                if isinstance(value, bool):
+                    return {"type": "bool", "value": value}
+                if isinstance(value, int):
+                    return {"type": "int", "value": value}
+                if isinstance(value, float):
+                    return {"type": "float", "value": value}
+                if isinstance(value, str):
+                    return {"type": "string", "value": value}
+                return value
+
+            def _replace_const_refs(node: Any, const_map: dict[str, Any], skip_name: str | None = None) -> Any:
+                if isinstance(node, dict):
+                    if set(node.keys()) == {'id'}:
+                        name = node.get('id')
+                        if isinstance(name, str) and name != skip_name and name in const_map:
+                            return copy.deepcopy(const_map[name])
+
+                    new_node: dict[str, Any] = {}
+                    for key, value in node.items():
+                        if key == 'func':
+                            if isinstance(value, dict) and set(value.keys()) == {'id'}:
+                                new_node[key] = value
+                            else:
+                                new_node[key] = _replace_const_refs(value, const_map, skip_name)
+                            continue
+                        if key == 'name' and node.get('type') == 'call':
+                            new_node[key] = value
+                            continue
+                        new_node[key] = _replace_const_refs(value, const_map, skip_name)
+                    return new_node
+                if isinstance(node, list):
+                    return [_replace_const_refs(item, const_map, skip_name) for item in node]
+                return node
+
+            def _contains_call_nodes(node: Any) -> bool:
+                if isinstance(node, dict):
+                    if node.get('type') == 'call' or ('func' in node and 'args' in node):
+                        return True
+                    for value in node.values():
+                        if _contains_call_nodes(value):
+                            return True
+                elif isinstance(node, list):
+                    return any(_contains_call_nodes(item) for item in node)
+                return False
+
+            def _try_eval_const_expr(node: Any) -> Any | None:
+                if not isinstance(node, dict):
+                    return node
+                def _is_const_func_name(name: str | None) -> bool:
+                    if not name or name not in funcs:
+                        return False
+                    func_info = funcs.get(name)
+                    func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
+                    return isinstance(func_mods, list) and 'const' in func_mods
+
+                def _contains_nonconst_calls(expr: Any) -> bool:
+                    if isinstance(expr, dict):
+                        if expr.get('type') == 'call':
+                            func_name = expr.get('name')
+                            if func_name and not _is_const_func_name(func_name):
+                                return True
+                        if 'func' in expr and 'args' in expr:
+                            func_ref = expr.get('func')
+                            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                            if func_name and not _is_const_func_name(func_name):
+                                return True
+                        for value in expr.values():
+                            if _contains_nonconst_calls(value):
+                                return True
+                    elif isinstance(expr, list):
+                        return any(_contains_nonconst_calls(item) for item in expr)
+                    return False
+
+                if _contains_variable_refs(node) or _contains_nonconst_calls(node):
+                    return None
+                try:
+                    from runtime import eval_expr  # type: ignore
+                    import runtime as runtime_module
+
+                    old_runtime = runtime_module.runtime  # type: ignore
+                    runtime_module.runtime = False  # type: ignore
+                    try:
+                        with _with_eval_timeout(eval_timeout_seconds):
+                            _check_eval_timeout()
+                            value = eval_expr(node)
+                            _check_eval_timeout()
+                        return value
+                    finally:
+                        setattr(runtime_module, 'runtime', old_runtime)
+                except Exception:
+                    return None
+
+            def _inline_single_assignment_constants(scope: list, inherited: dict[str, Any]) -> list:
+                assign_counts: dict[str, int] = {}
+                assign_values: dict[str, Any] = {}
+
+                def walk_assignments(node: Any):
+                    if isinstance(node, dict):
+                        if node.get('type') == 'function':
+                            return
+                        if node.get('type') == 'var':
+                            name = node.get('name')
+                            if isinstance(name, str):
+                                assign_counts[name] = assign_counts.get(name, 0) + 1
+                                if name not in assign_values:
+                                    assign_values[name] = node.get('value')
+                        for value in node.values():
+                            walk_assignments(value)
+                        return
+                    if isinstance(node, list):
+                        for item in node:
+                            walk_assignments(item)
+
+                for stmt in scope:
+                    walk_assignments(stmt)
+
+                local_inline: dict[str, Any] = {}
+                for name, count in assign_counts.items():
+                    if count == 1:
+                        value = assign_values.get(name)
+                        if _is_inlineable_const_value(value):
+                            local_inline[name] = _normalize_literal_value(value)
+
+                scope_map = dict(inherited)
+                for name in assign_counts.keys():
+                    if name in scope_map:
+                        del scope_map[name]
+                scope_map.update(local_inline)
+
+                new_scope: list = []
+                for stmt in scope:
+                    if not isinstance(stmt, dict):
+                        new_scope.append(stmt)
+                        continue
+
+                    if stmt.get('type') == 'function':
+                        func_args = stmt.get('args', [])
+                        func_inherited = dict(scope_map)
+                        for arg_entry in func_args:
+                            if isinstance(arg_entry, (list, tuple)) and arg_entry:
+                                arg_name = arg_entry[0]
+                                if isinstance(arg_name, str) and arg_name in func_inherited:
+                                    del func_inherited[arg_name]
+                        func_scope = stmt.get('scope', [])
+                        if isinstance(func_scope, list):
+                            stmt['scope'] = _inline_single_assignment_constants(func_scope, func_inherited)
+                        new_scope.append(stmt)
+                        continue
+
+                    if stmt.get('type') == 'var':
+                        name = stmt.get('name')
+                        if isinstance(name, str) and name in local_inline:
+                            continue
+                        new_scope.append(_replace_const_refs(stmt, scope_map, skip_name=name if isinstance(name, str) else None))
+                        continue
+
+                    new_scope.append(_replace_const_refs(stmt, scope_map))
+
+                return new_scope
+
+            def _fold_const_calls_in_scope(scope: list) -> list:
+                new_scope: list = []
+                for stmt in scope:
+                    if isinstance(stmt, dict) and stmt.get('type') == 'function':
+                        func_scope = stmt.get('scope', [])
+                        if isinstance(func_scope, list):
+                            stmt['scope'] = _fold_const_calls_in_scope(func_scope)
+                        new_scope.append(stmt)
+                        continue
+                    if isinstance(stmt, dict):
+                        new_scope.append(_replace_const_calls(stmt))
+                    else:
+                        new_scope.append(stmt)
+                return new_scope
+
+            def _fold_large_int_print_args(scope: list, inherited: dict[str, Any]) -> list:
+                assign_counts: dict[str, int] = {}
+                assign_values: dict[str, Any] = {}
+
+                def walk_assignments(node: Any):
+                    if isinstance(node, dict):
+                        if node.get('type') == 'function':
+                            return
+                        if node.get('type') == 'var':
+                            name = node.get('name')
+                            if isinstance(name, str):
+                                assign_counts[name] = assign_counts.get(name, 0) + 1
+                                if name not in assign_values:
+                                    assign_values[name] = node.get('value')
+                        for value in node.values():
+                            walk_assignments(value)
+                        return
+                    if isinstance(node, list):
+                        for item in node:
+                            walk_assignments(item)
+
+                for stmt in scope:
+                    walk_assignments(stmt)
+
+                local_const_values: dict[str, Any] = {}
+                for name, count in assign_counts.items():
+                    if count == 1:
+                        value = assign_values.get(name)
+                        evaluated = _try_eval_const_expr(value)
+                        if evaluated is not None:
+                            local_const_values[name] = evaluated
+
+                def _collect_var_uses(scope_nodes: list) -> dict[str, dict[str, int]]:
+                    usage: dict[str, dict[str, int]] = {}
+
+                    def bump(name: str, string_context: bool):
+                        data = usage.setdefault(name, {'total': 0, 'string': 0})
+                        data['total'] += 1
+                        if string_context:
+                            data['string'] += 1
+
+                    def walk(node: Any, string_context: bool, in_function: bool):
+                        if isinstance(node, list):
+                            for item in node:
+                                walk(item, string_context, in_function)
+                            return
+                        if not isinstance(node, dict):
+                            return
+
+                        if node.get('type') == 'function':
+                            func_scope = node.get('scope', [])
+                            if isinstance(func_scope, list):
+                                walk(func_scope, False, True)
+                            return
+
+                        if set(node.keys()) == {'id'}:
+                            name = node.get('id')
+                            if isinstance(name, str):
+                                bump(name, string_context if not in_function else False)
+                            return
+
+                        if node.get('type') == 'call':
+                            name = node.get('name')
+                            if name in {'print', 'println'}:
+                                for arg in node.get('args', []):
+                                    walk(arg, True, in_function)
+                                return
+
+                        if 'func' in node and 'args' in node:
+                            func_ref = node.get('func')
+                            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                            if func_name in {'print', 'println'}:
+                                for arg in node.get('args', []):
+                                    walk(arg, True, in_function)
+                                return
+                            if func_name == 'str':
+                                args = node.get('args', [])
+                                for arg in args[:1]:
+                                    walk(arg, True, in_function)
+                                for arg in args[1:]:
+                                    walk(arg, False, in_function)
+                                return
+
+                        for key, value in node.items():
+                            if key == 'func':
+                                continue
+                            walk(value, string_context, in_function)
+
+                    for stmt in scope_nodes:
+                        walk(stmt, False, False)
+                    return usage
+
+                usage_map = _collect_var_uses(scope)
+                removable_vars: set[str] = set()
+                for name, value in local_const_values.items():
+                    if not _is_large_int(value):
+                        continue
+                    usage = usage_map.get(name)
+                    if usage and usage['total'] == usage['string']:
+                        removable_vars.add(name)
+
+                scope_map = dict(inherited)
+                for name in assign_counts.keys():
+                    if name in scope_map:
+                        del scope_map[name]
+                scope_map.update(local_const_values)
+
+                def fold_node(node: Any) -> Any:
+                    if isinstance(node, list):
+                        return [fold_node(item) for item in node]
+                    if not isinstance(node, dict):
+                        return node
+
+                    if set(node.keys()) == {'id'}:
+                        name = node.get('id')
+                        if isinstance(name, str) and name in removable_vars:
+                            return {'type': 'string', 'value': str(scope_map[name])}
+                        if isinstance(name, str) and name in scope_map and _is_large_int(scope_map[name]):
+                            return {'type': 'string', 'value': str(scope_map[name])}
+                        return node
+
+                    if node.get('type') == 'call':
+                        name = node.get('name')
+                        if name in {'print', 'println'}:
+                            args = node.get('args', [])
+                            new_args = []
+                            for arg in args:
+                                new_arg = fold_node(arg)
+                                value = _try_eval_const_expr(new_arg)
+                                if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
+                                    var_name = new_arg.get('id')
+                                    if isinstance(var_name, str):
+                                        value = scope_map.get(var_name)
+                                if _is_large_int(value):
+                                    new_arg = {'type': 'string', 'value': str(value)}
+                                new_args.append(new_arg)
+                            node['args'] = new_args
+                            return node
+
+                    if 'func' in node and 'args' in node:
+                        func_ref = node.get('func')
+                        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                        if func_name in {'print', 'println'}:
+                            args = node.get('args', [])
+                            new_args = []
+                            for arg in args:
+                                new_arg = fold_node(arg)
+                                value = _try_eval_const_expr(new_arg)
+                                if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
+                                    var_name = new_arg.get('id')
+                                    if isinstance(var_name, str):
+                                        value = scope_map.get(var_name)
+                                if _is_large_int(value):
+                                    new_arg = {'type': 'string', 'value': str(value)}
+                                new_args.append(new_arg)
+                            node['args'] = new_args
+                            return node
+                        if func_name == 'str' and len(node.get('args', [])) == 1:
+                            arg = node.get('args', [None])[0]
+                            new_arg = fold_node(arg)
+                            value = _try_eval_const_expr(new_arg)
+                            if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
+                                var_name = new_arg.get('id')
+                                if isinstance(var_name, str):
+                                    value = scope_map.get(var_name)
+                            if _is_large_int(value):
+                                return {'type': 'string', 'value': str(value)}
+                            node['args'] = [new_arg]
+                            return node
+
+                    new_node: dict[str, Any] = {}
+                    for key, value in node.items():
+                        new_node[key] = fold_node(value)
+                    return new_node
+
+                new_scope: list = []
+                for stmt in scope:
+                    if isinstance(stmt, dict) and stmt.get('type') == 'function':
+                        func_args = stmt.get('args', [])
+                        func_inherited = dict(scope_map)
+                        for arg_entry in func_args:
+                            if isinstance(arg_entry, (list, tuple)) and arg_entry:
+                                arg_name = arg_entry[0]
+                                if isinstance(arg_name, str) and arg_name in func_inherited:
+                                    del func_inherited[arg_name]
+                        func_scope = stmt.get('scope', [])
+                        if isinstance(func_scope, list):
+                            stmt['scope'] = _fold_large_int_print_args(func_scope, func_inherited)
+                        new_scope.append(stmt)
+                        continue
+
+                    if isinstance(stmt, dict) and stmt.get('type') == 'var':
+                        name = stmt.get('name')
+                        if isinstance(name, str) and name in removable_vars:
+                            continue
+
+                    new_scope.append(fold_node(stmt))
+
+                return new_scope
+
+            ast = _inline_single_assignment_constants(ast, {})
+            ast = _fold_const_calls_in_scope(ast)
+            ast = _fold_large_int_print_args(ast, {})
+
+            # Build call graph from function bodies (only used if function is reachable)
+            func_nodes: dict[str, dict[str, Any]] = {}
+            for node in ast:
+                if isinstance(node, dict) and node.get('type') == 'function':
+                    func_name = node.get('name')
+                    if isinstance(func_name, str):
+                        func_nodes[func_name] = node
+
+            call_graph: dict[str, set[str]] = {}
+            for func_name, node in func_nodes.items():
+                scope = node.get('scope', [])
+                if isinstance(scope, list):
+                    call_graph[func_name] = _collect_calls_from_scope(scope)
+                else:
+                    call_graph[func_name] = set()
+
+            # Roots are calls from top-level statements plus main entry
+            roots: set[str] = set()
+            for node in ast:
+                if isinstance(node, dict) and node.get('type') == 'function':
+                    continue
+                roots |= _collect_calls_from_scope([node])
+
+            if 'main' in func_nodes:
+                roots.add('main')
+
+            runtime_calls: set[str] = set()
+            stack = list(roots)
+            while stack:
+                name = stack.pop()
+                if name in runtime_calls:
+                    continue
+                runtime_calls.add(name)
+                for callee in call_graph.get(name, set()):
+                    stack.append(callee)
+
+            const_runtime_calls = set()
+            for func_name in runtime_calls:
+                func_info = funcs.get(func_name)
+                func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
+                if isinstance(func_mods, list) and 'const' in func_mods:
+                    const_runtime_calls.add(func_name)
+
+            def _serialize_memo_table(table: dict[tuple[Any, ...], Any]) -> list[dict[str, Any]]:
+                entries: list[dict[str, Any]] = []
+                for args_key, value in table.items():
+                    args_list = list(args_key) if isinstance(args_key, tuple) else [args_key]
+                    entries.append({"args": args_list, "value": value})
+                return entries
+
+            # Build per-function memo tables from parse-time evaluation cache
+            if _eval_cache or _eval_timeout_funcs or const_runtime_calls:
+                memo_tables: dict[str, dict[tuple[Any, ...], Any]] = {}
+                for (func_name, arg_key), value in _eval_cache.items():
+                    memo_tables.setdefault(func_name, {})[arg_key] = value
+
+                for func_name in _eval_timeout_funcs:
+                    memo_tables.setdefault(func_name, {})
+
+                for func_name in const_runtime_calls:
+                    memo_tables.setdefault(func_name, {})
+
+                for func_name, memo_table in memo_tables.items():
+                    func_info = funcs.get(func_name)
+                    if func_info and func_info.get('type') == 'func':
+                        func_info['memo_table'] = memo_table  # type: ignore[assignment]
+
+            filtered_ast: AstType = []
+            for node in ast:
+                if isinstance(node, dict) and node.get('type') == 'function':
+                    func_name = node.get('name')
+                    if not isinstance(func_name, str):
+                        filtered_ast.append(node)
+                        continue
+                    func_info = funcs.get(func_name)
+                    if func_info and isinstance(func_info, dict):
+                        memo_table = func_info.get('memo_table')
+                        if memo_table is not None and (memo_table or func_name in const_runtime_calls or func_name in _eval_timeout_funcs):
+                            memo_table_cast = cast(dict[tuple[Any, ...], Any], memo_table)
+                            node['memo_table'] = _serialize_memo_table(memo_table_cast)
+                    if func_name and func_name != 'main' and func_info and func_name not in runtime_calls:
+                        if _is_evaluable_function(func_name, func_info):
+                            # Remove fully evaluatable function (all calls folded)
+                            if func_name in funcs:
+                                del funcs[func_name]
+                            continue
+                filtered_ast.append(node)
+
+            ast = filtered_ast
 
         return ast
 

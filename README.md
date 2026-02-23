@@ -33,9 +33,9 @@ This benchmark computes 1000 digits of pi.
 
 ```text
 Python: 0.421s
-Python VM: DNF
+Py VM: DNF
 C VM: 69.81s
-Native: 0.033s
+Native: 0.031s
 ```
 
 ### Fibonacci
@@ -44,9 +44,9 @@ This benchmark computes the 1-billionth fibonacci number in mod 1 000 000.
 
 ```text
 Python: 40.435s
-Python VM: DNF
+Py VM: DNF
 C VM: 31.556s
-Native: 4.553s
+Native: 4.472s
 ```
 
 ## What's New

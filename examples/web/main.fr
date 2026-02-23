@@ -16,7 +16,8 @@ void main() {
         "border-radius: 15px",
         "flex: 1",
         "margin: 10px",
-        "min-width: 250px"
+        "min-width: 250px",
+        "box-shadow: 0 10px 30px rgba(240, 147, 251, 0.1)"
     )
 
     class('section-title',
@@ -68,15 +69,18 @@ void main() {
             element('div', '',
                 element('h3', '🔥 Blazing Fast').styles("color: #667eea", "margin: 0"),
                 element('p', 'Compiles to optimized bytecode for maximum performance').styles("color: #666")
-            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(102, 126, 234, 0.1)"),
+            ).classes('feature-card'),
+
             element('div', '',
                 element('h3', '🎨 Clean Syntax').styles("color: #764ba2", "margin: 0"),
                 element('p', 'Write beautiful, readable code with modern syntax').styles("color: #666")
-            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(118, 75, 162, 0.1)"),
+            ).classes('feature-card'),
+
             element('div', '',
                 element('h3', '🌍 Cross-Platform').styles("color: #f093fb", "margin: 0"),
                 element('p', 'Run on native, Python runtime, or compile to WebAssembly').styles("color: #666")
-            ).classes('feature-card').styles("box-shadow: 0 10px 30px rgba(240, 147, 251, 0.1)")
+            ).classes('feature-card')
+
         ).styles(
             "display: flex",
             "flex-wrap: wrap",
@@ -84,6 +88,7 @@ void main() {
             "max-width: 1000px",
             "margin: 0 auto"
         )
+
     ).styles(
         "padding: 60px 20px",
         "background: #f8f9ff"

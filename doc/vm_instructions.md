@@ -2,8 +2,6 @@
 
 This document describes all bytecode instructions in fr.
 
-Probably outdated!
-
 ## Table of Contents
 
 - [Constants](#constants)
@@ -16,16 +14,19 @@ Probably outdated!
 - [Stack Operations](#stack-operations)
 - [List Operations](#list-operations)
 - [Set Operations](#set-operations)
+- [Dict Operations](#dict-operations)
 - [Struct Operations](#struct-operations)
 - [Type Conversions](#type-conversions)
 - [String Operations](#string-operations)
 - [Math Functions](#math-functions)
 - [File I/O Operations](#file-io-operations)
+- [Process Management](#process-management)
 - [Socket Operations](#socket-operations)
 - [Python Interop](#python-interop)
 - [Exception Handling](#exception-handling)
 - [Built-in Functions](#built-in-functions)
 - [Optimized Instructions](#optimized-instructions)
+- [Directives](#directives)
 
 ---
 
@@ -225,6 +226,14 @@ Does not have to be in pairs.
 **Syntax:** `FUSED_STORE_LOAD <dst1> <src1> <dst2> <src2> ...`
 
 **Stack:** `->`
+
+### FUSED_GET_STORE_LOAD
+
+Fused STRUCT_GET + STORE + LOAD triplets. Each triplet pops a struct from the stack, gets a field, stores the field value to a local, then loads a local onto the stack. Any number of triplets.
+
+**Syntax:** `FUSED_GET_STORE_LOAD <field1> <dst1> <src1> <field2> <dst2> <src2> ...`
+
+**Stack:** `struct -> value` (per triplet: pops struct, pushes loaded local)
 
 ---
 
@@ -610,6 +619,16 @@ Create a new empty list.
 
 **Stack:** `-> list`
 
+### LIST_NEW_CAP
+
+Create a new list with reserved capacity (static list).
+
+**Syntax:** `LIST_NEW_CAP <capacity> <elem_type>`
+
+**Stack:** `-> list`
+
+**Description:** Reserves space for `<capacity>` elements without initializing them. `elem_type` is a type hint (0=int, 1=string, 2=float, 3=bool, -1=unknown).
+
 ### LIST_APPEND
 
 Append a value to a list.
@@ -703,6 +722,42 @@ Get the number of elements in a set.
 **Stack:** `set -> int64`
 
 **Description:** Returns the number of unique elements in the set.
+
+---
+
+## Dict Operations
+
+### DICT_NEW
+
+Create a new empty dictionary.
+
+**Syntax:** `DICT_NEW`
+
+**Stack:** `-> dict`
+
+### DICT_GET
+
+Get a value by key.
+
+**Syntax:** `DICT_GET`
+
+**Stack:** `dict key -> value`
+
+### DICT_SET
+
+Set a value by key and return the dict.
+
+**Syntax:** `DICT_SET`
+
+**Stack:** `dict key value -> dict`
+
+### DICT_CONTAINS
+
+Check whether a dict contains a key.
+
+**Syntax:** `DICT_CONTAINS`
+
+**Stack:** `dict key -> bool`
 
 ### CONTAINS
 
@@ -1305,6 +1360,14 @@ Raise an exception.
 ---
 
 ## Built-in Functions
+
+### INPUT
+
+Read a line of input from stdin. Pops an optional prompt string from the stack, prints it, then reads a line.
+
+**Syntax:** `INPUT`
+
+**Stack:** `prompt_string -> input_string`
 
 ### BUILTIN_PRINT
 
