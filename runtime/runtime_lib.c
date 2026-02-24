@@ -282,6 +282,12 @@ int64_t runtime_str_contains(const char* haystack, const char* needle) {
     return strstr(haystack, needle) != NULL ? 1 : 0;
 }
 
+int64_t runtime_str_eq(const char* a, const char* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    return strcmp(a, b) == 0 ? 1 : 0;
+}
+
 char* runtime_str_strip(const char* str) {
     // Find start (skip leading whitespace)
     while (*str && isspace(*str)) str++;

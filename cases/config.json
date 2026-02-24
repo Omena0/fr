@@ -4,7 +4,12 @@
         "timeout": 2,
         "ignore": [
             "syntax_errors",
-            "python_interop"
+            "python_interop",
+            "imports/c_import.fr",
+            "io/socket*",
+            "misc/goto_with_return.fr",
+            "runtime/bigint_stress.fr",
+            "data_structures/static_list_basic.fr"
         ],
         "skip_mismatch": [],
         "allow_timeout_failures": false

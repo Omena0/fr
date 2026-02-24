@@ -21,11 +21,14 @@ runtime/vm
 runtime/target
 
 # Output files
+out*
 *.bc
 *.bin
 *.wasm
+*.wasm.json
+*.wat
 *.o
-a.fr
+*.html
 
 # Node
 node_modules

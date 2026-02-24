@@ -425,8 +425,9 @@ def decode_cmd(args):
 def native_cmd(args):
     """Compile bytecode to x86_64 native binary"""
     if len(args) < 1:
-        print("Usage: fr native <file.bc> [-o output] [-a|--asm]")
+        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--ssa]")
         print("  -a, --asm:  Keep assembly file")
+        print("  --ssa:      Use SSA IR superoptimizer pipeline")
         sys.exit(1)
 
     input_file = args[0]
@@ -469,12 +470,20 @@ def native_cmd(args):
 
     # Compile to x86_64
     try:
-        import native
         # Check for optimization flag, but -O0 disables it
         optimize = '-O' in args and '-O0' not in args
-        if optimize:
-            print('Optimizing assembly')
-        asm, runtime_deps = native.compile(bytecode, optimize)
+        use_ssa = '--ssa' in args
+
+        if use_ssa:
+            from optimizer import compile_native_ssa
+            opt_level = 3 if '-O3' in args else (2 if optimize else 1)
+            print(f'SSA optimizer (level {opt_level})')
+            asm = compile_native_ssa(bytecode, opt_level)
+        else:
+            import native
+            if optimize:
+                print('Optimizing assembly')
+            asm, runtime_deps = native.compile(bytecode, optimize)
 
         # Always write assembly to temp file for building
         with open(asm_file, 'w') as f:
