@@ -1,4 +1,4 @@
-name: Build
+name: Publish
 
 on:
   push:
@@ -42,10 +42,21 @@ jobs:
       run: |
         # Check if manually triggered with a version
         if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
-          VERSION="${{ inputs.version }}"
+          INPUT_VERSION="${{ inputs.version }}"
+          
+          # Convert short format (e.g. "10A") to semver (e.g. "10.0.0")
+          if [[ $INPUT_VERSION =~ ^([0-9]+)([A-Z])$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR_LETTER="${BASH_REMATCH[2]}"
+            MINOR=$(($(printf '%d' "'${MINOR_LETTER}") - 65))
+            VERSION="${MAJOR}.${MINOR}.0"
+          else
+            VERSION="$INPUT_VERSION"
+          fi
+          
           echo "should_publish=true" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Manual run with version: $VERSION"
+          echo "✅ Manual run with version: $VERSION (input: $INPUT_VERSION)"
           exit 0
         fi
         
