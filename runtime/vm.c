@@ -1047,9 +1047,17 @@ static uint64_t value_hash(Value v) {
         }
         case VAL_BOOL:
             return v.as.boolean ? 1 : 0;
-        default:
-            // For other types, use pointer address
-            return (uint64_t)(uintptr_t)&v;
+        default: {
+            // For other types, hash the raw bytes of the Value struct
+            const unsigned char *bytes = (const unsigned char *)&v;
+            size_t size = sizeof(Value);
+            uint64_t hash = 14695981039346656037ULL;
+            for (size_t i = 0; i < size; i++) {
+                hash ^= (uint64_t)bytes[i];
+                hash *= 1099511628211ULL;
+            }
+            return hash;
+        }
     }
 }
 
