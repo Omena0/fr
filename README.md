@@ -33,10 +33,10 @@ pip install frscript
 This benchmark computes 1000 digits of pi.
 
 ```text
-Python: 0.421s
+Python: 0.326s
 Py VM: DNF
-C VM: 69.81s
-Native: 0.031s
+C VM: 64.62s
+Native: 0.034s
 ```
 
 ### Fibonacci
@@ -44,8 +44,8 @@ Native: 0.031s
 This benchmark computes the 1-billionth fibonacci number in mod 1 000 000.
 
 ```text
-Python: 40.435s
+Python: 40.227s
 Py VM: DNF
-C VM: 31.556s
-Native: 4.472s
+C VM: 31.654s
+Native: 4.483s
 ```
