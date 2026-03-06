@@ -178,7 +178,8 @@ class LivenessInfo:
 
 class LiveInterval:
     """Live interval for a single SSA value."""
-    __slots__ = ('value', 'start', 'end', 'reg', 'spill_slot', 'crosses_call')
+    __slots__ = ('value', 'start', 'end', 'reg', 'spill_slot', 'crosses_call',
+                 'forbidden_regs')
 
     def __init__(self, value: Value, start: int, end: int):
         self.value = value
@@ -187,6 +188,7 @@ class LiveInterval:
         self.reg: str | None = None
         self.spill_slot: int | None = None
         self.crosses_call = False
+        self.forbidden_regs: set[str] = set()  # registers this interval must NOT use
 
     def overlaps(self, other: LiveInterval) -> bool:
         return self.start < other.end and other.start < self.end
@@ -201,11 +203,18 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
     """Compute live intervals by numbering all instructions sequentially."""
     intervals: dict[int, LiveInterval] = {}  # value.id → interval
     call_points: list[int] = []  # instruction numbers of call instructions
+    # Points where specific registers are implicitly clobbered
+    # (rax, rdx by idiv; rcx by variable shift)
+    clobber_points: list[tuple[int, set[str]]] = []
     inst_num = 0
 
     # Track block instruction ranges
     block_start: dict[str, int] = {}
     block_end: dict[str, int] = {}
+
+    # Initialize intervals for function parameters (defined at entry, start=0)
+    for p in func.params:
+        intervals[p.id] = LiveInterval(p, 0, 0)
 
     # Number instructions and record def/use points
     for block in func.blocks:
@@ -223,6 +232,12 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
                            Op.MIN, Op.MAX,
                            Op.TRY_BEGIN, Op.TRY_END, Op.RAISE):
                 call_points.append(inst_num)
+
+            # Track implicit register clobbers
+            if inst.op in (Op.DIV, Op.MOD):
+                clobber_points.append((inst_num, {'rax', 'rdx'}))
+            elif inst.op in (Op.SHL, Op.SHR):
+                clobber_points.append((inst_num, {'rcx'}))
 
             # Record definition point
             if inst.result is not None:
@@ -260,17 +275,26 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
                     pred_end = block_end.get(pred_block.label, 0)
                     intervals[operand.id].end = max(intervals[operand.id].end, pred_end)
 
-    # Also extend intervals for params to cover their first use
-    for p in func.params:
-        if p.id in intervals:
-            intervals[p.id].start = 0
-
     # Mark intervals that span call instructions
     for iv in intervals.values():
         for cp in call_points:
             if iv.start <= cp < iv.end:
                 iv.crosses_call = True
                 break
+
+    # Mark forbidden registers for intervals spanning clobber points.
+    # If a value is live across a DIV/MOD (which clobbers rax/rdx) or
+    # SHL/SHR (which clobbers rcx), it must not be allocated to those regs.
+    # Exception: the result of the clobbering instruction itself is fine
+    # (codegen puts it in the right place).
+    for iv in intervals.values():
+        for cp, regs in clobber_points:
+            if iv.start < cp and iv.end > cp:
+                iv.forbidden_regs |= regs
+            elif iv.start == cp:
+                # This is the instruction's own result — it will be moved
+                # from the implicit reg to dst, so no conflict
+                pass
 
     return sorted(intervals.values(), key=lambda iv: iv.start)
 

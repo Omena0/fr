@@ -602,6 +602,8 @@ def main():
                 if wasm_dest.exists():
                     # Try to run with fr-wasm runner
                     runner_path = repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm'
+                    if not runner_path.exists():
+                        runner_path = repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm'
                     if runner_path.exists():
                         run_result = subprocess.run(
                             [str(runner_path), str(wasm_dest)],

@@ -147,21 +147,30 @@ class CodeGen:
 
     def _emit_phi_copies(self, func: Function, from_block: BasicBlock,
                          to_block: BasicBlock, alloc: RegAllocation):
-        """Emit register copies for PHI nodes when jumping from from_block to to_block."""
+        """Emit register copies for PHI nodes when jumping from from_block to to_block.
+        
+        Uses parallel move resolution to handle cases where one PHI reads
+        the old value of another PHI's destination register.
+        """
+        int_moves: list[tuple[str, str]] = []
+        float_moves: list[tuple[str, str]] = []
         for phi in to_block.phi_nodes:
             if phi.result is None:
                 continue
             dst = self._loc(phi.result, alloc)
-            # Find the operand corresponding to from_block
             for operand, pred_block in zip(phi.operands, phi.target_blocks):
                 if pred_block is from_block:
                     src = self._loc(operand, alloc)
                     if src != dst:
                         if is_float_type(phi.result.type):
-                            self._emit(f'    movsd {dst}, {src}')
+                            float_moves.append((src, dst))
                         else:
-                            self._emit(f'    mov {dst}, {src}')
+                            int_moves.append((src, dst))
                     break
+        if int_moves:
+            self._emit_parallel_int_moves(int_moves)
+        if float_moves:
+            self._emit_parallel_float_moves(float_moves)
 
     # ── Function emission ───────────────────────────────────────
 
@@ -1242,6 +1251,24 @@ class CodeGen:
                 src, dst = remaining[0]
                 self._emit(f'    mov r11, {src}')
                 remaining[0] = ('r11', dst)
+
+    def _emit_parallel_float_moves(self, moves: list[tuple[str, str]]):
+        """Emit XMM register moves handling conflicts where a target is another move's source."""
+        remaining = [(s, d) for s, d in moves if s != d]
+        while remaining:
+            progress = False
+            for i, (src, dst) in enumerate(remaining):
+                conflict = any(src2 == dst for j, (src2, _) in enumerate(remaining) if j != i)
+                if not conflict:
+                    self._emit(f'    movsd {dst}, {src}')
+                    remaining.pop(i)
+                    progress = True
+                    break
+            if not progress:
+                # Cycle detected — break with xmm15 temp
+                src, dst = remaining[0]
+                self._emit(f'    movsd xmm15, {src}')
+                remaining[0] = ('xmm15', dst)
 
     def _emit_call_aligned(self, func_name: str):
         """Emit a call with 16-byte stack alignment."""

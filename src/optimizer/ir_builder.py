@@ -375,30 +375,30 @@ class IRBuilder:
             return
 
         if op == 'STORE_CONST_I64':
-            if len(args) >= 2:
-                idx = int(args[0])
-                val = self._make_const(IRType.INT64, int(args[1]), block, source_line)
+            for i in range(0, len(args) - 1, 2):
+                idx = int(args[i])
+                val = self._make_const(IRType.INT64, int(args[i + 1]), block, source_line)
                 var_versions[idx] = val
             return
 
         if op == 'STORE_CONST_F64':
-            if len(args) >= 2:
-                idx = int(args[0])
-                val = self._make_const(IRType.FLOAT64, float(args[1]), block, source_line)
+            for i in range(0, len(args) - 1, 2):
+                idx = int(args[i])
+                val = self._make_const(IRType.FLOAT64, float(args[i + 1]), block, source_line)
                 var_versions[idx] = val
             return
 
         if op == 'STORE_CONST_BOOL':
-            if len(args) >= 2:
-                idx = int(args[0])
-                val = self._make_const(IRType.BOOL, args[1].lower() in ('true', '1'), block, source_line)
+            for i in range(0, len(args) - 1, 2):
+                idx = int(args[i])
+                val = self._make_const(IRType.BOOL, args[i + 1].lower() in ('true', '1'), block, source_line)
                 var_versions[idx] = val
             return
 
         if op == 'STORE_CONST_STR':
-            if len(args) >= 2:
-                idx = int(args[0])
-                val = self._make_const(IRType.STRING, args[1], block, source_line)
+            for i in range(0, len(args) - 1, 2):
+                idx = int(args[i])
+                val = self._make_const(IRType.STRING, args[i + 1], block, source_line)
                 var_versions[idx] = val
             return
 

@@ -145,21 +145,24 @@ class LinearScanAllocator:
                 else:
                     self._spill_at_interval(interval, is_float=True)
             else:
+                forbidden = interval.forbidden_regs
                 if interval.crosses_call:
                     # Prefer callee-saved registers for values live across calls
-                    reg = self._pick_callee_saved_gpr()
+                    reg = self._pick_callee_saved_gpr(forbidden)
                     if reg:
                         self._assign(interval, reg)
-                    elif self._free_gprs:
-                        reg = self._free_gprs.pop()
+                    else:
+                        reg = self._pick_free_gpr(forbidden)
+                        if reg:
+                            self._assign(interval, reg)
+                        else:
+                            self._spill_at_interval(interval, is_float=False)
+                else:
+                    reg = self._pick_free_gpr(forbidden)
+                    if reg:
                         self._assign(interval, reg)
                     else:
                         self._spill_at_interval(interval, is_float=False)
-                elif self._free_gprs:
-                    reg = self._free_gprs.pop()
-                    self._assign(interval, reg)
-                else:
-                    self._spill_at_interval(interval, is_float=False)
 
         # Track which callee-saved registers are used
         for reg in self.result.reg_map.values():
@@ -171,10 +174,18 @@ class LinearScanAllocator:
 
         return self.result
 
-    def _pick_callee_saved_gpr(self) -> str | None:
-        """Pick a free callee-saved GPR, or None if none available."""
+    def _pick_callee_saved_gpr(self, forbidden: set[str] = frozenset()) -> str | None:
+        """Pick a free callee-saved GPR not in forbidden set, or None."""
         for i, reg in enumerate(self._free_gprs):
-            if reg in CALLEE_SAVED_GPRS:
+            if reg in CALLEE_SAVED_GPRS and reg not in forbidden:
+                self._free_gprs.pop(i)
+                return reg
+        return None
+
+    def _pick_free_gpr(self, forbidden: set[str] = frozenset()) -> str | None:
+        """Pick any free GPR not in forbidden set, or None."""
+        for i, reg in enumerate(self._free_gprs):
+            if reg not in forbidden:
                 self._free_gprs.pop(i)
                 return reg
         return None
