@@ -29,6 +29,7 @@ out*
 *.wat
 *.o
 *.html
+*.gcda
 
 # Node
 node_modules

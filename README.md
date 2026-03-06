@@ -5,8 +5,9 @@
 ![Tests](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
 ![LoC](https://img.shields.io/badge/Lines%20Of%20Code-56.7K-red?logo=code)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
+![AI Code](https://img.shields.io/badge/AI_code-59%25-red?logo=Github%20copilot)
 
-Simple bytecode compiled C-style scripting language.
+Simple bytecode compiled C-style compiled language.
 
 ## Installation
 
@@ -17,6 +18,7 @@ pip install frscript
 ## Features:
 
 - **Command line launcher** (`fr`)
+- **Compiled language** - Fast by design
 - **File and Socket I/O** - Low-level file operations and sockets.
 - **Multiprocessing**. - Easy threading with fork() and wait().
 - **Python integration** - You can use any Python libraries with Frscript.

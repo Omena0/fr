@@ -1,4 +1,4 @@
-
+#pragma no_eval
 
 str pi_spigot(int n_digits) {
     list a = []
