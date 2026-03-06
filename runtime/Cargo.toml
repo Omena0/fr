@@ -8,4 +8,4 @@ name = "fr-wasm"
 path = "wasm_runner.rs"
 
 [dependencies]
-wasmtime = "26.0"
+wasmtime = "36.0"
