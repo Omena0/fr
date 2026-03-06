@@ -5,7 +5,6 @@
 ![Tests](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
 ![LoC](https://img.shields.io/badge/Lines%20Of%20Code-68.3K-red?logo=code)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
-![AI Code](https://img.shields.io/badge/AI_code-59%25-red?logo=Github%20copilot)
 
 Simple bytecode compiled C-style compiled language.
 
