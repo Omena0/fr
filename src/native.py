@@ -1152,6 +1152,7 @@ class X86Compiler:
         # If more than 6 args, leave remaining on stack (already in correct order)
         # TODO: handle > 6 arguments properly
 
+        if is_external:
             # Ensure stack is aligned before external calls, using the platform ABI.
             self._emit_external_call(func_name)
         else:

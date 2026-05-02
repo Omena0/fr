@@ -411,8 +411,16 @@ def run_single_test_wrapper(args):
             'file': test_file,
             'py_passed': False,
             'vm_passed': False,
+            'native_passed': False,
+            'wasm_passed': False,
+            'py_skipped': False,
+            'vm_skipped': False,
+            'native_skipped': False,
+            'wasm_skipped': False,
             'py_error': 'Test timeout',
             'vm_error': 'Test timeout',
+            'native_error': 'Test timeout',
+            'wasm_error': 'Test timeout',
             'mismatch': False
         }
     except Exception as e:
@@ -420,8 +428,16 @@ def run_single_test_wrapper(args):
             'file': test_file,
             'py_passed': False,
             'vm_passed': False,
+            'native_passed': False,
+            'wasm_passed': False,
+            'py_skipped': False,
+            'vm_skipped': False,
+            'native_skipped': False,
+            'wasm_skipped': False,
             'py_error': f'Test runner error: {e}',
             'vm_error': f'Test runner error: {e}',
+            'native_error': f'Test runner error: {e}',
+            'wasm_error': f'Test runner error: {e}',
             'mismatch': False
         }
 
