@@ -9,3 +9,4 @@ Improved WASM test execution by failing loudly when wat2wasm is missing and only
 Fixed WASM compiler SWITCH_JUMP_TABLE type inference crashes.
 Fixed Python runtime division-by-zero behavior so try/except "ZeroDivisionError" works and errors format consistently in tests.
 Fixed native exception and runtime-error calls to use aligned external calls, including setjmp, list bounds checks, and zero-division slow paths.
+Implemented new optimizer and IR pipeline

@@ -7,7 +7,7 @@ from .bytecode_opt import BytecodeOptimizer
 __all__ = ['BytecodeOptimizer', 'compile_native_ssa']
 
 
-def compile_native_ssa(bytecode: str, opt_level: int = 2) -> str:
+def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
     """Compile bytecode to x86_64 assembly using the SSA IR pipeline.
 
     This is the new native compilation path:

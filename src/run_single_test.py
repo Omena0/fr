@@ -38,7 +38,7 @@ sys.argv = [sys.argv[0], '-d']  # Enable debug mode
 from parser import parse
 from compiler import compile_ast_to_bytecode
 from runtime import run, format_runtime_exception # type: ignore
-from native import compile as compile_to_native
+from optimizer import compile_native_ssa
 
 RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
 RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
@@ -511,7 +511,7 @@ def main():
                         c_import_files.append(c_file_abs)
 
                 # Compile bytecode to x86_64 assembly
-                assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
+                assembly = compile_native_ssa(bytecode, opt_level=2)
 
                 # Assemble via stdin without writing the assembly file
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.o', delete=False) as f:

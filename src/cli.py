@@ -490,18 +490,12 @@ def native_cmd(args):
     try:
         # Check for optimization flag, but -O0 disables it
         optimize = '-O' in args and '-O0' not in args
-        use_ssa = '--ssa' in args
 
-        if use_ssa:
-            from optimizer import compile_native_ssa
-            opt_level = 3 if '-O3' in args else (2 if optimize else 1)
-            print(f'SSA optimizer (level {opt_level})')
-            asm = compile_native_ssa(bytecode, opt_level)
-        else:
-            import native
-            if optimize:
-                print('Optimizing assembly')
-            asm, runtime_deps = native.compile(bytecode, optimize)
+        from optimizer import compile_native_ssa
+        opt_level = 3 if '-O3' in args else (2 if optimize else 1)
+        if optimize:
+            print(f'Optimizer (level {opt_level})')
+        asm = compile_native_ssa(bytecode, opt_level)
 
         # Always write assembly to temp file for building
         with open(asm_file, 'w') as f:
