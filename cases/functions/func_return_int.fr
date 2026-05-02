@@ -1,6 +1,6 @@
 // !15
 
-int triple(x) {
+int triple(int x) {
     return x * 3
 }
 

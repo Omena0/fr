@@ -6,7 +6,7 @@ Focuses on reducing instruction count, eliminating redundant operations, and imp
 code efficiency for GCC -Ofast compilation.
 """
 
-from typing import List
+from typing import List, Optional
 import re
 
 DISABLE_OPTIMIZATIONS = False
@@ -17,6 +17,22 @@ class AssemblyOptimizer:
     def __init__(self):
         self.labels_used: set = set()  # Track which labels are actually jumped to
         self.label_counter: int = 0
+
+    @staticmethod
+    def _is_comment_or_empty(line: str) -> bool:
+        stripped = line.strip()
+        return not stripped or stripped.startswith('#')
+
+    @staticmethod
+    def _is_label(line: str) -> bool:
+        return line.strip().endswith(':')
+
+    @staticmethod
+    def _is_gpr(reg: str) -> bool:
+        return reg in {
+            'rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp',
+            'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
+        }
 
     def optimize(self, assembly: str) -> str:
         """Apply all optimization passes to assembly code"""
@@ -61,8 +77,23 @@ class AssemblyOptimizer:
         # Pass 12: Use immediate operands where possible
         lines = self.use_immediate_operands(lines)
 
+        # Pass 12.1: Optimize struct decode move chains
+        lines = self.optimize_struct_decode_moves(lines)
+
+        # Pass 12.2: Optimize mov chains and push immediates
+        lines = self.optimize_mov_chains_and_push(lines)
+
+        # Pass 12.3: Remove redundant struct ref move before decode
+        lines = self.remove_redundant_struct_ref_mov(lines)
+
         # Pass 13: Optimize conditional branches
         lines = self.optimize_conditional_branches(lines)
+
+        # Pass 13.1: Collapse jump chains (jmp/jcc to label that immediately jumps)
+        lines = self.optimize_jump_chains(lines)
+
+        # Pass 13.2: Remove unused local labels
+        lines = self.remove_unused_local_labels(lines)
 
         # Pass 14: Remove unnecessary zero extensions
         lines = self.optimize_zero_extensions(lines)
@@ -195,7 +226,142 @@ class AssemblyOptimizer:
         # Pass 55: Optimize multiply by small constant patterns
         lines = self.optimize_multiply_by_constant_patterns(lines)
 
+        # Pass 56: Common no-op and size-reduction patterns
+        lines = self.optimize_common_patterns(lines)
+
         return '\n'.join(lines)
+
+    def optimize_common_patterns(self, lines: List[str]) -> List[str]:
+        """Apply common no-op/size reduction patterns (20+ safe cases)."""
+        def is_comment_or_empty(line: str) -> bool:
+            stripped = line.strip()
+            return not stripped or stripped.startswith('#')
+
+        def is_label(line: str) -> bool:
+            stripped = line.strip()
+            return stripped.endswith(':')
+
+        def next_instruction_index(start: int) -> Optional[int]:
+            i = start
+            while i < len(lines):
+                s = lines[i].strip()
+                if not s or s.startswith('#') or is_label(lines[i]) or s.startswith('.'):
+                    i += 1
+                    continue
+                return i
+            return None
+
+        def uses_flags(line: str) -> bool:
+            s = line.strip()
+            if not s:
+                return False
+            op = s.split()[0]
+            return (
+                op.startswith('j') or
+                op.startswith('set') or
+                op.startswith('cmov') or
+                op in {'adc', 'sbb', 'lahf', 'sahf'}
+            )
+
+        result: List[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Pattern 1: remove empty lines
+            if not stripped:
+                i += 1
+                continue
+
+            # Pattern 2: remove comment-only lines
+            if stripped.startswith('#'):
+                i += 1
+                continue
+
+            # Pattern 3: strip trailing comments for non-string directives
+            if '#' in line and not stripped.startswith(('.asciz', '.ascii', '.string')):
+                before = line.split('#', 1)[0].rstrip()
+                line = before
+                stripped = line.strip()
+                if not stripped:
+                    i += 1
+                    continue
+
+            # Pattern 4: remove nop
+            if stripped == 'nop':
+                i += 1
+                continue
+
+            # Pattern 5: remove mov reg, reg
+            m = re.match(r'\s*mov\s+([a-z0-9]+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 6: remove movsd xmm, xmm
+            m = re.match(r'\s*movsd\s+(xmm\d+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 7: remove movss xmm, xmm
+            m = re.match(r'\s*movss\s+(xmm\d+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 8: remove movq reg, reg
+            m = re.match(r'\s*movq\s+([a-z0-9]+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 9: remove movq xmm, xmm
+            m = re.match(r'\s*movq\s+(xmm\d+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 10: remove lea reg, [reg]
+            m = re.match(r'\s*lea\s+([a-z0-9]+),\s*\[\1\]\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 11: remove lea reg, [reg + 0]
+            m = re.match(r'\s*lea\s+([a-z0-9]+),\s*\[\1\s*\+\s*0\]\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Pattern 12: remove xchg reg, reg
+            m = re.match(r'\s*xchg\s+([a-z0-9]+),\s*\1\s*$', stripped)
+            if m:
+                i += 1
+                continue
+
+            # Patterns 13-20: remove no-op arithmetic/shift with flag-safety check
+            no_op_patterns = [
+                r'add\s+[a-z0-9]+,\s*0$',
+                r'sub\s+[a-z0-9]+,\s*0$',
+                r'add\s+qword\s+ptr\s+\[[^\]]+\],\s*0$',
+                r'sub\s+qword\s+ptr\s+\[[^\]]+\],\s*0$',
+                r'imul\s+[a-z0-9]+,\s*1$',
+                r'shl\s+[a-z0-9]+,\s*0$',
+                r'shr\s+[a-z0-9]+,\s*0$',
+                r'sar\s+[a-z0-9]+,\s*0$',
+            ]
+            if any(re.match(pat, stripped) for pat in no_op_patterns):
+                next_idx = next_instruction_index(i + 1)
+                if next_idx is None or not uses_flags(lines[next_idx]):
+                    i += 1
+                    continue
+
+            result.append(line)
+            i += 1
+
+        return result
 
     def _track_label_usage(self, lines: List[str]):
         """Track which labels are actually used as jump targets"""
@@ -214,10 +380,95 @@ class AssemblyOptimizer:
                 target = parts[1]
                 self.labels_used.add(target)
 
+    def optimize_jump_chains(self, lines: List[str]) -> List[str]:
+        """Collapse jumps to labels that immediately jump elsewhere."""
+        label_to_jump: dict[str, str] = {}
+
+        def is_label(line: str) -> bool:
+            stripped = line.strip()
+            return stripped.endswith(':')
+
+        def label_name(line: str) -> str:
+            return line.strip().rstrip(':')
+
+        def next_real_index(start: int) -> Optional[int]:
+            i = start
+            while i < len(lines):
+                s = lines[i].strip()
+                if not s or s.startswith('#'):
+                    i += 1
+                    continue
+                return i
+            return None
+
+        # Build label -> immediate jump target map
+        i = 0
+        while i < len(lines):
+            if is_label(lines[i]):
+                lbl = label_name(lines[i])
+                j = next_real_index(i + 1)
+                if j is not None:
+                    parts = lines[j].strip().split()
+                    if parts and parts[0] == 'jmp' and len(parts) > 1:
+                        label_to_jump[lbl] = parts[1]
+            i += 1
+
+        def resolve_target(target: str) -> str:
+            seen: set[str] = set()
+            cur = target
+            while cur in label_to_jump and cur not in seen:
+                seen.add(cur)
+                cur = label_to_jump[cur]
+            return cur
+
+        jump_ops = {'jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
+                    'ja', 'jae', 'jb', 'jbe'}
+
+        result: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                result.append(line)
+                continue
+            parts = stripped.split()
+            if parts and parts[0] in jump_ops and len(parts) > 1:
+                target = parts[1]
+                new_target = resolve_target(target)
+                if new_target != target:
+                    indent = self._get_indent(line)
+                    result.append(f"{indent}{parts[0]} {new_target}")
+                    continue
+            result.append(line)
+        return result
+
+    def remove_unused_local_labels(self, lines: List[str]) -> List[str]:
+        """Remove unused local labels (only .L* labels)."""
+        self._track_label_usage(lines)
+
+        def is_label(line: str) -> bool:
+            stripped = line.strip()
+            return stripped.endswith(':')
+
+        result: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if is_label(line):
+                label = stripped.rstrip(':')
+                if label.startswith('.L') and label not in self.labels_used:
+                    continue
+            result.append(line)
+        return result
+
     def remove_redundant_push_pop(self, lines: List[str]) -> List[str]:
         """Remove push/pop pairs that cancel out"""
         result = []
         i = 0
+
+        def is_gpr(reg: str) -> bool:
+            return reg in {
+                'rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp',
+                'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
+            }
 
         while i < len(lines):
             line = lines[i].strip()
@@ -230,8 +481,10 @@ class AssemblyOptimizer:
             if i + 1 < len(lines) and line.startswith('push '):
                 next_line = lines[i + 1].strip()
                 if next_line.startswith('pop '):
-                    push_reg = line.split()[1] if len(line.split()) > 1 else None
-                    pop_reg = next_line.split()[1] if len(next_line.split()) > 1 else None
+                    push_parts = line.split()
+                    pop_parts = next_line.split()
+                    push_reg = push_parts[1] if len(push_parts) == 2 and is_gpr(push_parts[1]) else None
+                    pop_reg = pop_parts[1] if len(pop_parts) == 2 and is_gpr(pop_parts[1]) else None
 
                     if push_reg and pop_reg and push_reg != pop_reg:
                         indent = self._get_indent(lines[i])
@@ -668,6 +921,183 @@ class AssemblyOptimizer:
                         continue
 
             result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_struct_decode_moves(self, lines: List[str]) -> List[str]:
+        """Reduce redundant moves in struct decode sequences."""
+        result: List[str] = []
+        i = 0
+
+        def is_label(line: str) -> bool:
+            return line.strip().endswith(':')
+
+        while i < len(lines):
+            line = lines[i].rstrip()
+            stripped = line.strip()
+
+            if not stripped or stripped.startswith('#') or is_label(line):
+                result.append(lines[i])
+                i += 1
+                continue
+
+            if i + 4 < len(lines):
+                l0 = lines[i].strip()
+                l1 = lines[i + 1].strip()
+                l2 = lines[i + 2].strip()
+                l3 = lines[i + 3].strip()
+                l4 = lines[i + 4].strip()
+
+                m0 = re.match(r'mov\s+rax,\s+(r[0-9]+|r1[0-5])$', l0)
+                m1 = re.match(r'mov\s+rbx,\s+rax$', l1)
+                m2 = re.match(r'shr\s+rbx,\s*16$', l2)
+                m3 = re.match(r'mov\s+rcx,\s+rax$', l3)
+                m4 = re.match(r'and\s+rcx,\s*0xFFFF$', l4)
+
+                if m0 and m1 and m2 and m3 and m4:
+                    src = m0.group(1)
+                    indent = self._get_indent(lines[i])
+                    result.append(f"{indent}mov rbx, {src}")
+                    result.append(f"{indent}shr rbx, 16")
+                    result.append(f"{indent}mov rcx, {src}")
+                    result.append(f"{indent}and rcx, 0xFFFF")
+                    i += 5
+                    continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_mov_chains_and_push(self, lines: List[str]) -> List[str]:
+        """Optimize common mov chains and push patterns."""
+        result: List[str] = []
+        i = 0
+
+        def is_label(line: str) -> bool:
+            return line.strip().endswith(':')
+
+        def is_comment_or_empty(line: str) -> bool:
+            stripped = line.strip()
+            return not stripped or stripped.startswith('#')
+
+        def is_gpr(reg: str) -> bool:
+            return reg in {
+                'rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp',
+                'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
+            }
+
+        def is_mem(operand: str) -> bool:
+            return operand.startswith('[') and operand.endswith(']')
+
+        def parse_imm(operand: str) -> int | None:
+            try:
+                if operand.lower().startswith('0x'):
+                    return int(operand, 16)
+                return int(operand)
+            except Exception:
+                return None
+
+        while i < len(lines):
+            if is_comment_or_empty(lines[i]) or is_label(lines[i]):
+                result.append(lines[i])
+                i += 1
+                continue
+
+            if i + 1 < len(lines):
+                l0 = lines[i].strip()
+                l1 = lines[i + 1].strip()
+
+                m0 = re.match(r'mov\s+([a-z0-9]+),\s*(.+)$', l0)
+                m1 = re.match(r'mov\s+([a-z0-9]+),\s*([a-z0-9]+)$', l1)
+                if m0 and m1:
+                    src_reg = m0.group(1)
+                    src_val = m0.group(2).strip()
+                    dst_reg = m1.group(1)
+                    second_src = m1.group(2)
+                    if second_src == src_reg and dst_reg != src_reg:
+                        indent = self._get_indent(lines[i + 1])
+                        result.append(lines[i])
+                        result.append(f"{indent}mov {dst_reg}, {src_val}")
+                        i += 2
+                        continue
+                    if second_src == src_reg and dst_reg == src_reg:
+                        # mov reg, X; mov reg, reg -> remove second
+                        result.append(lines[i])
+                        i += 2
+                        continue
+
+                m2 = re.match(r'mov\s+([a-z0-9]+),\s*(.+)$', l0)
+                m3 = re.match(r'push\s+([a-z0-9]+)$', l1)
+                if m2 and m3:
+                    src_reg = m2.group(1)
+                    src_val = m2.group(2).strip()
+                    push_reg = m3.group(1)
+                    if src_reg == push_reg:
+                        imm = parse_imm(src_val)
+                        indent = self._get_indent(lines[i + 1])
+                        if imm is not None and -2147483648 <= imm <= 2147483647:
+                            result.append(f"{indent}push {imm}")
+                            i += 2
+                            continue
+                        if is_gpr(src_val):
+                            result.append(f"{indent}push {src_val}")
+                            i += 2
+                            continue
+                        if is_mem(src_val):
+                            result.append(f"{indent}push qword ptr {src_val}")
+                            i += 2
+                            continue
+
+                m4 = re.match(r'mov\s+([a-z0-9]+),\s*(.+)$', l0)
+                m5 = re.match(r'mov\s+([a-z0-9]+),\s*([a-z0-9]+)$', l1)
+                if m4 and m5:
+                    src_reg = m4.group(1)
+                    src_val = m4.group(2).strip()
+                    dst_reg = m5.group(1)
+                    second_src = m5.group(2)
+                    if second_src == src_reg and dst_reg != src_reg:
+                        imm = parse_imm(src_val)
+                        if imm is not None:
+                            indent = self._get_indent(lines[i + 1])
+                            if -2147483648 <= imm <= 2147483647:
+                                result.append(lines[i])
+                                result.append(f"{indent}mov {dst_reg}, {imm}")
+                                i += 2
+                                continue
+                            result.append(lines[i])
+                            result.append(f"{indent}movabs {dst_reg}, {imm}")
+                            i += 2
+                            continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def remove_redundant_struct_ref_mov(self, lines: List[str]) -> List[str]:
+        """Drop redundant mov rax, reg before struct instance decode."""
+        result: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            m0 = re.match(r'mov\s+rax,\s*([a-z0-9]+)$', stripped)
+            if m0 and i + 2 < len(lines):
+                l1 = lines[i + 1].strip()
+                l2 = lines[i + 2].strip()
+                m1 = re.match(r'mov\s+rbx,\s*([a-z0-9]+)$', l1)
+                m2 = re.match(r'shr\s+rbx,\s*16$', l2)
+                if m1 and m2 and m1.group(1) == m0.group(1):
+                    result.append(lines[i + 1])
+                    result.append(lines[i + 2])
+                    i += 3
+                    continue
+
+            result.append(line)
             i += 1
 
         return result

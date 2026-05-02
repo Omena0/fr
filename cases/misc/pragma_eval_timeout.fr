@@ -1,0 +1,10 @@
+// !2
+#pragma eval_timeout 0.1
+
+int add_one(int x) {
+    return x + 1
+}
+
+void main() {
+    println(add_one(1))
+}

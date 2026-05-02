@@ -6,6 +6,7 @@ Test content is read from stdin.
 """
 import sys
 import os
+import shutil
 import tempfile
 import subprocess
 from io import StringIO
@@ -26,18 +27,40 @@ from native import compile as compile_to_native
 
 RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
 RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
+RUNTIME_HDR = RUNTIME_DIR / 'runtime_lib.h'
 RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
 RUNTIME_OBJ = Path(tempfile.gettempdir()) / 'frscript_runtime_lib.o'
 
 def ensure_runtime_object():
-    """Compile runtime_lib.c to an object file and reuse it across tests."""
+    """Compile runtime_lib.c to an object file and reuse it across tests.
+
+    Invalidates the cached object when either the .c or .h file is newer.
+    Runs a syntax-only pre-check first so that a broken runtime_lib.c
+    produces a clear error message instead of silently failing every native
+    test with an empty output string.
+    """
     src_mtime = RUNTIME_SRC.stat().st_mtime
+    hdr_mtime = RUNTIME_HDR.stat().st_mtime if RUNTIME_HDR.exists() else 0
+    newest = max(src_mtime, hdr_mtime)
+
     if RUNTIME_OBJ.exists():
         try:
-            if RUNTIME_OBJ.stat().st_mtime >= src_mtime:
+            if RUNTIME_OBJ.stat().st_mtime >= newest:
                 return str(RUNTIME_OBJ)
         except OSError:
             pass
+
+    # Syntax pre-check: catch broken C source early with clear diagnostics
+    syntax_cmd = [
+        'gcc', '-fsyntax-only',
+        '-I', RUNTIME_INCLUDE_DIR,
+        str(RUNTIME_SRC)
+    ]
+    syntax_result = subprocess.run(syntax_cmd, capture_output=True, text=True)
+    if syntax_result.returncode != 0:
+        raise RuntimeError(
+            f'runtime_lib.c has syntax errors:\n{syntax_result.stderr.strip()}'
+        )
 
     tmp_obj = RUNTIME_OBJ.with_suffix('.o.tmp')
     compile_cmd = [
@@ -62,8 +85,17 @@ def extract_error_message(error_text):
     if not error_text:
         return ''
 
-    # Check if already in ?line,col:message format (from runtime errors)
     lines = error_text.strip().split('\n')
+    
+    # For WAT validation errors, look for "error:" lines
+    for line in lines:
+        if 'error:' in line.lower() and ('out.wat' in line or '.wat:' in line):
+            # Extract the actual error message after "error:"
+            error_part = line.split('error:', 1)
+            if len(error_part) > 1:
+                return error_part[1].strip()
+    
+    # Check if already in ?line,col:message format (from runtime errors)
     for line in reversed(lines):
         if line.startswith('?'):
             # Already in correct format, just return it
@@ -103,6 +135,16 @@ def extract_error_message(error_text):
                 message = match.group(3)
                 return f"?{line_num},{char_num}:{message}"
 
+    # For Python exceptions, look for the actual exception message
+    for line in reversed(lines):
+        if line.strip() and not line.startswith(' ') and not line.startswith('File ') and not line.startswith('Traceback'):
+            # This is likely the exception message
+            if ':' in line and 'Error' in line:
+                # Format like "WasmCompilerError: message"
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    return parts[1].strip()
+
     # Parser errors have format: "...Line X:Y: Message" or "...Line X: Message"
     # Expected format is: "?X:Message" or "?X,Y:Message"
     if 'Line ' in error_text:
@@ -140,6 +182,7 @@ def main():
     skip_py = '--skip-py' in original_argv
     skip_c = '--skip-c' in original_argv
     skip_native = '--skip-native' in original_argv
+    skip_wasm = '--skip-wasm' in original_argv
 
     # Test content is read from stdin
     content = sys.stdin.read()
@@ -150,18 +193,18 @@ def main():
     lines = content.split('\n')
     expect_lines = []
     code_start_idx = 0
-    
+
     for i, line in enumerate(lines):
         stripped = line.strip()
-        
+
         # Skip pragma directives when looking for expectations
         if stripped.startswith('#pragma'):
             code_start_idx = i + 1
             continue
-        
+
         if stripped.startswith('//'):
             comment_content = stripped[2:].strip()  # Remove '//' and whitespace
-            
+
             if not expect_lines:
                 # First expectation line: Always treat as expectation
                 expect_lines.append(comment_content)
@@ -186,14 +229,14 @@ def main():
         else:
             # Found non-comment, non-blank line - stop
             break
-    
+
     if not expect_lines:
         print("ERROR:Invalid test format - no expectation comment found")
         return 1
-    
+
     # Join all expectation lines with newlines
     expect_line = '\n'.join(expect_lines)
-    
+
     # Build code with blank lines to preserve line numbers
     code = '\n' * code_start_idx + '\n'.join(lines[code_start_idx:])
 
@@ -285,13 +328,10 @@ def main():
             py_output = string_io.getvalue().strip()
         except Exception as e:
             py_output = None
-            # Format runtime errors properly
-            if isinstance(e, RuntimeError):
-                formatted_error = format_runtime_exception(e)
-                # Extract the message in ?line:message format
-                py_error = extract_error_message(formatted_error)
-            else:
-                py_error = str(e)
+            # Format runtime errors properly with location info
+            formatted_error = format_runtime_exception(e)
+            # Extract the message in ?line:message format
+            py_error = extract_error_message(formatted_error)
         finally:
             sys.stdout = old_stdout
     else:
@@ -319,12 +359,12 @@ def main():
                         # Make C file path absolute relative to test file
                         test_dir = os.path.dirname(os.path.abspath(test_filename))
                         c_file_abs = os.path.join(test_dir, c_file)
-                        
+
                         # Compile to .so
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.so', delete=False) as so_f:
                             so_file = so_f.name
                             c_import_so_files.append(so_file)
-                        
+
                         # Compile C file to shared library
                         compile_result = subprocess.run(
                             ['gcc', '-fPIC', '-shared', '-o', so_file, c_file_abs],
@@ -414,123 +454,189 @@ def main():
     # Run on native compiler (unless skipped)
     native_error = None
     native_output = None
-    if not skip_native:
-        if compile_error:
-            native_error = compile_error
-        else:
-            runtime_obj = None
+    if skip_native:
+        # Skip native compiler if requested
+        native_output = None
+        native_error = "SKIPPED"
+        native_error = "SKIPPED"
+
+    elif compile_error:
+        native_error = compile_error
+    else:
+        runtime_obj = None
+        try:
+            runtime_obj = ensure_runtime_object()
+        except Exception as exc:
+            native_error = str(exc)
+        if runtime_obj:
             try:
-                runtime_obj = ensure_runtime_object()
-            except Exception as exc:
-                native_error = str(exc)
-            if runtime_obj:
-                try:
-                    # Extract C imports from bytecode
-                    c_import_files = []
-                    for line in bytecode.split('\n'):
-                        if line.startswith('# C import:'):
-                            c_file = line.split(':', 1)[1].strip()
-                            # Make C file path absolute relative to test file
-                            test_dir = os.path.dirname(os.path.abspath(test_filename))
-                            c_file_abs = os.path.join(test_dir, c_file)
-                            c_import_files.append(c_file_abs)
+                # Extract C imports from bytecode
+                c_import_files = []
+                for line in bytecode.split('\n'):
+                    if line.startswith('# C import:'):
+                        c_file = line.split(':', 1)[1].strip()
+                        # Make C file path absolute relative to test file
+                        test_dir = os.path.dirname(os.path.abspath(test_filename))
+                        c_file_abs = os.path.join(test_dir, c_file)
+                        c_import_files.append(c_file_abs)
 
-                    # Compile bytecode to x86_64 assembly
-                    assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
+                # Compile bytecode to x86_64 assembly
+                assembly, runtime_deps = compile_to_native(bytecode, optimize=True)
 
-                    # Assemble via stdin without writing the assembly file
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.o', delete=False) as f:
-                        obj_file = f.name
+                # Assemble via stdin without writing the assembly file
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.o', delete=False) as f:
+                    obj_file = f.name
 
-                    asm_result = subprocess.run(
-                        ['as', '-o', obj_file, '-'],
-                        input=assembly,
+                asm_result = subprocess.run(
+                    ['as', '-o', obj_file, '-'],
+                    input=assembly,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if asm_result.returncode != 0:
+                    native_error = extract_error_message(asm_result.stderr)
+                    native_output = None
+                else:
+                    # Compile assembly and runtime to binary using gcc
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
+                        native_bin = f.name
+
+                    compile_cmd = [
+                        'gcc',
+                        obj_file,
+                        runtime_obj,
+                        f'-I{RUNTIME_INCLUDE_DIR}',
+                        '-O3', '-march=native', '-mtune=native',
+                        '-ffunction-sections', '-fdata-sections',
+                        '-Wl,--gc-sections',
+                        '-o',
+                        native_bin,
+                    ] + c_import_files + [  # Add C import files to the command
+                        '-lm',
+                        '-no-pie',
+                    ]
+
+                    result = subprocess.run(
+                        compile_cmd,
                         capture_output=True,
                         text=True,
                         timeout=10
                     )
 
-                    if asm_result.returncode != 0:
-                        native_error = extract_error_message(asm_result.stderr)
+                    if result.returncode != 0:
+                        native_error = extract_error_message(result.stderr)
                         native_output = None
                     else:
-                        # Compile assembly and runtime to binary using gcc
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
-                            native_bin = f.name
-
-                        compile_cmd = [
-                            'gcc',
-                            obj_file,
-                            runtime_obj,
-                            f'-I{RUNTIME_INCLUDE_DIR}',
-                            '-O3', '-march=native', '-mtune=native',
-                            '-ffunction-sections', '-fdata-sections',
-                            '-Wl,--gc-sections',
-                            '-o',
-                            native_bin,
-                        ] + c_import_files + [  # Add C import files to the command
-                            '-lm',
-                            '-no-pie',
-                        ]
+                        env = os.environ.copy()
+                        env['FR_TEST_MODE'] = '1'
 
                         result = subprocess.run(
-                            compile_cmd,
+                            [native_bin],
                             capture_output=True,
                             text=True,
-                            timeout=10
+                            timeout=5,
+                            env=env
                         )
 
+                        native_output = result.stdout.strip() if result.stdout else ""
+
                         if result.returncode != 0:
-                            native_error = extract_error_message(result.stderr)
-                            native_output = None
-                        else:
-                            env = os.environ.copy()
-                            env['FR_TEST_MODE'] = '1'
+                            if result.returncode < 0:
+                                signal_num = -result.returncode
+                                signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
+                                signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
+                                stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
+                            else:
+                                stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
+                            native_error = extract_error_message(stderr_text)
 
-                            result = subprocess.run(
-                                [native_bin],
-                                capture_output=True,
-                                text=True,
-                                timeout=5,
-                                env=env
-                            )
-
-                            native_output = result.stdout.strip() if result.stdout else ""
-
-                            if result.returncode != 0:
-                                if result.returncode < 0:
-                                    signal_num = -result.returncode
-                                    signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
-                                    signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
-                                    stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
-                                else:
-                                    stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
-                                native_error = extract_error_message(stderr_text)
-
-                                if stderr_text and not native_output:
-                                    native_output = None
-
-                        try:
-                            os.unlink(native_bin)
-                        except:
-                            pass
+                            if stderr_text and not native_output:
+                                native_output = None
 
                     try:
-                        os.unlink(obj_file)
+                        os.unlink(native_bin)
                     except:
                         pass
 
-                except subprocess.TimeoutExpired:
-                    native_error = "Timeout"
-                    native_output = None
-                except Exception as e:
-                    native_error = str(e)
-                    native_output = None
+                try:
+                    os.unlink(obj_file)
+                except:
+                    pass
+
+            except subprocess.TimeoutExpired:
+                native_error = "Timeout"
+                native_output = None
+            except Exception as e:
+                native_error = str(e)
+                native_output = None
+
+    # Run Wasm emission command (unless skipped)
+    from pathlib import Path as _Path
+    wasm_error = None
+    wasm_output = None
+    if skip_wasm:
+        wasm_error = "SKIPPED"
     else:
-        # Skip native compiler if requested
-        native_output = None
-        native_error = "SKIPPED"
-        native_error = "SKIPPED"
+        wasm_dir = tempfile.mkdtemp(prefix='fr-wasm-')
+        os.makedirs(wasm_dir, exist_ok=True)
+        wasm_dest = _Path(wasm_dir) / 'output.wasm'
+        wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', test_filename, '-o', str(wasm_dest)]
+        repo_root = _Path(__file__).parent.parent
+        try:
+            # Compile to WASM
+            result = subprocess.run(
+                wasm_command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(repo_root)
+            )
+            if result.returncode != 0:
+                stderr_text = result.stderr.strip() if result.stderr else result.stdout.strip()
+                wasm_error = extract_error_message(stderr_text)
+            else:
+                # Compilation succeeded, now try to execute
+                # Check if the .wasm file was generated
+                if wasm_dest.exists():
+                    # Try to run with fr-wasm runner
+                    runner_path = repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm'
+                    if not runner_path.exists():
+                        runner_path = repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm'
+                    if runner_path.exists():
+                        run_result = subprocess.run(
+                            [str(runner_path), str(wasm_dest)],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            cwd=str(repo_root)
+                        )
+                        if run_result.returncode != 0:
+                            stderr_text = run_result.stderr.strip() if run_result.stderr else run_result.stdout.strip()
+                            wasm_error = extract_error_message(stderr_text)
+                        else:
+                            wasm_output = run_result.stdout.strip()
+                    else:
+                        # No runner available, just mark as compile-only success
+                        wasm_output = "Compiled (no runner)"
+                else:
+                    # WASM file not generated - capture the actual error from output
+                    stderr_text = result.stderr.strip() if result.stderr else ""
+                    stdout_text = result.stdout.strip() if result.stdout else ""
+                    # Look for error messages in the output
+                    combined_output = (stderr_text + "\n" + stdout_text).strip()
+                    if "Error:" in combined_output or "error:" in combined_output:
+                        wasm_error = extract_error_message(combined_output)
+                    else:
+                        wasm_error = "WASM file not generated"
+
+        except subprocess.TimeoutExpired:
+            wasm_error = "Timeout"
+        except Exception as exc:
+            wasm_error = str(exc)
+        finally:
+            shutil.rmtree(wasm_dir, ignore_errors=True)
 
     # Output results
     if py_error and py_error != "SKIPPED":
@@ -582,6 +688,13 @@ def main():
     else:
         # No output and no error
         print("NATIVE_OUTPUT:")
+
+    # Wasm command output (compile-only, no expectation match)
+    if wasm_error:
+        print(f"WASM_ERROR:{wasm_error}")
+    else:
+        escaped_wasm = wasm_output.replace('\\', '\\\\').replace('\n', '\\n') if wasm_output is not None else ''
+        print(f"WASM_OUTPUT:{escaped_wasm}")
 
     escaped_expect = expect.replace('\\', '\\\\').replace('\n', '\\n')
     print(f"EXPECT:{escaped_expect}")

@@ -1,6 +1,6 @@
 // !100
 
-int square(x) {
+int square(int x) {
     return x * x
 }
 

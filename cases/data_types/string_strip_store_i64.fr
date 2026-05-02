@@ -1,0 +1,8 @@
+// !2
+
+void main() {
+    list l = ["  a:b  "]
+    s = strip(l[0])
+    list parts = split(s, ":")
+    println(len(parts))
+}

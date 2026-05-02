@@ -1,0 +1,21 @@
+// !1\n2\n3
+
+struct Vec3 {
+    int x
+    int y
+    int z
+}
+
+void printVec(Vec3 v) {
+    int a = v.x
+    int b = v.y
+    int c = v.z
+    println(a)
+    println(b)
+    println(c)
+}
+
+void main() {
+    Vec3 v = Vec3(1, 2, 3)
+    printVec(v)
+}

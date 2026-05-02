@@ -20,6 +20,7 @@ struct RuntimeList {
     int64_t length;
     int64_t capacity;
     int elem_type; // 0=int, 1=string, 2=other
+    int is_static; // 1 if static list
 };
 typedef struct RuntimeList RuntimeList;
 
@@ -30,6 +31,19 @@ struct RuntimeSet {
     int elem_type; // 0=int, 1=string, 2=other
 };
 typedef struct RuntimeSet RuntimeSet;
+
+typedef struct {
+    int64_t key;
+    int64_t value;
+    int key_type; // 0=int, 1=string
+} RuntimeDictEntry;
+
+struct RuntimeDict {
+    RuntimeDictEntry* entries;
+    int64_t length;
+    int64_t capacity;
+};
+typedef struct RuntimeDict RuntimeDict;
 
 // ============================================================================
 // Basic I/O
@@ -188,6 +202,12 @@ double runtime_str_to_float(const char* str);
  * Create a new empty list
  */
 RuntimeList* runtime_list_new();
+RuntimeList* runtime_list_new_capacity(int64_t capacity, int elem_type, int is_static);
+
+/**
+ * Create a new list from an array of values
+ */
+RuntimeList* runtime_list_from_array(int64_t* values, int64_t count);
 
 /**
  * Append an integer to a list
@@ -254,6 +274,11 @@ void runtime_list_free(RuntimeList* list);
  * Create a new empty set
  */
 RuntimeSet* runtime_set_new();
+
+RuntimeDict* runtime_dict_new();
+int64_t runtime_dict_get(RuntimeDict* dict, int64_t key, int key_type);
+void runtime_dict_set(RuntimeDict* dict, int64_t key, int key_type, int64_t value);
+int runtime_dict_contains(RuntimeDict* dict, int64_t key, int key_type);
 
 /**
  * Add value to set

@@ -1,0 +1,10 @@
+// !3
+
+void main() {
+    int n = int(10 / 3)
+    list a = []
+    for (i, 5) {
+        a.append(i)
+    }
+    println(a[n])
+}

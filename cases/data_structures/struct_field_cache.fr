@@ -1,0 +1,12 @@
+// !10
+
+struct Point {
+    int x
+    int y
+}
+
+int main() {
+    Point p = Point(3, 4)
+    println(p.x + p.x + p.y)
+    return 0
+}

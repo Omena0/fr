@@ -1,6 +1,6 @@
 # VM Instructions Reference
 
-This document describes all bytecode instructions supported by the fr VM.
+This document describes all bytecode instructions in fr.
 
 ## Table of Contents
 
@@ -14,16 +14,19 @@ This document describes all bytecode instructions supported by the fr VM.
 - [Stack Operations](#stack-operations)
 - [List Operations](#list-operations)
 - [Set Operations](#set-operations)
+- [Dict Operations](#dict-operations)
 - [Struct Operations](#struct-operations)
 - [Type Conversions](#type-conversions)
 - [String Operations](#string-operations)
 - [Math Functions](#math-functions)
 - [File I/O Operations](#file-io-operations)
+- [Process Management](#process-management)
 - [Socket Operations](#socket-operations)
 - [Python Interop](#python-interop)
 - [Exception Handling](#exception-handling)
 - [Built-in Functions](#built-in-functions)
 - [Optimized Instructions](#optimized-instructions)
+- [Directives](#directives)
 
 ---
 
@@ -65,7 +68,7 @@ Push a boolean constant onto the stack.
 
 Push multiple int64 constants onto the stack.
 
-**Syntax:** `CONST_I64_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_I64_MULTI <val1> <val2> ...`
 
 **Stack:** `-> int64 int64 ...`
 
@@ -73,7 +76,7 @@ Push multiple int64 constants onto the stack.
 
 Push multiple float64 constants onto the stack.
 
-**Syntax:** `CONST_F64_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_F64_MULTI <val1> <val2> ...`
 
 **Stack:** `-> float64 float64 ...`
 
@@ -81,7 +84,7 @@ Push multiple float64 constants onto the stack.
 
 Push multiple string constants onto the stack.
 
-**Syntax:** `CONST_STR_MULTI <count> <str1> <str2> ...`
+**Syntax:** `CONST_STR_MULTI <str1> <str2> ...`
 
 **Stack:** `-> string string ...`
 
@@ -89,7 +92,7 @@ Push multiple string constants onto the stack.
 
 Push multiple boolean constants onto the stack.
 
-**Syntax:** `CONST_BOOL_MULTI <count> <val1> <val2> ...`
+**Syntax:** `CONST_BOOL_MULTI <val1> <val2> ...`
 
 **Stack:** `-> bool bool ...`
 
@@ -110,16 +113,18 @@ Push a bytes constant onto the stack.
 ### LOAD
 
 Load a local variable onto the stack.
+Can have any num args. In which case it will load all.
 
-**Syntax:** `LOAD <var_index>`
+**Syntax:** `LOAD <var_index> ...`
 
 **Stack:** `-> value`
 
 ### STORE
 
 Pop a value from the stack and store it in a local variable.
+Can have any num args. In which case it will store all.
 
-**Syntax:** `STORE <var_index>`
+**Syntax:** `STORE <var_index> ...`
 
 **Stack:** `value ->`
 
@@ -143,7 +148,7 @@ Pop a value from the stack and store it in a global variable.
 
 Store integer constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_I64 <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_I64 <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -151,7 +156,7 @@ Store integer constants directly to variable slots without using the stack.
 
 Store float constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_F64 <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_F64 <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -159,7 +164,7 @@ Store float constants directly to variable slots without using the stack.
 
 Store boolean constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_BOOL <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_BOOL <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -167,7 +172,7 @@ Store boolean constants directly to variable slots without using the stack.
 
 Store string constants directly to variable slots without using the stack.
 
-**Syntax:** `STORE_CONST_STR <count> <slot1> <val1> <slot2> <val2> ...`
+**Syntax:** `STORE_CONST_STR <slot1> <val1> <slot2> <val2> ...`
 
 **Stack:** `->`
 
@@ -198,26 +203,37 @@ Alias one local variable to another (pointer alias, not a copy).
 ### LOAD_MULTI
 
 Load multiple variables onto the stack at once.
+Same as normal LOAD but explicit.
 
-**Syntax:** `LOAD_MULTI <count> <var1> <var2> ...`
+**Syntax:** `LOAD_MULTI <var1> <var2> ...`
 
 **Stack:** `-> value1 value2 ...`
 
 ### FUSED_LOAD_STORE
 
 Interleaved load/store operations.
+Does not have to be in pairs.
 
-**Syntax:** `FUSED_LOAD_STORE <count> <src1> <dst1> <src2> <dst2> ...`
+**Syntax:** `FUSED_LOAD_STORE <src1> <dst1> <src2> <dst2> ...`
 
 **Stack:** `->`
 
 ### FUSED_STORE_LOAD
 
 Interleaved store/load operations.
+Does not have to be in pairs.
 
-**Syntax:** `FUSED_STORE_LOAD <count> <dst1> <src1> <dst2> <src2> ...`
+**Syntax:** `FUSED_STORE_LOAD <dst1> <src1> <dst2> <src2> ...`
 
 **Stack:** `->`
+
+### FUSED_GET_STORE_LOAD
+
+Fused STRUCT_GET + STORE + LOAD triplets. Each triplet pops a struct from the stack, gets a field, stores the field value to a local, then loads a local onto the stack. Any number of triplets.
+
+**Syntax:** `FUSED_GET_STORE_LOAD <field1> <dst1> <src1> <field2> <dst2> <src2> ...`
+
+**Stack:** `struct -> value` (per triplet: pops struct, pushes loaded local)
 
 ---
 
@@ -603,6 +619,16 @@ Create a new empty list.
 
 **Stack:** `-> list`
 
+### LIST_NEW_CAP
+
+Create a new list with reserved capacity (static list).
+
+**Syntax:** `LIST_NEW_CAP <capacity> <elem_type>`
+
+**Stack:** `-> list`
+
+**Description:** Reserves space for `<capacity>` elements without initializing them. `elem_type` is a type hint (0=int, 1=string, 2=float, 3=bool, -1=unknown).
+
 ### LIST_APPEND
 
 Append a value to a list.
@@ -696,6 +722,42 @@ Get the number of elements in a set.
 **Stack:** `set -> int64`
 
 **Description:** Returns the number of unique elements in the set.
+
+---
+
+## Dict Operations
+
+### DICT_NEW
+
+Create a new empty dictionary.
+
+**Syntax:** `DICT_NEW`
+
+**Stack:** `-> dict`
+
+### DICT_GET
+
+Get a value by key.
+
+**Syntax:** `DICT_GET`
+
+**Stack:** `dict key -> value`
+
+### DICT_SET
+
+Set a value by key and return the dict.
+
+**Syntax:** `DICT_SET`
+
+**Stack:** `dict key value -> dict`
+
+### DICT_CONTAINS
+
+Check whether a dict contains a key.
+
+**Syntax:** `DICT_CONTAINS`
+
+**Stack:** `dict key -> bool`
 
 ### CONTAINS
 
@@ -1298,6 +1360,14 @@ Raise an exception.
 ---
 
 ## Built-in Functions
+
+### INPUT
+
+Read a line of input from stdin. Pops an optional prompt string from the stack, prints it, then reads a line.
+
+**Syntax:** `INPUT`
+
+**Stack:** `prompt_string -> input_string`
 
 ### BUILTIN_PRINT
 

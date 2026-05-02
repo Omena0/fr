@@ -1,0 +1,9 @@
+// !5
+
+int count_rest(int first, int *rest) {
+    return len(rest)
+}
+
+void main() {
+    println(str(count_rest(1, 2, 3, 4, 5, 6)))
+}

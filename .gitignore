@@ -7,17 +7,30 @@ extension/*
 extension
 changes.txt
 plan.md
+src/_version.py
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
 .eggs/
+*.gcda
 
 # Runtime
 runtime/vm
+runtime/target
+
+# Output files
+out*
 *.bc
 *.bin
+*.wasm
+*.wasm.json
+*.wat
 *.o
+*.html
 *.gcda
-src/_version.py
+
+# Node
+node_modules
+package*

@@ -1,0 +1,13 @@
+// !3\n1\n2\n3
+
+int main() {
+    list nums[3:int] = []
+    nums[0] = 1
+    nums[1] = 2
+    nums[2] = 3
+    println(len(nums))
+    println(nums[0])
+    println(nums[1])
+    println(nums[2])
+    return 0
+}
