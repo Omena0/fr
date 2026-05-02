@@ -1190,8 +1190,8 @@ static uint64_t value_hash(Value v) {
         case VAL_BOOL:
             return v.as.boolean ? 1 : 0;
         default:
-            // For other types, use pointer address
-            return (uint64_t)(uintptr_t)&v;
+            // For other types, use pointer address from the value payload
+            return (uint64_t)(uintptr_t)v.as.list;
     }
 }
 
