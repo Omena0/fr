@@ -2468,7 +2468,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         # Func call - check for function call syntax (allows C imports and undefined functions to be caught at compile time)
         # But skip method calls (those with '.' in the name) - they're handled separately below
-        if stream.peek_char(1) == '(' and word not in ['if', 'while', 'for', 'switch', 'try', 'struct'] and '.' not in word:
+        if stream.peek_char(1) == '(' and word not in ['if', 'while', 'for', 'switch', 'try', 'struct', 'assert'] and '.' not in word:
             # This looks like a function call
             if word in funcs:
                 func_info = funcs[word]

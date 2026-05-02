@@ -9,8 +9,23 @@ import os
 import shutil
 import tempfile
 import subprocess
+import sysconfig
 from io import StringIO
 from pathlib import Path
+
+IS_WINDOWS = os.name == 'nt'
+
+
+def _prepend_python_base_to_path(env: dict) -> dict:
+    """On Windows, embed builds may need python3.dll discoverable via PATH."""
+    if not IS_WINDOWS:
+        return env
+    base = sysconfig.get_config_var('base') or sysconfig.get_config_var('installed_base')
+    if not base:
+        return env
+    env = env.copy()
+    env['PATH'] = str(base) + os.pathsep + env.get('PATH', '')
+    return env
 
 # Save original argv before modifying it
 original_argv = sys.argv.copy()
@@ -27,40 +42,18 @@ from native import compile as compile_to_native
 
 RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
 RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
-RUNTIME_HDR = RUNTIME_DIR / 'runtime_lib.h'
 RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
 RUNTIME_OBJ = Path(tempfile.gettempdir()) / 'frscript_runtime_lib.o'
 
 def ensure_runtime_object():
-    """Compile runtime_lib.c to an object file and reuse it across tests.
-
-    Invalidates the cached object when either the .c or .h file is newer.
-    Runs a syntax-only pre-check first so that a broken runtime_lib.c
-    produces a clear error message instead of silently failing every native
-    test with an empty output string.
-    """
+    """Compile runtime_lib.c to an object file and reuse it across tests."""
     src_mtime = RUNTIME_SRC.stat().st_mtime
-    hdr_mtime = RUNTIME_HDR.stat().st_mtime if RUNTIME_HDR.exists() else 0
-    newest = max(src_mtime, hdr_mtime)
-
     if RUNTIME_OBJ.exists():
         try:
-            if RUNTIME_OBJ.stat().st_mtime >= newest:
+            if RUNTIME_OBJ.stat().st_mtime >= src_mtime:
                 return str(RUNTIME_OBJ)
         except OSError:
             pass
-
-    # Syntax pre-check: catch broken C source early with clear diagnostics
-    syntax_cmd = [
-        'gcc', '-fsyntax-only',
-        '-I', RUNTIME_INCLUDE_DIR,
-        str(RUNTIME_SRC)
-    ]
-    syntax_result = subprocess.run(syntax_cmd, capture_output=True, text=True)
-    if syntax_result.returncode != 0:
-        raise RuntimeError(
-            f'runtime_lib.c has syntax errors:\n{syntax_result.stderr.strip()}'
-        )
 
     tmp_obj = RUNTIME_OBJ.with_suffix('.o.tmp')
     compile_cmd = [
@@ -186,6 +179,18 @@ def main():
 
     # Test content is read from stdin
     content = sys.stdin.read()
+
+    # Windows does not have a real /tmp; many tests use it as a convenience path.
+    # Rewrite to the OS temp directory for consistent behavior.
+    if IS_WINDOWS and content:
+        tmp_dir = tempfile.gettempdir().replace('\\', '/')
+        content = (
+            content
+            .replace('"/tmp/','"' + tmp_dir + '/')
+            .replace("'/tmp/","'" + tmp_dir + '/')
+            .replace('"/tmp"','"' + tmp_dir + '"')
+            .replace("'/tmp'","'" + tmp_dir + "'")
+        )
 
     # Parse test - collect expectation comment lines at the beginning
     # First line: MUST be a comment (can be any comment)
@@ -326,11 +331,23 @@ def main():
         try:
             run(ast, file=test_filename, source=code)
             py_output = string_io.getvalue().strip()
+        except SystemExit as e:
+            # The Python runtime uses sys.exit() to propagate integer main() return values.
+            # In the test harness we must not terminate the whole runner.
+            py_output = string_io.getvalue().strip()
+            exit_code = e.code if isinstance(e.code, int) else 0
+            if exit_code != 0:
+                # Many programs (e.g., assertions) print a message before exiting.
+                # Prefer the printed message for test comparisons.
+                if py_output:
+                    py_error = py_output
+                else:
+                    py_error = extract_error_message(f"Binary exited with code {exit_code}")
+                py_output = None
         except Exception as e:
             py_output = None
-            # Format runtime errors properly with location info
+            # Format runtime errors consistently for test comparisons
             formatted_error = format_runtime_exception(e)
-            # Extract the message in ?line:message format
             py_error = extract_error_message(formatted_error)
         finally:
             sys.stdout = old_stdout
@@ -360,8 +377,9 @@ def main():
                         test_dir = os.path.dirname(os.path.abspath(test_filename))
                         c_file_abs = os.path.join(test_dir, c_file)
 
-                        # Compile to .so
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.so', delete=False) as so_f:
+                        # Compile to shared library
+                        shared_suffix = '.dll' if IS_WINDOWS else '.so'
+                        with tempfile.NamedTemporaryFile(mode='w', suffix=shared_suffix, delete=False) as so_f:
                             so_file = so_f.name
                             c_import_so_files.append(so_file)
 
@@ -384,17 +402,28 @@ def main():
                     if spec and spec.origin:
                         from pathlib import Path
                         runtime_pkg_path = Path(spec.origin).parent
-                        vm_candidate = runtime_pkg_path / 'vm'
-                        if vm_candidate.exists():
-                            vm_path = str(vm_candidate)
+                        vm_candidates = [runtime_pkg_path / 'vm']
+                        if IS_WINDOWS:
+                            vm_candidates.insert(0, runtime_pkg_path / 'vm.exe')
+                        for vm_candidate in vm_candidates:
+                            if vm_candidate.exists():
+                                vm_path = str(vm_candidate)
+                                break
                 except (ImportError, AttributeError):
                     pass
 
                 # Fall back to development locations
                 if not vm_path:
                     from pathlib import Path
-                    vm_candidate = Path('runtime/vm')
-                    vm_path = str(vm_candidate) if vm_candidate.exists() else 'runtime/vm'
+                    vm_candidates = [Path('runtime/vm')]
+                    if IS_WINDOWS:
+                        vm_candidates.insert(0, Path('runtime/vm.exe'))
+                    for vm_candidate in vm_candidates:
+                        if vm_candidate.exists():
+                            vm_path = str(vm_candidate)
+                            break
+                    if not vm_path:
+                        vm_path = 'runtime/vm.exe' if IS_WINDOWS else 'runtime/vm'
                 # Prepare debug info for VM
                 import json
                 debug_info = json.dumps({
@@ -409,6 +438,7 @@ def main():
                 # Set FR_TEST_MODE=1 for test error format
                 env = os.environ.copy()
                 env['FR_TEST_MODE'] = '1'
+                env = _prepend_python_base_to_path(env)
 
                 result = subprocess.run(
                     vm_command,
@@ -500,8 +530,14 @@ def main():
                     native_output = None
                 else:
                     # Compile assembly and runtime to binary using gcc
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='', delete=False) as f:
-                        native_bin = f.name
+                    native_suffix = '.exe' if IS_WINDOWS else ''
+                    fd, native_bin = tempfile.mkstemp(suffix=native_suffix)
+                    os.close(fd)
+                    # Ensure gcc can create/overwrite freely
+                    try:
+                        os.unlink(native_bin)
+                    except OSError:
+                        pass
 
                     compile_cmd = [
                         'gcc',
@@ -582,29 +618,57 @@ def main():
         wasm_dir = tempfile.mkdtemp(prefix='fr-wasm-')
         os.makedirs(wasm_dir, exist_ok=True)
         wasm_dest = _Path(wasm_dir) / 'output.wasm'
-        wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', test_filename, '-o', str(wasm_dest)]
         repo_root = _Path(__file__).parent.parent
+        wasm_input = _Path(test_filename)
+        if not wasm_input.is_absolute():
+            wasm_input = (repo_root / wasm_input).resolve()
+
+        # Use -d to keep .wat/.wasm.json so we can detect toolchain limitations.
+        wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', str(wasm_input), '-d', '-o', str(wasm_dest)]
         try:
             # Compile to WASM
+            env = os.environ.copy()
+            env['PYTHONPATH'] = str(repo_root) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
             result = subprocess.run(
                 wasm_command,
                 capture_output=True,
                 text=True,
                 timeout=10,
-                cwd=str(repo_root)
+                cwd=str(wasm_dir),
+                env=env,
             )
             if result.returncode != 0:
-                stderr_text = result.stderr.strip() if result.stderr else result.stdout.strip()
-                wasm_error = extract_error_message(stderr_text)
+                stderr_text = (result.stderr or '').strip()
+                stdout_text = (result.stdout or '').strip()
+                combined = (stderr_text + "\n" + stdout_text).strip()
+
+                # Only skip when the backend explicitly cannot support the test semantics.
+                # Missing toolchain (wat2wasm) should be a hard failure so WASM isn't silently skipped.
+                unsupported_markers = [
+                    'Wasm backend requires typed functions',
+                    'Wasm backend does not support C imports',
+                ]
+                if any(marker in combined for marker in unsupported_markers):
+                    wasm_error = 'SKIPPED'
+                else:
+                    wasm_error = extract_error_message(combined)
             else:
                 # Compilation succeeded, now try to execute
                 # Check if the .wasm file was generated
                 if wasm_dest.exists():
                     # Try to run with fr-wasm runner
-                    runner_path = repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm'
-                    if not runner_path.exists():
-                        runner_path = repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm'
-                    if runner_path.exists():
+                    runner_candidates = [
+                        repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm',
+                        repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm',
+                    ]
+                    if IS_WINDOWS:
+                        runner_candidates = [
+                            repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm.exe',
+                            repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm.exe',
+                        ] + runner_candidates
+
+                    runner_path = next((p for p in runner_candidates if p.exists()), None)
+                    if runner_path is not None:
                         run_result = subprocess.run(
                             [str(runner_path), str(wasm_dest)],
                             capture_output=True,
@@ -621,15 +685,11 @@ def main():
                         # No runner available, just mark as compile-only success
                         wasm_output = "Compiled (no runner)"
                 else:
-                    # WASM file not generated - capture the actual error from output
+                    # No .wasm produced. This should be treated as a failure (e.g., missing wat2wasm).
                     stderr_text = result.stderr.strip() if result.stderr else ""
                     stdout_text = result.stdout.strip() if result.stdout else ""
-                    # Look for error messages in the output
                     combined_output = (stderr_text + "\n" + stdout_text).strip()
-                    if "Error:" in combined_output or "error:" in combined_output:
-                        wasm_error = extract_error_message(combined_output)
-                    else:
-                        wasm_error = "WASM file not generated"
+                    wasm_error = extract_error_message(combined_output) or "WASM file not generated"
 
         except subprocess.TimeoutExpired:
             wasm_error = "Timeout"

@@ -140,8 +140,49 @@ def _file_join(*paths: str):
     return _os.path.join(*paths)
 
 # Process management functions
+_fork_processes = {}  # Maps synthetic pid -> subprocess.Popen
+_next_fork_pid = 1
+
 def _fork() -> int:
     """Fork the current process. Returns 0 in child, child PID in parent, -1 on error."""
+    if _os.name == 'nt':
+        global _next_fork_pid
+        # Child-mode marker: the child process will start from the beginning and must
+        # treat the first fork() call as returning 0.
+        if _os.environ.get('FR_FORK_CHILD') == '1':
+            _os.environ.pop('FR_FORK_CHILD', None)
+            return 0
+
+        try:
+            import subprocess
+            import sys
+            # Lazily import to avoid import cycles at module load time.
+            import runtime as _runtime  # type: ignore
+
+            fr_file = getattr(_runtime, '_runtime_file', '')
+            if not fr_file:
+                return -1
+
+            env = _os.environ.copy()
+            env['FR_FORK_CHILD'] = '1'
+
+            # Re-run the same file under the Python runtime.
+            # Note: This is a pragmatic Windows fallback (no OS-level fork).
+            proc = subprocess.Popen(
+                [sys.executable, '-m', 'src.cli', fr_file, '--python'],
+                cwd=_os.getcwd(),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            pid = _next_fork_pid
+            _next_fork_pid += 1
+            _fork_processes[pid] = proc
+            return pid
+        except Exception:
+            return -1
+
     try:
         pid = _os.fork()
         if pid == 0:
@@ -162,6 +203,16 @@ def _fork() -> int:
 
 def _wait(pid: int) -> int:
     """Wait for a child process to finish. Returns exit status."""
+    if _os.name == 'nt':
+        proc = _fork_processes.get(pid)
+        if proc is None:
+            return -1
+        try:
+            return_code = proc.wait()
+            return int(return_code)
+        finally:
+            _fork_processes.pop(pid, None)
+
     try:
         _, status = _os.waitpid(pid, 0)
         return _os.WEXITSTATUS(status)

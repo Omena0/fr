@@ -1,0 +1,11 @@
+WASM: Implemented BUILTIN_PI, CONTAINS for list/set/string membership, and proper float division-by-zero runtime error reporting with line/column.
+WASM runner: Added list_contains host import and extended runtime_error to accept a column so WASM errors match the existing test formats.
+Fixed Windows C VM stack overflows by allocating VM and debug-info buffers on the heap.
+Changed Windows runtime build output to vm.exe and made Makefile clean remove both vm and vm.exe.
+Improved CLI and test runner VM executable detection on Windows (vm.exe fallback).
+Made the isolated test runner Windows-friendly by normalizing paths and mapping /tmp paths to the OS temp directory.
+Made binary AST compression resilient when the optional zstd module is missing by falling back to zlib.
+Improved WASM test execution by failing loudly when wat2wasm is missing and only skipping cases that the WASM backend explicitly cannot support.
+Fixed WASM compiler SWITCH_JUMP_TABLE type inference crashes.
+Fixed Python runtime division-by-zero behavior so try/except "ZeroDivisionError" works and errors format consistently in tests.
+Fixed native exception and runtime-error calls to use aligned external calls, including setjmp, list bounds checks, and zero-division slow paths.

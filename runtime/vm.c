@@ -17,6 +17,8 @@
 // Dynamic loading (POSIX: dlfcn.h, Windows: LoadLibrary/GetProcAddress)
 #if defined(_WIN32)
     #define WIN32_LEAN_AND_MEAN
+    // WinSock2 must be included before windows.h
+    #include <winsock2.h>
     #include <windows.h>
 
     #ifndef RTLD_NOW
@@ -40,7 +42,6 @@
             return;
         }
 
-        // Trim trailing CR/LF
         while (len > 0 && (msg_buf[len - 1] == '\r' || msg_buf[len - 1] == '\n')) {
             msg_buf[len - 1] = '\0';
             len--;
@@ -98,21 +99,111 @@
 #include <ctype.h>
 #include <gmp.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+
+#if defined(_WIN32)
+    // WinSock
+    #include <ws2tcpip.h>
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <process.h>
+    #include <io.h>
+    #if defined(__MINGW32__) || defined(__MINGW64__)
+        #include <unistd.h>
+    #endif
+    #ifndef ssize_t
+        typedef long long ssize_t;
+    #endif
+    #ifndef SHUT_RDWR
+        #define SHUT_RDWR SD_BOTH
+    #endif
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+// Simple process table for fork/wait emulation.
+// PIDs returned to the VM are 1-based indices into this array.
+static HANDLE fr_child_processes[256] = {0};
+static int fr_child_process_count = 0;
+#endif
 #include <fcntl.h>
-#include <netdb.h>
+#if !defined(_WIN32)
+    #include <netdb.h>
+#endif
 #include <sys/stat.h>
 #include <dirent.h>
-#include <libgen.h>
+#if !defined(_WIN32)
+    #include <libgen.h>
+#endif
 #include <limits.h>
-#include <sys/wait.h>
+#if !defined(_WIN32)
+    #include <sys/wait.h>
+#endif
 
 // Python C API for embedding Python interpreter
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
+#if !defined(FR_NO_PYTHON)
+    #define PY_SSIZE_T_CLEAN
+    #include <Python.h>
+#else
+    typedef struct _object PyObject;
+    #ifndef Py_XINCREF
+        #define Py_XINCREF(o) ((void)0)
+    #endif
+    #ifndef Py_XDECREF
+        #define Py_XDECREF(o) ((void)0)
+    #endif
+    #ifndef Py_DECREF
+        #define Py_DECREF(o) ((void)0)
+    #endif
+#endif
+
+#if defined(_WIN32)
+static char *fr_basename(char *path) {
+    if (!path || !*path)
+        return path;
+    size_t len = strlen(path);
+    while (len > 0 && (path[len - 1] == '/' || path[len - 1] == '\\')) {
+        path[len - 1] = '\0';
+        len--;
+    }
+    char *last_slash = strrchr(path, '/');
+    char *last_bslash = strrchr(path, '\\');
+    char *sep = last_slash;
+    if (last_bslash && (!sep || last_bslash > sep))
+        sep = last_bslash;
+    return sep ? (sep + 1) : path;
+}
+
+static char *fr_dirname(char *path) {
+    if (!path || !*path)
+        return path;
+    size_t len = strlen(path);
+    while (len > 0 && (path[len - 1] == '/' || path[len - 1] == '\\')) {
+        path[len - 1] = '\0';
+        len--;
+    }
+    char *last_slash = strrchr(path, '/');
+    char *last_bslash = strrchr(path, '\\');
+    char *sep = last_slash;
+    if (last_bslash && (!sep || last_bslash > sep))
+        sep = last_bslash;
+    if (!sep) {
+        strcpy(path, ".");
+        return path;
+    }
+    if (sep == path) {
+        path[1] = '\0';
+        return path;
+    }
+    *sep = '\0';
+    return path;
+}
+#endif
 
 // Helper function to unescape string literals from bytecode
 char* unescape_string(const char* str) {
@@ -140,6 +231,20 @@ char* unescape_string(const char* str) {
     }
     result[j] = '\0';
     return result;
+}
+
+static char *fr_strndup(const char *s, size_t n) {
+    if (!s)
+        return strdup("");
+    size_t len = strlen(s);
+    if (len > n)
+        len = n;
+    char *out = malloc(len + 1);
+    if (!out)
+        return strdup("");
+    memcpy(out, s, len);
+    out[len] = '\0';
+    return out;
 }
 
 // Branch prediction hints
@@ -226,7 +331,6 @@ typedef struct List
     Value *items; // Dynamic array of values
     int length;   // Current number of items
     int capacity; // Allocated capacity
-    bool is_static; // Static list flag (no dynamic growth)
 } List;
 
 // Struct structure
@@ -372,7 +476,6 @@ typedef enum
     OP_LOAD_MULTI,       // Load multiple variables at once (LOAD_MULTI n v1 v2 ... vn)
     OP_FUSED_LOAD_STORE, // Interleaved load/store (FUSED_LOAD_STORE n src1 dst1 src2 dst2 ...)
     OP_FUSED_STORE_LOAD, // Interleaved store/load (FUSED_STORE_LOAD n dst1 src1 dst2 src2 ...)
-    OP_FUSED_GET_STORE_LOAD, // Fused STRUCT_GET+STORE+LOAD triplets (FUSED_GET_STORE_LOAD field1 dst1 src1 ...)
     // Fused load + arithmetic operations (reduce dispatch overhead in hot loops)
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
@@ -397,7 +500,6 @@ typedef enum
 
     // List/Array operations
     OP_LIST_NEW,    // Create new empty list
-    OP_LIST_NEW_CAP, // Create list with reserved capacity (capacity elem_type -> list)
     OP_LIST_APPEND, // Append value to list (list, value -> list)
     OP_LIST_GET,    // Get element at index (list, index -> value)
     OP_LIST_SET,    // Set element at index (list, index, value -> list)
@@ -407,7 +509,6 @@ typedef enum
     OP_LIST_NEW_F64,    // Create list with float64 values (count val1 val2 ... -> list)
     OP_LIST_NEW_STR,    // Create list with string values (count val1 val2 ... -> list)
     OP_LIST_NEW_BOOL,   // Create list with boolean values (count val1 val2 ... -> list)
-    OP_LIST_NEW_STACK,  // Create list from values on stack (count val1 val2 ... -> list)
 
     // Set operations (hash table for O(1) operations)
     OP_SET_NEW,      // Create new empty set (-> set)
@@ -415,12 +516,6 @@ typedef enum
     OP_SET_REMOVE,   // Remove value from set (set, value -> set)
     OP_SET_CONTAINS, // Check if set contains value (set, value -> bool)
     OP_SET_LEN,      // Get set length (set -> int)
-
-    // Dict operations
-    OP_DICT_NEW,      // Create new empty dict (-> dict)
-    OP_DICT_GET,      // Get value by key (dict, key -> value)
-    OP_DICT_SET,      // Set value by key (dict, key, value -> dict)
-    OP_DICT_CONTAINS, // Check if dict contains key (dict, key -> bool)
 
     // Container membership check
     OP_CONTAINS,     // Generic membership check (container, value -> bool)
@@ -568,7 +663,6 @@ typedef struct
     int start_pc;
     int end_pc;
     ValueType return_type;
-    int has_varargs;  // 1 if last arg is variadic
 } Function;
 
 // Label info
@@ -891,46 +985,29 @@ Value value_make_void()
 }
 
 // List helper functions
-List *list_new_with_capacity(int capacity, bool is_static) {
+List *list_new() {
     List *list = malloc(sizeof(List));
     if (!list)
     {
         fprintf(stderr, "Error: Failed to allocate list\n");
         exit(1);
     }
-    if (capacity < 0) {
-        capacity = 0;
-    }
-    list->capacity = capacity > 0 ? capacity : 0;
+    list->capacity = 8; // Start with capacity of 8
     list->length = 0;
-    list->is_static = is_static;
-    if (list->capacity > 0) {
-        list->items = malloc(sizeof(Value) * list->capacity);
-        if (!list->items)
-        {
-            fprintf(stderr, "Error: Failed to allocate list items\n");
-            exit(1);
-        }
-    } else {
-        list->items = NULL;
+    list->items = malloc(sizeof(Value) * list->capacity);
+    if (!list->items)
+    {
+        fprintf(stderr, "Error: Failed to allocate list items\n");
+        exit(1);
     }
     return list;
-}
-
-List *list_new() {
-    return list_new_with_capacity(8, false);
 }
 
 void list_append(List *list, Value value) {
     if (list->length >= list->capacity)
     {
-        if (list->is_static)
-        {
-            fprintf(stderr, "Error: Cannot append beyond static list capacity\n");
-            exit(1);
-        }
         // Double capacity
-        list->capacity = list->capacity > 0 ? list->capacity * 2 : 8;
+        list->capacity *= 2;
         list->items = realloc(list->items, sizeof(Value) * list->capacity);
         if (!list->items)
         {
@@ -1008,16 +1085,6 @@ void list_set(List *list, int index, Value value) {
     if (index < 0)
     {
         index = list->length + index;
-    }
-
-    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity)
-    {
-        // Extend length and initialize intermediate slots to void
-        for (int i = list->length; i < index; i++)
-        {
-            list->items[i] = value_make_void();
-        }
-        list->length = index + 1;
     }
 
     if (index < 0 || index >= list->length)
@@ -1122,17 +1189,9 @@ static uint64_t value_hash(Value v) {
         }
         case VAL_BOOL:
             return v.as.boolean ? 1 : 0;
-        default: {
-            // For other types, hash the raw bytes of the Value struct
-            const unsigned char *bytes = (const unsigned char *)&v;
-            size_t size = sizeof(Value);
-            uint64_t hash = 14695981039346656037ULL;
-            for (size_t i = 0; i < size; i++) {
-                hash ^= (uint64_t)bytes[i];
-                hash *= 1099511628211ULL;
-            }
-            return hash;
-        }
+        default:
+            // For other types, use pointer address
+            return (uint64_t)(uintptr_t)&v;
     }
 }
 
@@ -1485,13 +1544,23 @@ void vm_init(VM *vm)
     vm->arena = arena_create();
     vm->string_intern = string_intern_create();
 
-    // Initialize Python interpreter
-    if (!Py_IsInitialized()) {
-        Py_Initialize();
-        // Add current directory to Python path
-        PyRun_SimpleString("import sys");
-        PyRun_SimpleString("sys.path.insert(0, '.')");
-    }
+    #if defined(_WIN32)
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            fprintf(stderr, "Error: WSAStartup failed\n");
+            vm->exit_code = 1;
+        }
+    #endif
+
+    #if !defined(FR_NO_PYTHON)
+        // Initialize Python interpreter
+        if (!Py_IsInitialized()) {
+            Py_Initialize();
+            // Add current directory to Python path
+            PyRun_SimpleString("import sys");
+            PyRun_SimpleString("sys.path.insert(0, '.')");
+        }
+    #endif
 }
 
 // Free VM resources
@@ -1591,10 +1660,16 @@ void vm_free(VM *vm)
     if (vm->string_intern)
         string_intern_destroy(vm->string_intern);
 
-    // Finalize Python interpreter
-    if (Py_IsInitialized()) {
-        Py_Finalize();
-    }
+    #if !defined(FR_NO_PYTHON)
+        // Finalize Python interpreter
+        if (Py_IsInitialized()) {
+            Py_Finalize();
+        }
+    #endif
+
+    #if defined(_WIN32)
+        WSACleanup();
+    #endif
 }
 
 // Helper function to format runtime errors with debug information
@@ -1808,17 +1883,21 @@ void value_print(Value val)
         printf("<struct>");
         break;
     case VAL_PYOBJECT:
-        // Print Python object using str()
-        if (val.as.pyobj) {
-            PyObject *str_obj = PyObject_Str(val.as.pyobj);
-            if (str_obj) {
-                const char *str_val = PyUnicode_AsUTF8(str_obj);
-                if (str_val) {
-                    printf("%s", str_val);
+        #if defined(FR_NO_PYTHON)
+            printf("<pyobject>");
+        #else
+            // Print Python object using str()
+            if (val.as.pyobj) {
+                PyObject *str_obj = PyObject_Str(val.as.pyobj);
+                if (str_obj) {
+                    const char *str_val = PyUnicode_AsUTF8(str_obj);
+                    if (str_val) {
+                        printf("%s", str_val);
+                    }
+                    Py_DECREF(str_obj);
                 }
-                Py_DECREF(str_obj);
             }
-        }
+        #endif
         break;
     }
 }
@@ -1877,9 +1956,8 @@ Value value_to_string(Value val)
         break;
     case VAL_LIST:
     {
-        // Build string representation of list with dynamic buffer
-        size_t buf_size = 256;
-        char *buffer = malloc(buf_size);
+        // Build string representation of list
+        char *buffer = malloc(4096);
         int offset = 0;
         offset += sprintf(buffer + offset, "[");
         for (int i = 0; i < val.as.list->length; i++)
@@ -1887,13 +1965,6 @@ Value value_to_string(Value val)
             if (i > 0)
                 offset += sprintf(buffer + offset, ", ");
             Value str_val = value_to_string(val.as.list->items[i]);
-            size_t elem_len = strlen(str_val.as.str);
-            // Grow buffer if needed (elem + ", " + "]" + null)
-            while ((size_t)offset + elem_len + 4 > buf_size)
-            {
-                buf_size *= 2;
-                buffer = realloc(buffer, buf_size);
-            }
             offset += sprintf(buffer + offset, "%s", str_val.as.str);
             value_free(str_val);
         }
@@ -1904,9 +1975,8 @@ Value value_to_string(Value val)
     }
     case VAL_SET:
     {
-        // Build string representation of set with dynamic buffer
-        size_t buf_size = 256;
-        char *buffer = malloc(buf_size);
+        // Build string representation of set
+        char *buffer = malloc(4096);
         int offset = 0;
         offset += sprintf(buffer + offset, "{");
         int count = 0;
@@ -1917,12 +1987,6 @@ Value value_to_string(Value val)
                 if (count > 0)
                     offset += sprintf(buffer + offset, ", ");
                 Value str_val = value_to_string(val.as.set->entries[i].key);
-                size_t elem_len = strlen(str_val.as.str);
-                while ((size_t)offset + elem_len + 4 > buf_size)
-                {
-                    buf_size *= 2;
-                    buffer = realloc(buffer, buf_size);
-                }
                 offset += sprintf(buffer + offset, "%s", str_val.as.str);
                 value_free(str_val);
                 count++;
@@ -1937,23 +2001,27 @@ Value value_to_string(Value val)
         result.as.str = strdup("<struct>");
         break;
     case VAL_PYOBJECT:
-        // Convert Python object to string using str()
-        if (val.as.pyobj) {
-            PyObject *str_obj = PyObject_Str(val.as.pyobj);
-            if (str_obj) {
-                const char *str_val = PyUnicode_AsUTF8(str_obj);
-                if (str_val) {
-                    result.as.str = strdup(str_val);
+        #if defined(FR_NO_PYTHON)
+            result.as.str = strdup("<pyobject>");
+        #else
+            // Convert Python object to string using str()
+            if (val.as.pyobj) {
+                PyObject *str_obj = PyObject_Str(val.as.pyobj);
+                if (str_obj) {
+                    const char *str_val = PyUnicode_AsUTF8(str_obj);
+                    if (str_val) {
+                        result.as.str = strdup(str_val);
+                    } else {
+                        result.as.str = strdup("<pyobject>");
+                    }
+                    Py_DECREF(str_obj);
                 } else {
                     result.as.str = strdup("<pyobject>");
                 }
-                Py_DECREF(str_obj);
             } else {
                 result.as.str = strdup("<pyobject>");
             }
-        } else {
-            result.as.str = strdup("<pyobject>");
-        }
+        #endif
         break;
     }
     return result;
@@ -1965,16 +2033,6 @@ static inline bool would_add_overflow(int64_t a, int64_t b)
     if (b > 0 && a > INT64_MAX - b)
         return true;
     if (b < 0 && a < INT64_MIN - b)
-        return true;
-    return false;
-}
-
-// Helper: Check if int64 subtraction would overflow
-static inline bool would_sub_overflow(int64_t a, int64_t b)
-{
-    if (b < 0 && a > INT64_MAX + b)
-        return true;
-    if (b > 0 && a < INT64_MIN + b)
         return true;
     return false;
 }
@@ -2097,21 +2155,7 @@ Value value_sub(Value a, Value b)
 {
     if (likely(a.type == VAL_INT && b.type == VAL_INT))
     {
-        // Fast path: native int64 subtraction with overflow detection
-        if (would_sub_overflow(a.as.int64, b.as.int64))
-        {
-            // Overflow detected - promote to bigint
-            Value a_big = promote_to_bigint(a.as.int64);
-            Value b_big = promote_to_bigint(b.as.int64);
-            Value result;
-            result.type = VAL_BIGINT;
-            result.as.bigint = malloc(sizeof(mpz_t));
-            mpz_init(*result.as.bigint);
-            mpz_sub(*result.as.bigint, *a_big.as.bigint, *b_big.as.bigint);
-            value_free(a_big);
-            value_free(b_big);
-            return result;
-        }
+        // Fast path: native int64 subtraction
         Value result;
         result.type = VAL_INT;
         result.as.int64 = a.as.int64 - b.as.int64;
@@ -2482,6 +2526,17 @@ static inline Value value_compare(Value a, Value b, OpCode op)
 }
 
 // Python <-> fr Value conversion functions
+#if defined(FR_NO_PYTHON)
+PyObject* fr_value_to_python(Value val) {
+    (void)val;
+    return NULL;
+}
+
+Value python_to_fr_value(PyObject *obj) {
+    (void)obj;
+    return value_make_void();
+}
+#else
 PyObject* fr_value_to_python(Value val) {
     switch (val.type) {
         case VAL_INT:
@@ -2558,6 +2613,7 @@ Value python_to_fr_value(PyObject *obj) {
         return result;
     }
 }
+#endif
 
 // Find function by name
 Function *vm_find_function(VM *vm, const char *name) {
@@ -2670,7 +2726,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             current_func->name = strdup(name);
             current_func->start_pc = vm->code_count;
             current_func->return_type = VAL_INT; // Default
-            current_func->has_varargs = 0;  // Default to no varargs
             arg_count = 0;
             local_count = safe_atoi(total_vars ? total_vars : "0");
         }
@@ -2681,13 +2736,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             if (current_func)
             {
                 current_func->arg_count = arg_count;
-                // Check if this arg is variadic
-                strtok(NULL, " ");  // Skip arg name
-                char *arg_type = strtok(NULL, " \n\r");
-                if (arg_type && strcmp(arg_type, "variadic") == 0)
-                {
-                    current_func->has_varargs = 1;
-                }
             }
             continue;
         }
@@ -3211,16 +3259,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_LIST_LEN;
             else if (strcmp(token, "LIST_POP") == 0)
                 inst.op = OP_LIST_POP;
-            else if (strcmp(token, "LIST_NEW_STACK") == 0)
-            {
-                char *count_str = strtok(NULL, " ");
-                if (count_str == NULL) {
-                    fprintf(stderr, "Error: LIST_NEW_STACK requires count\n");
-                    exit(1);
-                }
-                inst.op = OP_LIST_NEW_STACK;
-                inst.operand.index = safe_atoi(count_str);
-            }
             else if (strcmp(token, "SET_NEW") == 0)
                 inst.op = OP_SET_NEW;
             else if (strcmp(token, "SET_ADD") == 0)
@@ -3231,14 +3269,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_SET_CONTAINS;
             else if (strcmp(token, "SET_LEN") == 0)
                 inst.op = OP_SET_LEN;
-            else if (strcmp(token, "DICT_NEW") == 0)
-                inst.op = OP_DICT_NEW;
-            else if (strcmp(token, "DICT_GET") == 0)
-                inst.op = OP_DICT_GET;
-            else if (strcmp(token, "DICT_SET") == 0)
-                inst.op = OP_DICT_SET;
-            else if (strcmp(token, "DICT_CONTAINS") == 0)
-                inst.op = OP_DICT_CONTAINS;
             else if (strcmp(token, "CONTAINS") == 0)
                 inst.op = OP_CONTAINS;
             else if (strcmp(token, "LIST_NEW_I64") == 0)
@@ -3251,7 +3281,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                // Parse count first, then heap-allocate values array
+                // Parse count and values
+                int64_t values[10000];  // Support up to 10000 elements
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3261,10 +3292,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
-                int64_t *values = malloc(count * sizeof(int64_t));
 
                 // Now read the values
-                for (int j = 0; j < count; j++) {
+                for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_I64 missing value %d\n", j);
@@ -3280,7 +3310,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
-                free(values);
 
                 inst.op = OP_LIST_NEW_I64;
                 inst.operand.ptr = multi;
@@ -3295,7 +3324,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                double *values = NULL;
+                double values[10000];
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3305,9 +3334,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
-                values = malloc(count * sizeof(double));
 
-                for (int j = 0; j < count; j++) {
+                for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_F64 missing value %d\n", j);
@@ -3322,7 +3350,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
-                free(values);
 
                 inst.op = OP_LIST_NEW_F64;
                 inst.operand.ptr = multi;
@@ -3337,7 +3364,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                char **strings = NULL;
+                char *strings[10000];
                 int count = 0;
 
                 // Parse count
@@ -3347,10 +3374,9 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 while (*p && *p != ' ' && *p != '\t') p++;
                 if (*p) *p++ = '\0';
                 count = safe_atoi(count_start);
-                strings = malloc(count * sizeof(char*));
 
                 // Parse quoted strings
-                for (int j = 0; j < count; j++) {
+                for (int j = 0; j < count && j < 10000; j++) {
                     while (*p == ' ' || *p == '\t') p++;
                     if (*p != '"') {
                         fprintf(stderr, "Error: LIST_NEW_STR expects quoted strings\n");
@@ -3384,30 +3410,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = strings[j];
                 }
-                free(strings);
 
                 inst.op = OP_LIST_NEW_STR;
-                inst.operand.ptr = multi;
-            }
-            else if (strcmp(token, "LIST_NEW_CAP") == 0)
-            {
-                // LIST_NEW_CAP capacity elem_type
-                char *cap_str = strtok(NULL, " ");
-                char *type_str = strtok(NULL, " ");
-                if (cap_str == NULL || type_str == NULL)
-                {
-                    fprintf(stderr, "Error: LIST_NEW_CAP requires capacity and elem_type\n");
-                    exit(1);
-                }
-                inst.op = OP_LIST_NEW_CAP;
-                MultiInt *multi = malloc(sizeof(MultiInt) + sizeof(int) * 2);
-                if (!multi) {
-                    fprintf(stderr, "Error: Failed to allocate LIST_NEW_CAP args\n");
-                    exit(1);
-                }
-                multi->count = 2;
-                multi->values[0] = safe_atoi(cap_str);
-                multi->values[1] = safe_atoi(type_str);
                 inst.operand.ptr = multi;
             }
             else if (strcmp(token, "LIST_NEW_BOOL") == 0)
@@ -3420,7 +3424,7 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     exit(1);
                 }
 
-                int *values = NULL;
+                int values[10000];
                 int count = 0;
                 char *val_str = strtok(rest_of_line, " ");
 
@@ -3430,9 +3434,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
 
                 count = safe_atoi(val_str);
-                values = malloc(count * sizeof(int));
 
-                for (int j = 0; j < count; j++) {
+                for (int j = 0; j < count && j < 10000; j++) {
                     val_str = strtok(NULL, " ");
                     if (val_str == NULL) {
                         fprintf(stderr, "Error: LIST_NEW_BOOL missing value %d\n", j);
@@ -3450,7 +3453,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 {
                     multi->values[j] = values[j];
                 }
-                free(values);
 
                 inst.op = OP_LIST_NEW_BOOL;
                 inst.operand.ptr = multi;
@@ -3972,34 +3974,6 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
                 inst.operand.ptr = multi;
             }
-            // Fused STRUCT_GET+STORE+LOAD triplets
-            else if (strcmp(token, "FUSED_GET_STORE_LOAD") == 0)
-            {
-                inst.op = OP_FUSED_GET_STORE_LOAD;
-                char *rest_of_line = strtok(NULL, "\n");
-                if (rest_of_line == NULL)
-                {
-                    fprintf(stderr, "Error: FUSED_GET_STORE_LOAD requires arguments\n");
-                    exit(1);
-                }
-
-                int temp_args[256];
-                int arg_count = 0;
-                char *arg_str = strtok(rest_of_line, " ");
-                while (arg_str != NULL && arg_count < 256)
-                {
-                    temp_args[arg_count++] = safe_atoi(arg_str);
-                    arg_str = strtok(NULL, " ");
-                }
-
-                MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
-                multi->count = arg_count;
-                for (int j = 0; j < arg_count; j++)
-                {
-                    multi->values[j] = temp_args[j];
-                }
-                inst.operand.ptr = multi;
-            }
             // Fused LOAD2 + arithmetic instructions
             else if (strcmp(token, "LOAD2_ADD_I64") == 0)
             {
@@ -4343,7 +4317,6 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD_MULTI] = &&L_LOAD_MULTI,
         [OP_FUSED_LOAD_STORE] = &&L_FUSED_LOAD_STORE,
         [OP_FUSED_STORE_LOAD] = &&L_FUSED_STORE_LOAD,
-        [OP_FUSED_GET_STORE_LOAD] = &&L_FUSED_GET_STORE_LOAD,
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
@@ -4361,7 +4334,6 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD2_CMP_NE] = &&L_LOAD2_CMP_NE,
         [OP_SELECT] = &&L_SELECT,
         [OP_LIST_NEW] = &&L_LIST_NEW,
-        [OP_LIST_NEW_CAP] = &&L_LIST_NEW_CAP,
         [OP_LIST_APPEND] = &&L_LIST_APPEND,
         [OP_LIST_GET] = &&L_LIST_GET,
         [OP_LIST_SET] = &&L_LIST_SET,
@@ -4371,16 +4343,11 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LIST_NEW_F64] = &&L_LIST_NEW_F64,
         [OP_LIST_NEW_STR] = &&L_LIST_NEW_STR,
         [OP_LIST_NEW_BOOL] = &&L_LIST_NEW_BOOL,
-        [OP_LIST_NEW_STACK] = &&L_LIST_NEW_STACK,
         [OP_SET_NEW] = &&L_SET_NEW,
         [OP_SET_ADD] = &&L_SET_ADD,
         [OP_SET_REMOVE] = &&L_SET_REMOVE,
         [OP_SET_CONTAINS] = &&L_SET_CONTAINS,
         [OP_SET_LEN] = &&L_SET_LEN,
-        [OP_DICT_NEW] = &&L_DICT_NEW,
-        [OP_DICT_GET] = &&L_DICT_GET,
-        [OP_DICT_SET] = &&L_DICT_SET,
-        [OP_DICT_CONTAINS] = &&L_DICT_CONTAINS,
         [OP_CONTAINS] = &&L_CONTAINS,
         [OP_STRUCT_NEW] = &&L_STRUCT_NEW,
         [OP_STRUCT_GET] = &&L_STRUCT_GET,
@@ -4958,53 +4925,13 @@ L_CALL: // OP_CALL
         {
             frame->vars.vars[i] = value_make_int_si(0);
         }
-        
-        // Handle variadic functions
-        if (func->has_varargs && arg_count > func->arg_count - 1)
+        // Pop arguments and store in reverse order
+        for (int i = func->arg_count - 1; i >= 0; i--)
         {
-            // Number of extra arguments to pack into list
-            int vararg_count = arg_count - (func->arg_count - 1);
-            
-            // Pop all extra arguments and pack into a list (in correct order)
-            Value *varargs = malloc(vararg_count * sizeof(Value));
-            for (int i = vararg_count - 1; i >= 0; i--)
-            {
-                varargs[i] = vm_pop(vm);
-            }
-            
-            // Create list and populate
-            List *list = list_new();
-            for (int i = 0; i < vararg_count; i++)
-            {
-                list_append(list, varargs[i]);
-            }
-            free(varargs);
-            
-            // Store the list as the last argument
-            Value list_val = {.type = VAL_LIST, .as.list = list};
-            value_free(frame->vars.vars[func->arg_count - 1]);
-            frame->vars.vars[func->arg_count - 1] = list_val;
-            
-            // Pop and store regular arguments in reverse order
-            for (int i = func->arg_count - 2; i >= 0; i--)
-            {
-                Value arg = vm_pop(vm);
-                value_free(frame->vars.vars[i]);
-                frame->vars.vars[i] = arg;
-            }
+            Value arg = vm_pop(vm);
+            value_free(frame->vars.vars[i]);
+            frame->vars.vars[i] = arg;
         }
-        else
-        {
-            // Regular function call or variadic with no extra args
-            // Pop arguments and store in reverse order
-            for (int i = func->arg_count - 1; i >= 0; i--)
-            {
-                Value arg = vm_pop(vm);
-                value_free(frame->vars.vars[i]);
-                frame->vars.vars[i] = arg;
-            }
-        }
-        
         vm->pc = func->start_pc;
         // Update cached frame pointer
         current_frame = frame;
@@ -5126,7 +5053,7 @@ L_BUILTIN_SQRT: // OP_BUILTIN_SQRT
         }
         else if (v.type == VAL_INT)
         {
-            double d = (double)v.as.int64;
+            double d = mpz_get_d(*v.as.bigint);
             vm_push(vm, value_make_f64(sqrt(d)));
         }
         value_free(v);
@@ -6311,17 +6238,6 @@ L_LIST_NEW: // OP_LIST_NEW
     DISPATCH();
 }
 
-L_LIST_NEW_CAP: // OP_LIST_NEW_CAP
-{
-    Instruction inst = vm->code[vm->pc - 1];
-    MultiInt *multi = (MultiInt *)inst.operand.ptr;
-    int capacity = multi->count > 0 ? multi->values[0] : 0;
-
-    List *list = list_new_with_capacity(capacity, true);
-    vm_push(vm, value_wrap_list(list));
-    DISPATCH();
-}
-
 L_LIST_APPEND: // OP_LIST_APPEND
 {
     Value value = vm_pop(vm);
@@ -6552,116 +6468,6 @@ L_SET_LEN: // OP_SET_LEN
     DISPATCH();
 }
 
-// Dict operations (Python dict backing)
-L_DICT_NEW: // OP_DICT_NEW
-{
-    PyObject *dict_obj = PyDict_New();
-    if (!dict_obj) {
-        fprintf(stderr, "Error: Failed to create dict\n");
-        exit(1);
-    }
-    Value dict_val;
-    dict_val.type = VAL_PYOBJECT;
-    dict_val.as.pyobj = dict_obj;
-    vm_push(vm, dict_val);
-    DISPATCH();
-}
-
-L_DICT_GET: // OP_DICT_GET
-{
-    Value key_val = vm_pop(vm);
-    Value dict_val = vm_pop(vm);
-
-    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
-    {
-        fprintf(stderr, "Error: Cannot get item from non-dict type\n");
-        value_free(key_val);
-        value_free(dict_val);
-        exit(1);
-    }
-
-    PyObject *py_key = fr_value_to_python(key_val);
-    PyObject *py_val = PyDict_GetItemWithError(dict_val.as.pyobj, py_key);
-    Py_DECREF(py_key);
-
-    if (!py_val)
-    {
-        if (PyErr_Occurred())
-        {
-            PyErr_Clear();
-        }
-        fprintf(stderr, "Error: Key error\n");
-        value_free(key_val);
-        value_free(dict_val);
-        exit(1);
-    }
-
-    Value result = python_to_fr_value(py_val);
-    value_free(key_val);
-    value_free(dict_val);
-    vm_push(vm, result);
-    DISPATCH();
-}
-
-L_DICT_SET: // OP_DICT_SET
-{
-    Value value_val = vm_pop(vm);
-    Value key_val = vm_pop(vm);
-    Value dict_val = vm_pop(vm);
-
-    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
-    {
-        fprintf(stderr, "Error: Cannot set item on non-dict type\n");
-        value_free(value_val);
-        value_free(key_val);
-        value_free(dict_val);
-        exit(1);
-    }
-
-    PyObject *py_key = fr_value_to_python(key_val);
-    PyObject *py_val = fr_value_to_python(value_val);
-    int rc = PyDict_SetItem(dict_val.as.pyobj, py_key, py_val);
-    Py_DECREF(py_key);
-    Py_DECREF(py_val);
-
-    if (rc != 0)
-    {
-        fprintf(stderr, "Error: Failed to set dict item\n");
-        value_free(value_val);
-        value_free(key_val);
-        value_free(dict_val);
-        exit(1);
-    }
-
-    value_free(value_val);
-    value_free(key_val);
-    vm_push(vm, dict_val);
-    DISPATCH();
-}
-
-L_DICT_CONTAINS: // OP_DICT_CONTAINS
-{
-    Value key_val = vm_pop(vm);
-    Value dict_val = vm_pop(vm);
-
-    if (dict_val.type != VAL_PYOBJECT || !PyDict_Check(dict_val.as.pyobj))
-    {
-        fprintf(stderr, "Error: Cannot check containment on non-dict type\n");
-        value_free(key_val);
-        value_free(dict_val);
-        exit(1);
-    }
-
-    PyObject *py_key = fr_value_to_python(key_val);
-    int contains = PyDict_Contains(dict_val.as.pyobj, py_key);
-    Py_DECREF(py_key);
-
-    value_free(key_val);
-    value_free(dict_val);
-    vm_push(vm, value_make_bool(contains == 1));
-    DISPATCH();
-}
-
 L_CONTAINS: // OP_CONTAINS - Generic membership check
 {
     Value value = vm_pop(vm);
@@ -6763,44 +6569,6 @@ L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
         Value val = value_make_bool(multi->values[i] != 0);
         list_append(list, val);
         value_free(val);
-    }
-
-    vm_push(vm, value_wrap_list(list));
-    DISPATCH();
-}
-
-L_LIST_NEW_STACK: // OP_LIST_NEW_STACK - Create list from stack values
-{
-    Instruction inst = vm->code[vm->pc - 1];
-    int count = inst.operand.index;
-
-    // Collect values from stack in reverse order
-    Value values[256];
-    if (count > 256)
-    {
-        fprintf(stderr, "Error: LIST_NEW_STACK count too large: %d\n", count);
-        vm->running = false;
-        vm->exit_code = 1;
-        return;
-    }
-    for (int i = count - 1; i >= 0; i--)
-    {
-        if (vm->stack_top < 1)
-        {
-            fprintf(stderr, "Stack underflow at PC=%d\n", vm->pc - 1);
-            vm->running = false;
-            vm->exit_code = 1;
-            return;
-        }
-        values[i] = vm_pop(vm);
-    }
-
-    // Create list and add values in correct order
-    List *list = list_new();
-    for (int i = 0; i < count; i++)
-    {
-        list_append(list, values[i]);
-        value_free(values[i]);
     }
 
     vm_push(vm, value_wrap_list(list));
@@ -7545,7 +7313,11 @@ L_FILE_MKDIR: // OP_FILE_MKDIR - Create directory (path -> void)
     }
 
     const char *path = path_val.as.str;
-    mkdir(path, 0755);
+    #if defined(_WIN32)
+        mkdir(path);
+    #else
+        mkdir(path, 0755);
+    #endif
 
     value_free(path_val);
     DISPATCH();
@@ -7566,20 +7338,29 @@ L_FILE_MAKEDIRS: // OP_FILE_MAKEDIRS - Create directory and parents (path -> voi
     char *path_copy = strdup(path);
     char *p = path_copy;
 
-    // Skip leading /
-    if (*p == '/') p++;
+    // Skip leading separator
+    if (*p == '/' || *p == '\\') p++;
 
     while (*p)
     {
-        if (*p == '/')
+        if (*p == '/' || *p == '\\')
         {
+            char saved = *p;
             *p = '\0';
-            mkdir(path_copy, 0755);
-            *p = '/';
+            #if defined(_WIN32)
+                mkdir(path_copy);
+            #else
+                mkdir(path_copy, 0755);
+            #endif
+            *p = saved;
         }
         p++;
     }
-    mkdir(path_copy, 0755);
+    #if defined(_WIN32)
+        mkdir(path_copy);
+    #else
+        mkdir(path_copy, 0755);
+    #endif
 
     free(path_copy);
     value_free(path_val);
@@ -7719,7 +7500,11 @@ L_FILE_ABSPATH: // OP_FILE_ABSPATH - Get absolute path (path -> string)
     const char *path = path_val.as.str;
     char resolved[PATH_MAX];
 
-    if (realpath(path, resolved) != NULL)
+    #if defined(_WIN32)
+        if (_fullpath(resolved, path, PATH_MAX) != NULL)
+    #else
+        if (realpath(path, resolved) != NULL)
+    #endif
     {
         value_free(path_val);
         vm_push(vm, value_make_str(strdup(resolved)));
@@ -7745,7 +7530,11 @@ L_FILE_BASENAME: // OP_FILE_BASENAME - Get basename (path -> string)
 
     const char *path = path_val.as.str;
     char *path_copy = strdup(path);
-    char *base = basename(path_copy);
+    #if defined(_WIN32)
+        char *base = fr_basename(path_copy);
+    #else
+        char *base = basename(path_copy);
+    #endif
     char *result = strdup(base);
 
     free(path_copy);
@@ -7767,7 +7556,11 @@ L_FILE_DIRNAME: // OP_FILE_DIRNAME - Get directory name (path -> string)
 
     const char *path = path_val.as.str;
     char *path_copy = strdup(path);
-    char *dir = dirname(path_copy);
+    #if defined(_WIN32)
+        char *dir = fr_dirname(path_copy);
+    #else
+        char *dir = dirname(path_copy);
+    #endif
     char *result = strdup(dir);
 
     free(path_copy);
@@ -8030,7 +7823,11 @@ L_SOCKET_CLOSE: // OP_SOCKET_CLOSE - Close socket (sock_id -> void)
     }
 
     int sock = (int)sock_val.as.int64;
-    close(sock);
+    #if defined(_WIN32)
+        closesocket((SOCKET)sock);
+    #else
+        close(sock);
+    #endif
 
     value_free(sock_val);
     DISPATCH();
@@ -8075,7 +7872,7 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
     else if (strcasecmp(option_str, "SO_SNDBUF") == 0)
         option = SO_SNDBUF;
 
-    setsockopt(sock, level, option, &value, sizeof(value));
+    setsockopt(sock, level, option, (const char*)&value, sizeof(value));
 
     value_free(sock_val);
     value_free(level_val);
@@ -8086,9 +7883,64 @@ L_SOCKET_SETSOCKOPT: // OP_SOCKET_SETSOCKOPT - Set socket option (sock_id, level
 
 L_FORK: // OP_FORK - Fork process (-> pid)
 {
-    pid_t pid = fork();
-    vm_push(vm, value_make_int_si((int64_t)pid));
-    DISPATCH();
+    #if defined(_WIN32)
+        const char* is_child = getenv("FR_FORK_CHILD");
+        if (is_child && strcmp(is_child, "1") == 0) {
+            _putenv("FR_FORK_CHILD=");
+            vm_push(vm, value_make_int_si(0));
+            DISPATCH();
+        }
+
+        if (fr_child_process_count >= 256) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+
+        LPWSTR cmdline = GetCommandLineW();
+        if (!cmdline) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        wchar_t* cmd_copy = _wcsdup(cmdline);
+        if (!cmd_copy) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        ZeroMemory(&pi, sizeof(pi));
+        si.cb = sizeof(si);
+
+        SetEnvironmentVariableW(L"FR_FORK_CHILD", L"1");
+        BOOL ok = CreateProcessW(NULL, cmd_copy, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        SetEnvironmentVariableW(L"FR_FORK_CHILD", NULL);
+        free(cmd_copy);
+
+        if (!ok) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+
+        CloseHandle(pi.hThread);
+        fr_child_processes[fr_child_process_count] = pi.hProcess;
+        fr_child_process_count++;
+        vm_push(vm, value_make_int_si((int64_t)fr_child_process_count));
+        DISPATCH();
+    #else
+        pid_t pid = fork();
+        vm_push(vm, value_make_int_si((int64_t)pid));
+        DISPATCH();
+    #endif
 }
 
 L_WAIT: // OP_WAIT - Wait for child process (pid -> status)
@@ -8102,23 +7954,54 @@ L_WAIT: // OP_WAIT - Wait for child process (pid -> status)
         return;
     }
     
-    int status = 0;
-    pid_t pid = (pid_t)pid_val.as.int64;
-    pid_t result = waitpid(pid, &status, 0);
-    
-    if (result == -1) {
-        fprintf(stderr, "Error: waitpid failed\n");
-        vm->running = false;
-        vm->exit_code = 1;
-        return;
-    }
-    
-    // Return the exit status
-    if (WIFEXITED(status)) {
-        vm_push(vm, value_make_int_si((int64_t)WEXITSTATUS(status)));
-    } else {
-        vm_push(vm, value_make_int_si((int64_t)status));
-    }
+    #if defined(_WIN32)
+        int64_t fr_pid = pid_val.as.int64;
+        if (fr_pid <= 0 || fr_pid > 256) {
+            fprintf(stderr, "Error: waitpid failed\n");
+            value_free(pid_val);
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        HANDLE h = fr_child_processes[fr_pid - 1];
+        if (!h) {
+            fprintf(stderr, "Error: waitpid failed\n");
+            value_free(pid_val);
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        WaitForSingleObject(h, INFINITE);
+        DWORD exit_code = 0;
+        if (!GetExitCodeProcess(h, &exit_code)) {
+            fprintf(stderr, "Error: waitpid failed\n");
+            value_free(pid_val);
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        CloseHandle(h);
+        fr_child_processes[fr_pid - 1] = NULL;
+        vm_push(vm, value_make_int_si((int64_t)exit_code));
+    #else
+        int status = 0;
+        pid_t pid = (pid_t)pid_val.as.int64;
+        pid_t result = waitpid(pid, &status, 0);
+        
+        if (result == -1) {
+            fprintf(stderr, "Error: waitpid failed\n");
+            vm->running = false;
+            vm->exit_code = 1;
+            return;
+        }
+        
+        // Return the exit status
+        if (WIFEXITED(status)) {
+            vm_push(vm, value_make_int_si((int64_t)WEXITSTATUS(status)));
+        } else {
+            vm_push(vm, value_make_int_si((int64_t)status));
+        }
+    #endif
     
     value_free(pid_val);
     DISPATCH();
@@ -8156,15 +8039,25 @@ L_SLEEP: // OP_SLEEP - Sleep for seconds (seconds -> void)
     }
     
     value_free(seconds_val);
-    sleep(seconds);
+    #if defined(_WIN32)
+        Sleep((DWORD)(seconds * 1000u));
+    #else
+        sleep(seconds);
+    #endif
     DISPATCH();
 }
 
 L_GETPID: // OP_GETPID - Get process ID (-> pid)
 {
-    pid_t pid = getpid();
-    vm_push(vm, value_make_int_si((int64_t)pid));
-    DISPATCH();
+    #if defined(_WIN32)
+        int pid = _getpid();
+        vm_push(vm, value_make_int_si((int64_t)pid));
+        DISPATCH();
+    #else
+        pid_t pid = getpid();
+        vm_push(vm, value_make_int_si((int64_t)pid));
+        DISPATCH();
+    #endif
 }
 
 L_ABS: // OP_ABS - Absolute value
@@ -8174,17 +8067,7 @@ L_ABS: // OP_ABS - Absolute value
 
     if (v.type == VAL_INT)
     {
-        // Handle INT64_MIN: llabs(INT64_MIN) is undefined behavior
-        if (v.as.int64 == INT64_MIN)
-        {
-            Value big = promote_to_bigint(v.as.int64);
-            mpz_abs(*big.as.bigint, *big.as.bigint);
-            result = big;
-        }
-        else
-        {
-            result = value_make_int_si(llabs(v.as.int64));
-        }
+        result = value_make_int_si(llabs(v.as.int64));
     }
     else if (v.type == VAL_F64)
     {
@@ -8361,18 +8244,9 @@ L_NEG: // OP_NEG - Unary negation
 
     if (a.type == VAL_INT)
     {
-        // Negate small integer - handle INT64_MIN overflow
-        if (a.as.int64 == INT64_MIN)
-        {
-            Value big = promote_to_bigint(a.as.int64);
-            mpz_neg(*big.as.bigint, *big.as.bigint);
-            vm_push(vm, big);
-        }
-        else
-        {
-            a.as.int64 = -a.as.int64;
-            vm_push(vm, a);
-        }
+        // Negate small integer
+        a.as.int64 = -a.as.int64;
+        vm_push(vm, a);
     }
     else if (a.type == VAL_BIGINT)
     {
@@ -8537,50 +8411,6 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
     DISPATCH();
 }
 
-L_FUSED_GET_STORE_LOAD: // OP_FUSED_GET_STORE_LOAD
-{
-    // Fused STRUCT_GET + STORE + LOAD triplets
-    // Args: field1 dst1 src1 field2 dst2 src2 ...
-    // Each triplet: pop struct, get field, store to dst, load from src
-    Instruction inst = vm->code[vm->pc - 1];
-    MultiInt *multi = (MultiInt *)inst.operand.ptr;
-
-    for (int i = 0; i + 2 < multi->count; i += 3)
-    {
-        int field_idx = multi->values[i];
-        int store_var = multi->values[i + 1];
-        int load_var = multi->values[i + 2];
-
-        // STRUCT_GET: pop struct, push field value
-        Value struct_val = vm_pop(vm);
-        if (unlikely(struct_val.type != VAL_STRUCT))
-        {
-            fprintf(stderr, "Error: FUSED_GET_STORE_LOAD: Cannot get field from non-struct type\n");
-            value_free(struct_val);
-            vm->running = false;
-            vm->exit_code = 1;
-            return;
-        }
-        Value field_val = value_copy(struct_val.as.struct_val->fields[field_idx]);
-        value_free(struct_val);
-
-        // STORE: store field value to dst var
-        value_free(current_frame->vars.vars[store_var]);
-        current_frame->vars.vars[store_var] = field_val;
-
-        // LOAD: push src var onto stack
-        Value v = current_frame->vars.vars[load_var];
-        if (likely(v.type == VAL_INT || v.type == VAL_F64 ||
-                   v.type == VAL_BOOL || v.type == VAL_VOID)) {
-            vm_push(vm, v);
-        } else {
-            vm_push(vm, value_copy(v));
-        }
-    }
-
-    DISPATCH();
-}
-
 // Fused LOAD2 + arithmetic operations (hot loop optimizations)
 L_LOAD2_ADD_I64: // OP_LOAD2_ADD_I64
 {
@@ -8640,7 +8470,7 @@ L_LOAD2_DIV_I64: // OP_LOAD2_DIV_I64
     Value b = current_frame->vars.vars[idx2];
 
     // Check for division by zero
-    if (unlikely(b.type == VAL_INT && b.as.int64 == 0))
+    if (likely(b.type == VAL_INT && b.as.int64 == 0))
     {
         vm_runtime_error(vm, "division by zero", 0);
         DISPATCH();
@@ -8932,6 +8762,12 @@ L_LOAD2_CMP_NE: // OP_LOAD2_CMP_NE
 
 L_PY_IMPORT: // OP_PY_IMPORT - Import a Python module (module_name -> module_object)
 {
+    #if defined(FR_NO_PYTHON)
+        fprintf(stderr, "Runtime error: Python interop is disabled (built with FR_NO_PYTHON)\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    #else
     Value module_name_val = vm_pop(vm);
 
     if (module_name_val.type != VAL_STR) {
@@ -8962,10 +8798,17 @@ L_PY_IMPORT: // OP_PY_IMPORT - Import a Python module (module_name -> module_obj
     value_free(module_name_val);
     vm_push(vm, result);
     DISPATCH();
+    #endif
 }
 
 L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1, ..., argN, num_args -> result)
 {
+    #if defined(FR_NO_PYTHON)
+        fprintf(stderr, "Runtime error: Python interop is disabled (built with FR_NO_PYTHON)\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    #else
     Value num_args_val = vm_pop(vm);
 
     if (num_args_val.type != VAL_INT) {
@@ -9064,10 +8907,17 @@ L_PY_CALL: // OP_PY_CALL - Call a Python function (module_name, func_name, arg1,
 
     vm_push(vm, result);
     DISPATCH();
+    #endif
 }
 
 L_PY_GETATTR: // OP_PY_GETATTR - Get attribute from Python object (obj, attr_name -> value)
 {
+    #if defined(FR_NO_PYTHON)
+        fprintf(stderr, "Runtime error: Python interop is disabled (built with FR_NO_PYTHON)\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    #else
     Value attr_name_val = vm_pop(vm);
     Value obj_val = vm_pop(vm);
 
@@ -9108,10 +8958,17 @@ L_PY_GETATTR: // OP_PY_GETATTR - Get attribute from Python object (obj, attr_nam
 
     vm_push(vm, result);
     DISPATCH();
+    #endif
 }
 
 L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name, value -> none)
 {
+    #if defined(FR_NO_PYTHON)
+        fprintf(stderr, "Runtime error: Python interop is disabled (built with FR_NO_PYTHON)\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    #else
     Value value_val = vm_pop(vm);
     Value attr_name_val = vm_pop(vm);
     Value obj_val = vm_pop(vm);
@@ -9166,8 +9023,15 @@ L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name,
     Value void_val = {.type = VAL_VOID};
     vm_push(vm, void_val);
     DISPATCH();
+    #endif
 }L_PY_CALL_METHOD: // OP_PY_CALL_METHOD - Call method on Python object (obj, method_name, arg1, ..., argN, num_args -> result)
 {
+    #if defined(FR_NO_PYTHON)
+        fprintf(stderr, "Runtime error: Python interop is disabled (built with FR_NO_PYTHON)\n");
+        vm->running = false;
+        vm->exit_code = 1;
+        return;
+    #else
     Value num_args_val = vm_pop(vm);
 
     if (num_args_val.type != VAL_INT) {
@@ -9258,6 +9122,7 @@ L_PY_SETATTR: // OP_PY_SETATTR - Set attribute on Python object (obj, attr_name,
 
     vm_push(vm, result_val);
     DISPATCH();
+    #endif
 }
 
 L_TRY_BEGIN: // OP_TRY_BEGIN - Begin exception handler
@@ -9404,8 +9269,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    VM vm;
-    vm_init(&vm);
+    VM *vm = (VM *)malloc(sizeof(VM));
+    if (!vm) {
+        fprintf(stderr, "Error: Failed to allocate VM\n");
+        return 1;
+    }
+    vm_init(vm);
 
     // Check for --debug-info flag
     int arg_offset = 1;
@@ -9422,13 +9291,29 @@ int main(int argc, char **argv) {
 
     if (has_debug_info) {
         // Read JSON debug info from stdin
-        char buffer[1024 * 1024]; // 1MB buffer
+        size_t buffer_cap = 1024 * 1024; // start at 1MB
+        char *buffer = (char *)malloc(buffer_cap);
+        if (!buffer) {
+            fprintf(stderr, "Error: Failed to allocate debug-info buffer\n");
+            return 1;
+        }
+
         size_t total_read = 0;
         size_t bytes_read;
 
-        while ((bytes_read = fread(buffer + total_read, 1, sizeof(buffer) - total_read - 1, stdin)) > 0) {
+        while ((bytes_read = fread(buffer + total_read, 1, buffer_cap - total_read - 1, stdin)) > 0) {
             total_read += bytes_read;
-            if (total_read >= sizeof(buffer) - 1) break;
+            if (total_read >= buffer_cap - 1) {
+                size_t new_cap = buffer_cap * 2;
+                char *new_buf = (char *)realloc(buffer, new_cap);
+                if (!new_buf) {
+                    free(buffer);
+                    fprintf(stderr, "Error: Debug-info too large (out of memory)\n");
+                    return 1;
+                }
+                buffer = new_buf;
+                buffer_cap = new_cap;
+            }
         }
         buffer[total_read] = '\0';
 
@@ -9443,7 +9328,7 @@ int main(int argc, char **argv) {
                 file_start++; // Skip the opening quote
                 char *file_end = strchr(file_start, '"');
                 if (file_end) {
-                    vm.debug_source_file = strndup(file_start, file_end - file_start);
+                    vm->debug_source_file = fr_strndup(file_start, file_end - file_start);
                 }
             }
         }
@@ -9486,15 +9371,15 @@ int main(int argc, char **argv) {
                 if (source_buffer[i] == '\n') line_count++;
             }
 
-            vm.debug_source_lines = malloc(sizeof(char*) * line_count);
-            vm.debug_source_line_count = line_count;
+            vm->debug_source_lines = malloc(sizeof(char*) * line_count);
+            vm->debug_source_line_count = line_count;
 
             char *line_start = source_buffer;
             int line_idx = 0;
             for (int i = 0; i <= dst_idx; i++) {
                 if (source_buffer[i] == '\n' || source_buffer[i] == '\0') {
                     int line_len = source_buffer + i - line_start;
-                    vm.debug_source_lines[line_idx] = strndup(line_start, line_len);
+                    vm->debug_source_lines[line_idx] = fr_strndup(line_start, line_len);
                     line_idx++;
                     line_start = source_buffer + i + 1;
                 }
@@ -9529,15 +9414,15 @@ int main(int argc, char **argv) {
                 }
 
                 if (count > 0) {
-                    vm.debug_line_map = malloc(sizeof(int) * count);
-                    vm.debug_line_map_count = count;
+                    vm->debug_line_map = malloc(sizeof(int) * count);
+                    vm->debug_line_map_count = count;
 
                     p = line_map_start;
                     int idx = 0;
                     while (*p && *p != ']' && idx < count) {
                         while (*p == ' ' || *p == ',') p++;
                         if (*p >= '0' && *p <= '9') {
-                            vm.debug_line_map[idx++] = atoi(p);
+                            vm->debug_line_map[idx++] = atoi(p);
                             while (*p >= '0' && *p <= '9') p++;
                         } else {
                             p++;
@@ -9546,23 +9431,27 @@ int main(int argc, char **argv) {
                 }
             }
         }
+
+        free(buffer);
     }
 
     // Store program arguments (skip program name, optional --debug-info flag, and bytecode file)
-    vm.prog_argc = argc - arg_offset - 1;
-    vm.prog_argv = (argc > arg_offset + 1) ? &argv[arg_offset + 1] : NULL;
+    vm->prog_argc = argc - arg_offset - 1;
+    vm->prog_argv = (argc > arg_offset + 1) ? &argv[arg_offset + 1] : NULL;
 
-    if (!vm_load_bytecode(&vm, argv[arg_offset]))
+    if (!vm_load_bytecode(vm, argv[arg_offset]))
     {
+        vm_free(vm);
+        free(vm);
         return 1;
     }
     
     // Load C libraries (.so/.dll files passed as arguments)
     // Count dynamic libraries in arguments
     int so_count = 0;
-    for (int i = 0; i < vm.prog_argc; i++)
+    for (int i = 0; i < vm->prog_argc; i++)
     {
-        const char *arg = vm.prog_argv[i];
+        const char *arg = vm->prog_argv[i];
         size_t len = strlen(arg);
         bool is_dynlib = (len > 3 && strcmp(arg + len - 3, ".so") == 0);
         if (len > 4 && strcmp(arg + len - 4, ".dll") == 0)
@@ -9573,12 +9462,12 @@ int main(int argc, char **argv) {
     
     if (so_count > 0)
     {
-        vm.loaded_libs = malloc(sizeof(void*) * so_count);
-        vm.loaded_libs_count = 0;
+        vm->loaded_libs = malloc(sizeof(void*) * so_count);
+        vm->loaded_libs_count = 0;
         
-        for (int i = 0; i < vm.prog_argc; i++)
+        for (int i = 0; i < vm->prog_argc; i++)
         {
-            const char *arg = vm.prog_argv[i];
+            const char *arg = vm->prog_argv[i];
             size_t len = strlen(arg);
             bool is_dynlib = (len > 3 && strcmp(arg + len - 3, ".so") == 0);
             if (len > 4 && strcmp(arg + len - 4, ".dll") == 0)
@@ -9589,17 +9478,19 @@ int main(int argc, char **argv) {
                 if (!handle)
                 {
                     fprintf(stderr, "Failed to load library %s: %s\n", arg, dlerror());
-                    vm_free(&vm);
+                    vm_free(vm);
+                    free(vm);
                     return 1;
                 }
-                vm.loaded_libs[vm.loaded_libs_count++] = handle;
+                vm->loaded_libs[vm->loaded_libs_count++] = handle;
             }
         }
     }
     
-    vm_run(&vm);
-    int exit_code = vm.exit_code;
-    vm_free(&vm);
+    vm_run(vm);
+    int exit_code = vm->exit_code;
+    vm_free(vm);
+    free(vm);
     return exit_code;
 }
 

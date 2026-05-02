@@ -12,10 +12,12 @@ Architecture:
 - System V ABI calling convention (Linux/macOS)
 """
 
+import os
 import sys
-import struct
 from typing import List, Dict, Tuple, Optional
 from native_optimizer import optimize_assembly
+
+IS_WINDOWS = os.name == 'nt'
 
 class X86CompilerError(Exception):
     """Raised when x86_64 compilation fails"""
@@ -29,7 +31,6 @@ class X86Compiler:
         self.data_section: List[str] = []  # For string constants
         self.string_constants: Dict[str, str] = {}  # Maps strings to labels
         self.string_counter = 0
-        self.array_counter = 0  # Counter for static array labels
         self.label_counter = 0  # Counter for generating unique labels
         self.label_map: Dict[str, str] = {}  # Maps bytecode labels to asm labels
         self.functions: List[Dict] = []
@@ -51,13 +52,6 @@ class X86Compiler:
         self.source_lines_dict: Dict[int, str] = {}  # Maps line numbers to source text from .line directives
         self.has_main: bool = False  # Track if main function exists
         self.internal_functions: set[str] = set()  # Track Fr functions (not external C)
-        self.variadic_functions: set[str] = set()  # Track functions with variadic params
-        self.function_arg_counts: dict[str, int] = {}  # Track declared arg counts
-        self.func_reg_allocations: Dict[str, Dict[int, str]] = {}
-        self.func_local_type_map: Dict[str, Dict[int, str]] = {}
-        self.local_reg_map: Dict[int, str] = {}
-        self.local_base_offset: int = 0
-        self.saved_callee_regs: List[str] = []
 
     def emit(self, line: str, indent: int = 1):
         """Emit a line of assembly code"""
@@ -68,21 +62,11 @@ class X86Compiler:
 
     def emit_comment(self, comment: str):
         """Emit a comment"""
-        #self.output.append(f"    # {comment}")
+        self.output.append(f"    # {comment}")
 
     def emit_dependency(self, func_name: str):
         """Track a runtime library function dependency"""
         self.runtime_dependencies.add(func_name)
-
-    def _emit_quad_data(self, label: str, values: list[str]):
-        """Emit a static quad array with multiple values per line."""
-        self.data_section.append(f"{label}:")
-        if not values:
-            self.data_section.append("    .quad 0")
-            return
-        for i in range(0, len(values), 256):
-            chunk = ", ".join(values[i:i + 256])
-            self.data_section.append(f"    .quad {chunk}")
 
     def _convert_struct_to_c(self, struct_id: int):
         """Convert internal struct format to C-compatible layout"""
@@ -107,9 +91,17 @@ class X86Compiler:
         """Emit a call to a runtime function and track the dependency
         Ensures stack is 16-byte aligned before the call"""
         self.emit_dependency(func_name)
+        self._emit_aligned_call(func_name)
+
+    def _emit_aligned_call(self, func_name: str):
+        """Emit a 16-byte aligned call to an external function."""
         # The x86-64 ABI requires (rsp & 0x0F) == 0 BEFORE the call instruction.
         # We use inline alignment checking. We save rax temporarily to use as a scratch register.
-        self.emit("test spl, 0xF")
+        self.emit("push rax  # Save rax and check alignment")
+        self.emit("mov rax, rsp")
+        self.emit("add rax, 8  # Account for the push")
+        self.emit("test rax, 0xF")
+        self.emit("pop rax")
         self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
         # Not aligned - sub 8
         self.emit("sub rsp, 8")
@@ -120,6 +112,28 @@ class X86Compiler:
         self.emit(f"call {func_name}")
         self.emit(f".L{func_name}_done_{self.label_counter}: ", 0)
         self.label_counter += 1
+
+    def _emit_external_call(self, func_name: str):
+        """Emit a platform-appropriate aligned call to a non-runtime external function."""
+        if IS_WINDOWS:
+            self.emit("push rax  # Save rax and check alignment")
+            self.emit("mov rax, rsp")
+            self.emit("add rax, 8  # Account for the push")
+            self.emit("test rax, 0xF")
+            self.emit("pop rax")
+            self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
+            self.emit("sub rsp, 40  # Shadow space + alignment")
+            self.emit(f"call {func_name}")
+            self.emit("add rsp, 40")
+            self.emit(f"jmp .L{func_name}_done_{self.label_counter}")
+            self.emit(f".L{func_name}_aligned_{self.label_counter}: ", 0)
+            self.emit("sub rsp, 32  # Shadow space")
+            self.emit(f"call {func_name}")
+            self.emit("add rsp, 32")
+            self.emit(f".L{func_name}_done_{self.label_counter}: ", 0)
+            self.label_counter += 1
+        else:
+            self._emit_aligned_call(func_name)
 
     def get_string_label(self, string: str) -> str:
         """Get or create a label for a string constant"""
@@ -182,126 +196,12 @@ class X86Compiler:
 
         return instructions
 
-    def _prepare_register_allocations(self, instructions: List[Tuple[str, List[str]]]):
-        """Pre-compute per-function local register allocations based on usage."""
-        current_func: Optional[str] = None
-        local_index = 0
-        local_types: Dict[int, str] = {}
-        usage: Dict[int, int] = {}
-
-        def touch(idx: int):
-            usage[idx] = usage.get(idx, 0) + 1
-
-        def finalize_function():
-            if not current_func:
-                return
-            # Prefer non-float locals for GPR allocation
-            eligible = [
-                idx for idx in usage.keys()
-                if local_types.get(idx, 'i64') not in ('f64', 'float')
-            ]
-            ranked = sorted(eligible, key=lambda i: usage.get(i, 0), reverse=True)
-            available_regs = ['r12', 'r13', 'r14', 'r15']
-            allocation: Dict[int, str] = {}
-            for idx, reg in zip(ranked, available_regs):
-                allocation[idx] = reg
-            self.func_reg_allocations[current_func] = allocation
-            self.func_local_type_map[current_func] = dict(local_types)
-
-        for opcode, args in instructions:
-            op = opcode.lower()
-            if op == '.func':
-                finalize_function()
-                current_func = args[0] if args else None
-                local_index = 0
-                local_types = {}
-                usage = {}
-                continue
-
-            if op in {'.end', '.endfunc'}:
-                finalize_function()
-                current_func = None
-                local_index = 0
-                local_types = {}
-                usage = {}
-                continue
-
-            if current_func is None:
-                continue
-
-            if op == '.local':
-                var_type = args[1] if len(args) > 1 else 'i64'
-                local_types[local_index] = var_type
-                local_index += 1
-                continue
-
-            if op == '.arg':
-                arg_type = args[1] if len(args) > 1 else 'i64'
-                local_types[local_index] = arg_type
-                local_index += 1
-                continue
-
-            if op == 'load' or op == 'load_multi':
-                for arg in args:
-                    touch(int(arg))
-                continue
-
-            if op == 'store':
-                if args:
-                    touch(int(args[0]))
-                continue
-
-            if op in {'store_const_i64', 'store_const_bool', 'store_const_f64', 'store_const_str'}:
-                for i in range(0, len(args), 2):
-                    if i < len(args):
-                        touch(int(args[i]))
-                continue
-
-            if op in {'copy_local', 'copy_local_ref'}:
-                if len(args) >= 2:
-                    touch(int(args[0]))
-                    touch(int(args[1]))
-                continue
-
-            if op.startswith('load2_') and len(args) >= 2:
-                touch(int(args[0]))
-                touch(int(args[1]))
-                continue
-
-            if op in {'inc_local', 'dec_local'} and args:
-                touch(int(args[0]))
-                continue
-
-            if op == 'fused_load_store':
-                for arg in args:
-                    touch(int(arg))
-                continue
-
-        finalize_function()
-
-    def _local_offset(self, var_index: int) -> int:
-        return self.local_base_offset + (var_index + 1) * 8
-
-    def _local_reg(self, var_index: int) -> Optional[str]:
-        return self.local_reg_map.get(var_index)
-
-    def _emit_save_callee_regs(self):
-        for idx, reg in enumerate(self.saved_callee_regs):
-            offset = (idx + 1) * 8
-            self.emit(f"mov [rbp - {offset}], {reg}")
-
-    def _emit_restore_callee_regs(self):
-        for idx, reg in enumerate(self.saved_callee_regs):
-            offset = (idx + 1) * 8
-            self.emit(f"mov {reg}, [rbp - {offset}]")
-
     def compile(self, bytecode: str) -> str:
         """
         Compile bytecode to x86_64 assembly.
         Returns assembly code as string.
         """
         instructions = self.parse_bytecode(bytecode)
-        self._prepare_register_allocations(instructions)
 
         # Emit file header with Intel syntax directive
         self.emit(".intel_syntax noprefix", 0)
@@ -396,8 +296,8 @@ class X86Compiler:
                             f".Lruntime_init_aligned_{label_num}: ",
                             "    call runtime_init",
                             f".Lruntime_init_done_{label_num}: ",
-                            f"    lea rdi, [{filename_label}]  # filename",
-                            f"    lea rsi, [{source_label}]  # source",
+                            f"    lea rdi, [rip + {filename_label}]  # filename",
+                            f"    lea rsi, [rip + {source_label}]  # source",
                             "    push rax  # Save rax and check alignment",
                             "    mov rax, rsp",
                             "    add rax, 8  # Account for the push",
@@ -510,40 +410,6 @@ class X86Compiler:
         i = 0
         while i < len(instructions):
             opcode, args = instructions[i]
-            op = opcode.lower().lstrip('.')
-
-            if op == 'load' and len(args) == 1 and i + 1 < len(instructions):
-                j = i + 1
-                line_indices: List[int] = []
-                while j < len(instructions):
-                    peek_opcode, _peek_args = instructions[j]
-                    peek_op = peek_opcode.lower().lstrip('.')
-                    if peek_op == 'line' and peek_opcode.startswith('.'):
-                        line_indices.append(j)
-                        j += 1
-                        continue
-                    break
-
-                if j < len(instructions):
-                    next_opcode, next_args = instructions[j]
-                    next_op = next_opcode.lower().lstrip('.')
-                    if next_op == 'struct_get' and len(next_args) == 1:
-                        for idx in line_indices:
-                            _line_opcode, _line_args = instructions[idx]
-                            self._compile_line(_line_args)
-
-                        var_index = int(args[0])
-                        field_idx = int(next_args[0])
-                        local_type = self.local_types.get(var_index)
-                        struct_id_hint = None
-                        if isinstance(local_type, str) and local_type.startswith('struct:'):
-                            struct_id_hint = int(local_type.split(':')[1])
-                        reg = self._local_reg(var_index)
-                        offset = None if reg else self._local_offset(var_index)
-                        self.emit_comment(f"FUSED LOAD+STRUCT_GET {var_index} {field_idx}")
-                        self._emit_struct_get_from_local(reg, offset, field_idx, struct_id_hint)
-                        i = j + 1
-                        continue
 
             # Dispatch to instruction handler
             # Handle both .directive and OPCODE formats
@@ -569,7 +435,6 @@ class X86Compiler:
         total_args = int(args[2]) if len(args) > 2 else 0
 
         self.internal_functions.add(func_name)  # Track as internal Fr function
-        self.function_arg_counts[func_name] = total_args  # Track declared arg count
         self.current_function = {
             'name': func_name,
             'stack_offset': 0,
@@ -580,9 +445,6 @@ class X86Compiler:
             'skip_label_emitted': False  # Track if skip label was emitted
         }
         self.local_types = {}  # Reset local types for new function
-        self.local_reg_map = dict(self.func_reg_allocations.get(func_name, {}))
-        self.saved_callee_regs = list(dict.fromkeys(self.local_reg_map.values()))
-        self.local_base_offset = len(self.saved_callee_regs) * 8
         # DON'T reset label_map - it needs to persist for label references to work
 
         # Track if this is main
@@ -599,9 +461,6 @@ class X86Compiler:
         # After push rbp, stack is 16-byte aligned
         # We want to keep it aligned, so reserve a multiple of 16
         self.emit("sub rsp, 256")
-        if self.saved_callee_regs:
-            self.emit("# Save callee-saved registers for allocated locals")
-            self._emit_save_callee_regs()
 
     def _compile_end(self, args: List[str]):
         """End a function definition (.end)"""
@@ -618,17 +477,12 @@ class X86Compiler:
             # Emit epilogue: restore stack and return
             self.emit(f"# Implicit return at end of {func_name}")
             self.emit("xor rax, rax  # default return value 0")
-            if self.saved_callee_regs:
-                self._emit_restore_callee_regs()
             self.emit("mov rsp, rbp")
             self.emit("pop rbp")
             self.emit("ret")
 
         # Function epilogue is emitted by RETURN or above implicit return
         self.current_function = None
-        self.local_reg_map = {}
-        self.saved_callee_regs = []
-        self.local_base_offset = 0
 
     def _compile_endfunc(self, args: List[str]):
         """End a function definition (legacy ENDFUNC)"""
@@ -716,12 +570,6 @@ class X86Compiler:
         #                              = [rbp + 16 + (total_args - 2) * 8]
 
         if self.current_function:
-            # Check if this is a variadic parameter
-            arg_type = args[1] if len(args) > 1 else ''
-            if arg_type == 'variadic':
-                func_name = self.current_function['name']
-                self.variadic_functions.add(func_name)
-            
             arg_idx = self.current_function['arg_count']
             total_args = self.current_function.get('total_args', 0)
             self.current_function['arg_count'] += 1
@@ -731,12 +579,8 @@ class X86Compiler:
             # Last arg (rightmost) is at [rbp+16], first arg at [rbp + 16 + (N-1)*8]
             stack_offset = 16 + (total_args - 1 - arg_idx) * 8
             local_offset = (arg_idx + 1) * 8
-            dest_reg = self._local_reg(arg_idx)
-            if dest_reg:
-                self.emit(f"mov {dest_reg}, [rbp + {stack_offset}]")
-            else:
-                self.emit(f"mov rax, [rbp + {stack_offset}]")
-                self.emit(f"mov [rbp - {self._local_offset(arg_idx)}], rax")
+            self.emit(f"mov rax, [rbp + {stack_offset}]")
+            self.emit(f"mov [rbp - {local_offset}], rax")
 
     def _compile_entry(self, args: List[str]):
         """Handle .entry directive - set program entry point"""
@@ -765,8 +609,8 @@ class X86Compiler:
                 source_label = self.get_string_label(source_content)
 
                 # Call runtime_set_source_info(filename, source)
-                self.emit(f"lea rdi, [{filename_label}]  # filename")
-                self.emit(f"lea rsi, [{source_label}]  # source")
+                self.emit(f"lea rdi, [rip + {filename_label}]  # filename")
+                self.emit(f"lea rsi, [rip + {source_label}]  # source")
                 self.emit_runtime_call("runtime_set_source_info")
 
             self.emit(f"call {entry_point}")
@@ -780,15 +624,8 @@ class X86Compiler:
     def _compile_const_i64(self, args: List[str]):
         """Push 64-bit integer constant(s) - can push multiple values"""
         for value in args:
-            try:
-                imm = int(value)
-            except Exception:
-                imm = None
-            if imm is not None and -2147483648 <= imm <= 2147483647:
-                self.emit(f"push {imm}")
-            else:
-                self.emit(f"movabs rax, {value}")
-                self.emit("push rax")
+            self.emit(f"mov rax, {value}")
+            self.emit("push rax")
             self.stack_types.append('i64')
 
     def _compile_const_f64(self, args: List[str]):
@@ -801,7 +638,7 @@ class X86Compiler:
             self.data_section.append(f"{label}:")
             self.data_section.append(f"    .double {value}")
 
-            self.emit(f"movsd xmm0, [{label}]")
+            self.emit(f"movsd xmm0, [rip + {label}]")
             self.emit("sub rsp, 8")
             self.emit("movsd [rsp], xmm0")
             self.stack_types.append('f64')
@@ -816,7 +653,7 @@ class X86Compiler:
                 string = string[1:-1]
 
             label = self.get_string_label(string)
-            self.emit(f"lea rax, [{label}]")
+            self.emit(f"lea rax, [rip + {label}]")
             self.emit("push rax")
             self.stack_types.append('str')
 
@@ -825,21 +662,15 @@ class X86Compiler:
         for arg in args:
             # arg can be "1", "0", "true", or "false"
             value = "1" if arg in ("1", "true") else "0"
-            self.emit(f"push {value}")
+            self.emit(f"mov rax, {value}")
+            self.emit("push rax")
             self.stack_types.append('bool')
 
     def _compile_const_i64_multi(self, args: List[str]):
         """Push multiple i64 constants (CONST_I64_MULTI val1 val2 val3...)"""
         for value in args:
-            try:
-                imm = int(value)
-            except Exception:
-                imm = None
-            if imm is not None and -2147483648 <= imm <= 2147483647:
-                self.emit(f"push {imm}")
-            else:
-                self.emit(f"movabs rax, {value}")
-                self.emit("push rax")
+            self.emit(f"mov rax, {value}")
+            self.emit("push rax")
             self.stack_types.append('i64')
 
     def _compile_const_f64_multi(self, args: List[str]):
@@ -849,7 +680,7 @@ class X86Compiler:
             self.string_counter += 1
             self.data_section.append(f"{label}:")
             self.data_section.append(f"    .double {value}")
-            self.emit(f"movsd xmm0, [{label}]")
+            self.emit(f"movsd xmm0, [rip + {label}]")
             self.emit("sub rsp, 8")
             self.emit("movsd [rsp], xmm0")
             self.stack_types.append('f64')
@@ -861,7 +692,7 @@ class X86Compiler:
             if string_arg.startswith('"') and string_arg.endswith('"'):
                 string_arg = string_arg[1:-1]
             label = self.get_string_label(string_arg)
-            self.emit(f"lea rax, [{label}]")
+            self.emit(f"lea rax, [rip + {label}]")
             self.emit("push rax")
             self.stack_types.append('str')
 
@@ -869,7 +700,8 @@ class X86Compiler:
         """Push multiple boolean constants (CONST_BOOL_MULTI true false true...)"""
         for arg in args:
             value = "1" if arg.lower() == "true" else "0"
-            self.emit(f"push {value}")
+            self.emit(f"mov rax, {value}")
+            self.emit("push rax")
             self.stack_types.append('i64')
 
     # ============================================================================
@@ -930,7 +762,7 @@ class X86Compiler:
         self.stack_types.append('i64')
 
     def _compile_div_i64(self, args: List[str]):
-        """Divide two 64-bit integers - returns float (true division)"""
+        """Divide two 64-bit integers - returns integer (floor division)"""
         self.emit("pop rbx  # divisor")
         self.emit("pop rax  # dividend")
         # Check for division by zero
@@ -938,19 +770,17 @@ class X86Compiler:
         self.emit("push rax  # save dividend")
         self.emit("mov rdi, rbx")
         self.emit(f"mov rsi, {self.current_line}  # line number")
-        self.emit("call runtime_check_div_zero_i64_at")
+        self.emit_runtime_call("runtime_check_div_zero_i64_at")
         self.emit("pop rax  # restore dividend")
-        # Convert to float and divide
-        self.emit("cvtsi2sd xmm0, rax")
-        self.emit("cvtsi2sd xmm1, rbx")
-        self.emit("divsd xmm0, xmm1")
-        self.emit("sub rsp, 8")
-        self.emit("movsd [rsp], xmm0")
+        # Perform signed integer division
+        self.emit("cqo  # sign-extend rax into rdx:rax")
+        self.emit("idiv rbx")
+        self.emit("push rax")
         # Update type stack
         if self.stack_types and len(self.stack_types) >= 2:
             self.stack_types.pop()  # pop operand 2
             self.stack_types.pop()  # pop operand 1
-        self.stack_types.append('f64')
+        self.stack_types.append('i64')
 
 
     def _compile_mod_i64(self, args: List[str]):
@@ -962,7 +792,7 @@ class X86Compiler:
         self.emit("push rax  # save dividend")
         self.emit("mov rdi, rbx")
         self.emit(f"mov rsi, {self.current_line}  # line number")
-        self.emit("call runtime_check_div_zero_i64_at")
+        self.emit_runtime_call("runtime_check_div_zero_i64_at")
         self.emit("pop rax  # restore dividend")
         self.emit("cqo")
         self.emit("idiv rbx")
@@ -977,41 +807,50 @@ class X86Compiler:
     # Float Arithmetic
     # ============================================================================
 
-    def _compile_f64_binop(self, sse_instr: str, args: List[str]):
-        """Generic float binary op (supports int operands via cvtsi2sd)"""
-        operand2_is_int = len(self.stack_types) >= 1 and self.stack_types[-1] == 'i64'
-        operand1_is_int = len(self.stack_types) >= 2 and self.stack_types[-2] == 'i64'
-
-        if operand2_is_int:
-            self.emit("pop rax")
-            self.emit("cvtsi2sd xmm1, rax")
-        else:
-            self.emit("movsd xmm1, [rsp]")
-            self.emit("add rsp, 8")
-
-        if operand1_is_int:
-            self.emit("pop rax")
-            self.emit("cvtsi2sd xmm0, rax")
-        else:
-            self.emit("movsd xmm0, [rsp]")
-            self.emit("add rsp, 8")
-
-        self.emit(f"{sse_instr} xmm0, xmm1")
+    def _compile_add_f64(self, args: List[str]):
+        """Add two 64-bit floats"""
+        self.emit("movsd xmm1, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("movsd xmm0, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("addsd xmm0, xmm1")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
+        # Update type stack
         if self.stack_types and len(self.stack_types) >= 2:
-            self.stack_types.pop()
-            self.stack_types.pop()
+            self.stack_types.pop()  # pop operand 2
+            self.stack_types.pop()  # pop operand 1
         self.stack_types.append('f64')
 
-    def _compile_add_f64(self, args: List[str]):
-        self._compile_f64_binop('addsd', args)
-
     def _compile_sub_f64(self, args: List[str]):
-        self._compile_f64_binop('subsd', args)
+        """Subtract two 64-bit floats"""
+        self.emit("movsd xmm1, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("movsd xmm0, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("subsd xmm0, xmm1")
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm0")
+        # Update type stack
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()  # pop operand 2
+            self.stack_types.pop()  # pop operand 1
+        self.stack_types.append('f64')
 
     def _compile_mul_f64(self, args: List[str]):
-        self._compile_f64_binop('mulsd', args)
+        """Multiply two 64-bit floats"""
+        self.emit("movsd xmm1, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("movsd xmm0, [rsp]")
+        self.emit("add rsp, 8")
+        self.emit("mulsd xmm0, xmm1")
+        self.emit("sub rsp, 8")
+        self.emit("movsd [rsp], xmm0")
+        # Update type stack
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()  # pop operand 2
+            self.stack_types.pop()  # pop operand 1
+        self.stack_types.append('f64')
 
     def _compile_div_f64(self, args: List[str]):
         """Divide two 64-bit floats"""
@@ -1037,7 +876,7 @@ class X86Compiler:
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
         self.emit(f"mov rdi, {self.current_line}  # line number")
-        self.emit("call runtime_check_div_zero_f64_at")
+        self.emit_runtime_call("runtime_check_div_zero_f64_at")
         self.emit("add rsp, 8")
         self.emit("movsd xmm1, [rsp]  # restore divisor")
         self.emit("add rsp, 8")
@@ -1069,36 +908,89 @@ class X86Compiler:
     # Comparison Operations
     # ============================================================================
 
-    def _compile_cmp(self, set_instr: str, args: List[str]):
-        """Generic comparison: pop two values, compare, push bool result"""
+    def _compile_cmp_eq(self, args: List[str]):
+        """Compare equality"""
         self.emit("pop rbx")
         self.emit("pop rax")
         self.emit("cmp rax, rbx")
-        self.emit(f"{set_instr} al")
+        self.emit("sete al")
         self.emit("movzx rax, al")
         self.emit("push rax")
+        # Result is boolean
         if self.stack_types and len(self.stack_types) >= 2:
             self.stack_types.pop()
             self.stack_types.pop()
         self.stack_types.append('bool')
 
-    def _compile_cmp_eq(self, args: List[str]):
-        self._compile_cmp('sete', args)
-
     def _compile_cmp_ne(self, args: List[str]):
-        self._compile_cmp('setne', args)
+        """Compare inequality"""
+        self.emit("pop rbx")
+        self.emit("pop rax")
+        self.emit("cmp rax, rbx")
+        self.emit("setne al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_lt(self, args: List[str]):
-        self._compile_cmp('setl', args)
+        """Compare less than"""
+        self.emit("pop rbx")
+        self.emit("pop rax")
+        self.emit("cmp rax, rbx")
+        self.emit("setl al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_gt(self, args: List[str]):
-        self._compile_cmp('setg', args)
+        """Compare greater than"""
+        self.emit("pop rbx")
+        self.emit("pop rax")
+        self.emit("cmp rax, rbx")
+        self.emit("setg al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_le(self, args: List[str]):
-        self._compile_cmp('setle', args)
+        """Compare less than or equal"""
+        self.emit("pop rbx")
+        self.emit("pop rax")
+        self.emit("cmp rax, rbx")
+        self.emit("setle al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_ge(self, args: List[str]):
-        self._compile_cmp('setge', args)
+        """Compare greater than or equal"""
+        self.emit("pop rbx")
+        self.emit("pop rax")
+        self.emit("cmp rax, rbx")
+        self.emit("setge al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types and len(self.stack_types) >= 2:
+            self.stack_types.pop()
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     # ============================================================================
     # Control Flow
@@ -1195,10 +1087,16 @@ class X86Compiler:
         is_external = func_name not in self.internal_functions
 
         if is_external:
-            # System V ABI: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9
-            # first 8 float args in xmm0-xmm7
-            arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
-            float_regs = ['xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6', 'xmm7']
+            if IS_WINDOWS:
+                # Windows x64 ABI: first 4 integer args in rcx, rdx, r8, r9
+                # first 4 float args in xmm0-xmm3
+                arg_regs = ['rcx', 'rdx', 'r8', 'r9']
+                float_regs = ['xmm0', 'xmm1', 'xmm2', 'xmm3']
+            else:
+                # System V ABI: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9
+                # first 8 float args in xmm0-xmm7
+                arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+                float_regs = ['xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6', 'xmm7']
 
             # Count how many integer and float args come before each position
             # This determines which register to use
@@ -1246,68 +1144,16 @@ class X86Compiler:
                 if self.stack_types:
                     self.stack_types.pop()
         else:
-            # Internal Fr function - check if it's variadic
-            is_variadic = func_name in self.variadic_functions
-            declared_arg_count = self.function_arg_counts.get(func_name, arg_count)
-            
-            if is_variadic and arg_count > declared_arg_count - 1:
-                # Variadic function with extra arguments
-                # We need to: pop extra args, create list, push list back
-                # Extra args = arg_count - (declared_arg_count - 1)
-                extra_count = arg_count - (declared_arg_count - 1)
-                
-                self.emit_comment(f"Pack {extra_count} extra args into list for variadic")
-                
-                # Pop extra args into a temporary array on stack
-                # We'll use runtime_list_new_i64(values_ptr, count)
-                # First, allocate space for the array
-                self.emit(f"sub rsp, {extra_count * 8}  # Space for vararg values")
-                
-                # Pop values into the array (in correct order)
-                for i in range(extra_count):
-                    # Pop from where they were pushed, store in array
-                    offset = (extra_count - 1 - i) * 8
-                    self.emit(f"pop rax")
-                    self.emit(f"mov [rsp + {offset}], rax")
-                
-                # Call runtime_list_new_i64(rsp, extra_count)
-                self.emit("mov rdi, rsp  # values array")
-                self.emit(f"mov rsi, {extra_count}  # count")
-                self.emit_runtime_call("runtime_list_new_i64")
-                
-                # Clean up temp array space
-                self.emit(f"add rsp, {extra_count * 8}")
-                
-                # Push the list pointer as the variadic argument
-                self.emit("push rax  # Push list pointer")
-                
-                # Track stack types properly
-                for i in range(arg_count):
-                    if self.stack_types:
-                        self.stack_types.pop()
-            else:
-                # Regular function call or variadic with no extra args
-                for i in range(arg_count):
-                    if self.stack_types:
-                        self.stack_types.pop()
+            # Internal Fr function - arguments stay on stack, but we still need to track stack_types
+            for i in range(arg_count):
+                if self.stack_types:
+                    self.stack_types.pop()
 
         # If more than 6 args, leave remaining on stack (already in correct order)
         # TODO: handle > 6 arguments properly
 
-        # Ensure stack is 16-byte aligned before external calls
-        if is_external:
-            # The x86-64 ABI requires rsp & 0xF == 0 before call
-            self.emit("# Stack alignment for external call")
-            self.emit("test spl, 0xF")
-            self.emit(f"jz .L{func_name}_aligned_{self.label_counter}")
-            self.emit("sub rsp, 8  # Align stack")
-            self.emit(f"call {func_name}")
-            self.emit("add rsp, 8  # Restore stack")
-            self.emit(f"jmp .L{func_name}_done_{self.label_counter}")
-            self.emit(f".L{func_name}_aligned_{self.label_counter}:")
-            self.emit(f"call {func_name}")
-            self.emit(f".L{func_name}_done_{self.label_counter}:")
-            self.label_counter += 1
+            # Ensure stack is aligned before external calls, using the platform ABI.
+            self._emit_external_call(func_name)
         else:
             # Internal Fr function - no alignment needed
             self.emit(f"call {func_name}")
@@ -1337,8 +1183,6 @@ class X86Compiler:
             self.in_label = False  # Reset flag after return from label
         else:
             # Full function epilogue for regular returns
-            if self.saved_callee_regs:
-                self._emit_restore_callee_regs()
             self.emit("mov rsp, rbp")
             self.emit("pop rbp")
             self.emit("ret")
@@ -1355,8 +1199,6 @@ class X86Compiler:
             self.current_function['skip_label_emitted'] = True
 
         self.emit("xor rax, rax")
-        if self.saved_callee_regs:
-            self._emit_restore_callee_regs()
         self.emit("mov rsp, rbp")
         self.emit("pop rbp")
         self.emit("ret")
@@ -1447,35 +1289,83 @@ class X86Compiler:
             asm_default = self.label_map.get(key, f".L{default_label}")
             self.emit(f"jmp {asm_default}")
 
-    def _compile_cmp_const(self, set_instr: str, args: List[str]):
-        """Generic: compare top of stack against constant"""
+    def _compile_cmp_lt_const(self, args: List[str]):
+        """Compare top of stack < constant"""
         value = args[0]
         self.emit("pop rax")
         self.emit(f"cmp rax, {value}")
-        self.emit(f"{set_instr} al")
+        self.emit("setl al")
         self.emit("movzx rax, al")
         self.emit("push rax")
+        # Result is boolean
         if self.stack_types:
             self.stack_types.pop()
         self.stack_types.append('bool')
 
-    def _compile_cmp_lt_const(self, args: List[str]):
-        self._compile_cmp_const('setl', args)
-
     def _compile_cmp_gt_const(self, args: List[str]):
-        self._compile_cmp_const('setg', args)
+        """Compare top of stack > constant"""
+        value = args[0]
+        self.emit("pop rax")
+        self.emit(f"cmp rax, {value}")
+        self.emit("setg al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types:
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_le_const(self, args: List[str]):
-        self._compile_cmp_const('setle', args)
+        """Compare top of stack <= constant"""
+        value = args[0]
+        self.emit("pop rax")
+        self.emit(f"cmp rax, {value}")
+        self.emit("setle al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types:
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_ge_const(self, args: List[str]):
-        self._compile_cmp_const('setge', args)
+        """Compare top of stack >= constant"""
+        value = args[0]
+        self.emit("pop rax")
+        self.emit(f"cmp rax, {value}")
+        self.emit("setge al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types:
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_eq_const(self, args: List[str]):
-        self._compile_cmp_const('sete', args)
+        """Compare top of stack == constant"""
+        value = args[0]
+        self.emit("pop rax")
+        self.emit(f"cmp rax, {value}")
+        self.emit("sete al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types:
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     def _compile_cmp_ne_const(self, args: List[str]):
-        self._compile_cmp_const('setne', args)
+        """Compare top of stack != constant"""
+        value = args[0]
+        self.emit("pop rax")
+        self.emit(f"cmp rax, {value}")
+        self.emit("setne al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
+        # Result is boolean
+        if self.stack_types:
+            self.stack_types.pop()
+        self.stack_types.append('bool')
 
     # ============================================================================
     # Memory Operations
@@ -1486,12 +1376,10 @@ class X86Compiler:
         # Handle multiple loads in one instruction
         for arg in args:
             var_index = int(arg)
-            reg = self._local_reg(var_index)
-            if reg:
-                self.emit(f"push {reg}")
-            else:
-                offset = self._local_offset(var_index)
-                self.emit(f"push qword ptr [rbp - {offset}]")
+            # Local variables are at [rbp - (var_index + 1) * 8]
+            offset = (var_index + 1) * 8
+            self.emit(f"mov rax, [rbp - {offset}]")
+            self.emit("push rax")
             # Track the type of the loaded value
             var_type = self.local_types.get(var_index, 'i64')  # default to i64
             self.stack_types.append(var_type)
@@ -1499,12 +1387,9 @@ class X86Compiler:
     def _compile_store(self, args: List[str]):
         """Store top of stack to local variable"""
         var_index = int(args[0])
-        reg = self._local_reg(var_index)
-        if reg:
-            self.emit(f"pop {reg}")
-        else:
-            offset = self._local_offset(var_index)
-            self.emit(f"pop qword ptr [rbp - {offset}]")
+        offset = (var_index + 1) * 8
+        self.emit("pop rax")
+        self.emit(f"mov [rbp - {offset}], rax")
         # Update local type based on what's on the stack
         if self.stack_types:
             self.local_types[var_index] = self.stack_types.pop()
@@ -1518,7 +1403,7 @@ class X86Compiler:
             if i + 1 < len(args):
                 slot = int(args[i])
                 value_str = args[i + 1]
-                offset = self._local_offset(slot)
+                offset = (slot + 1) * 8
 
                 # Check if value fits in 64-bit signed integer
                 try:
@@ -1534,15 +1419,11 @@ class X86Compiler:
                     value = 0
 
                 # Use movabs for 64-bit immediate values
-                reg = self._local_reg(slot)
                 if value < -2147483648 or value > 2147483647:
                     self.emit(f"movabs rax, {value}")
                 else:
                     self.emit(f"mov rax, {value}")
-                if reg:
-                    self.emit(f"mov {reg}, rax")
-                else:
-                    self.emit(f"mov [rbp - {offset}], rax")
+                self.emit(f"mov [rbp - {offset}], rax")
                 # Track that this local is an i64
                 self.local_types[slot] = 'i64'
 
@@ -1553,16 +1434,12 @@ class X86Compiler:
             if i + 1 < len(args):
                 slot = int(args[i])
                 value_str = args[i + 1]
-                offset = self._local_offset(slot)
+                offset = (slot + 1) * 8
 
                 # Convert string to boolean (1 or 0)
                 value = 1 if value_str.lower() in ('1', 'true') else 0
 
-                reg = self._local_reg(slot)
-                if reg:
-                    self.emit(f"mov {reg}, {value}")
-                else:
-                    self.emit(f"mov qword ptr [rbp - {offset}], {value}  # Immediate store")
+                self.emit(f"mov qword ptr [rbp - {offset}], {value}  # Immediate store")
                 # Track that this local is a bool
                 self.local_types[slot] = 'bool'
 
@@ -1573,7 +1450,7 @@ class X86Compiler:
             if i + 1 < len(args):
                 slot = int(args[i])
                 value = args[i + 1]
-                offset = self._local_offset(slot)
+                offset = (slot + 1) * 8
 
                 # Create a unique data label for this float constant
                 label_name = f".FLOAT{self.string_counter}"
@@ -1584,7 +1461,7 @@ class X86Compiler:
                 self.data_section.append(f"    .double {value}")
 
                 # Load the float constant and store it
-                self.emit(f"movsd xmm0, [{label_name}]")
+                self.emit(f"movsd xmm0, [rip + {label_name}]")
                 self.emit(f"movsd [rbp - {offset}], xmm0")
                 # Track that this local is an f64
                 self.local_types[slot] = 'f64'
@@ -1595,27 +1472,20 @@ class X86Compiler:
         Odd indices are LOAD operations (load from var and push)"""
         for i, var_str in enumerate(args):
             var_id = int(var_str)
-            offset = self._local_offset(var_id)
-            reg = self._local_reg(var_id)
+            offset = (var_id + 1) * 8
 
             if i % 2 == 0:
                 # STORE: pop from stack and store to variable
-                if reg:
-                    self.emit(f"pop {reg}")
-                else:
-                    self.emit("pop rax")
-                    self.emit(f"mov [rbp - {offset}], rax")
+                self.emit("pop rax")
+                self.emit(f"mov [rbp - {offset}], rax")
                 # Track the type being stored
                 if self.stack_types:
                     stored_type = self.stack_types.pop()
                     self.local_types[var_id] = stored_type
             else:
                 # LOAD: load from variable and push to stack
-                if reg:
-                    self.emit(f"push {reg}")
-                else:
-                    self.emit(f"mov rax, [rbp - {offset}]")
-                    self.emit("push rax")
+                self.emit(f"mov rax, [rbp - {offset}]")
+                self.emit("push rax")
                 # Push the correct type based on what we know about the local
                 var_type = self.local_types.get(var_id, 'i64')
                 self.stack_types.append(var_type)
@@ -1626,85 +1496,35 @@ class X86Compiler:
         Odd indices are STORE operations (pop and store to var)"""
         for i, var_str in enumerate(args):
             var_id = int(var_str)
-            offset = self._local_offset(var_id)
-            reg = self._local_reg(var_id)
+            offset = (var_id + 1) * 8
 
             if i % 2 == 0:
                 # LOAD: load from variable and push to stack
-                if reg:
-                    self.emit(f"push {reg}")
-                else:
-                    self.emit(f"mov rax, [rbp - {offset}]")
-                    self.emit("push rax")
+                self.emit(f"mov rax, [rbp - {offset}]")
+                self.emit("push rax")
                 # Push the correct type based on what we know about the local
                 var_type = self.local_types.get(var_id, 'i64')
                 self.stack_types.append(var_type)
             else:
                 # STORE: pop from stack and store to variable
-                if reg:
-                    self.emit(f"pop {reg}")
-                else:
-                    self.emit("pop rax")
-                    self.emit(f"mov [rbp - {offset}], rax")
+                self.emit("pop rax")
+                self.emit(f"mov [rbp - {offset}], rax")
                 # Track the type being stored
                 if self.stack_types:
                     stored_type = self.stack_types.pop()
                     self.local_types[var_id] = stored_type
 
-    def _compile_fused_get_store_load(self, args: List[str]):
-        """Fused STRUCT_GET+STORE+LOAD triplets.
-        Args: field1 dst1 src1 field2 dst2 src2 ...
-        Each triplet: pop struct from stack, get field, store to dst, load src onto stack."""
-        for t in range(0, len(args) - 2, 3):
-            field_idx = int(args[t])
-            store_var = int(args[t + 1])
-            load_var = int(args[t + 2])
-
-            # --- STRUCT_GET field_idx ---
-            self._compile_struct_get([str(field_idx)])
-
-            # --- STORE store_var ---
-            s_offset = self._local_offset(store_var)
-            s_reg = self._local_reg(store_var)
-            if s_reg:
-                self.emit(f"pop {s_reg}")
-            else:
-                self.emit("pop rax")
-                self.emit(f"mov [rbp - {s_offset}], rax")
-            if self.stack_types:
-                stored_type = self.stack_types.pop()
-                self.local_types[store_var] = stored_type
-
-            # --- LOAD load_var ---
-            l_offset = self._local_offset(load_var)
-            l_reg = self._local_reg(load_var)
-            if l_reg:
-                self.emit(f"push {l_reg}")
-            else:
-                self.emit(f"mov rax, [rbp - {l_offset}]")
-                self.emit("push rax")
-            var_type = self.local_types.get(load_var, 'i64')
-            self.stack_types.append(var_type)
-
     def _compile_inc_local(self, args: List[str]):
         """Increment local variable by 1"""
         var_index = int(args[0])
-        reg = self._local_reg(var_index)
-        if reg:
-            self.emit(f"inc {reg}")
-        else:
-            offset = self._local_offset(var_index)
-            self.emit(f"inc qword ptr [rbp - {offset}]")
+        offset = (var_index + 1) * 8
+        self.emit(f"inc qword ptr [rbp - {offset}]")
 
     def _compile_dec_local(self, args: List[str]):
         """Decrement local variable by 1"""
         var_index = int(args[0])
-        reg = self._local_reg(var_index)
-        if reg:
-            self.emit(f"dec {reg}")
-        else:
-            offset = self._local_offset(var_index)
-            self.emit(f"dec qword ptr [rbp - {offset}]")
+        offset = (var_index + 1) * 8
+        self.emit(f"dec qword ptr [rbp - {offset}]")
 
     def _compile_add_const_i64(self, args: List[str]):
         """Add constant to top of stack"""
@@ -1832,9 +1652,9 @@ class X86Compiler:
             # Division by zero - always raise error
             self.runtime_dependencies.add('runtime_error_at')
             message_label = self.get_string_label("integer division by zero")
-            self.emit(f"lea rdi, [{message_label}]  # error message")
+            self.emit(f"lea rdi, [rip + {message_label}]  # error message")
             self.emit(f"mov rsi, {self.current_line}  # line number")
-            self.emit("call runtime_error_at")
+            self.emit_runtime_call("runtime_error_at")
             self.emit("# Never reached - exception handler jumps away")
         elif top_type == 'f64':
             # Float division
@@ -1850,17 +1670,16 @@ class X86Compiler:
                 self.stack_types.pop()
             self.stack_types.append('f64')
         else:
-            # True division for integer operands (match VM DIV_CONST_I64 semantics)
+            # Integer division - use idiv (correct for signed)
             self.emit("pop rax")
-            self.emit("cvtsi2sd xmm0, rax")
+            self.emit("cqo")  # Sign extend rax into rdx:rax
             self.emit(f"mov rbx, {value}")
-            self.emit("cvtsi2sd xmm1, rbx")
-            self.emit("divsd xmm0, xmm1")
-            self.emit("sub rsp, 8")
-            self.emit("movsd [rsp], xmm0")
+            self.emit("idiv rbx")
+            self.emit("push rax")
+            # Type stack: i64 / i64 = i64
             if self.stack_types:
                 self.stack_types.pop()
-            self.stack_types.append('f64')
+            self.stack_types.append('i64')
 
     def _compile_add_const_f64(self, args: List[str]):
         """Add constant to top of stack (float)"""
@@ -1871,7 +1690,7 @@ class X86Compiler:
         self.data_section.append(f"{label}:")
         self.data_section.append(f"    .double {value}")
 
-        self.emit(f"movsd xmm0, [{label}]")
+        self.emit(f"movsd xmm0, [rip + {label}]")
         self.emit("movsd xmm1, [rsp]")
         self.emit("add rsp, 8")
         self.emit("addsd xmm1, xmm0")
@@ -1887,7 +1706,7 @@ class X86Compiler:
         self.data_section.append(f"{label}:")
         self.data_section.append(f"    .double {value}")
 
-        self.emit(f"movsd xmm0, [{label}]")
+        self.emit(f"movsd xmm0, [rip + {label}]")
         self.emit("movsd xmm1, [rsp]")
         self.emit("add rsp, 8")
         self.emit("subsd xmm1, xmm0")
@@ -1903,7 +1722,7 @@ class X86Compiler:
         self.data_section.append(f"{label}:")
         self.data_section.append(f"    .double {value}")
 
-        self.emit(f"movsd xmm0, [{label}]")
+        self.emit(f"movsd xmm0, [rip + {label}]")
         self.emit("movsd xmm1, [rsp]")
         self.emit("add rsp, 8")
         self.emit("mulsd xmm1, xmm0")
@@ -1919,9 +1738,9 @@ class X86Compiler:
             # Division by zero - always raise error
             self.runtime_dependencies.add('runtime_error_at')
             message_label = self.get_string_label("float division by zero")
-            self.emit(f"lea rdi, [{message_label}]  # error message")
+            self.emit(f"lea rdi, [rip + {message_label}]  # error message")
             self.emit(f"mov rsi, {self.current_line}  # line number")
-            self.emit("call runtime_error_at")
+            self.emit_runtime_call("runtime_error_at")
             self.emit("# Never reached - exception handler jumps away")
         else:
             # Create a label for the constant
@@ -1930,7 +1749,7 @@ class X86Compiler:
             self.data_section.append(f"{label}:")
             self.data_section.append(f"    .double {value}")
 
-            self.emit(f"movsd xmm0, [{label}]")
+            self.emit(f"movsd xmm0, [rip + {label}]")
             self.emit("movsd xmm1, [rsp]")
             self.emit("add rsp, 8")
             self.emit("divsd xmm1, xmm0")
@@ -1941,21 +1760,10 @@ class X86Compiler:
         """Copy local variable to another local (COPY_LOCAL dst src)"""
         dst = int(args[0])
         src = int(args[1])
-        src_reg = self._local_reg(src)
-        dst_reg = self._local_reg(dst)
-        if src_reg and dst_reg:
-            self.emit(f"mov {dst_reg}, {src_reg}")
-        elif src_reg:
-            dst_offset = self._local_offset(dst)
-            self.emit(f"mov [rbp - {dst_offset}], {src_reg}")
-        elif dst_reg:
-            src_offset = self._local_offset(src)
-            self.emit(f"mov {dst_reg}, [rbp - {src_offset}]")
-        else:
-            src_offset = self._local_offset(src)
-            dst_offset = self._local_offset(dst)
-            self.emit(f"mov rax, [rbp - {src_offset}]")
-            self.emit(f"mov [rbp - {dst_offset}], rax")
+        src_offset = (src + 1) * 8
+        dst_offset = (dst + 1) * 8
+        self.emit(f"mov rax, [rbp - {src_offset}]")
+        self.emit(f"mov [rbp - {dst_offset}], rax")
 
     def _compile_copy_local_ref(self, args: List[str]):
         """Copy local variable reference (same as COPY_LOCAL for now)"""
@@ -1965,87 +1773,45 @@ class X86Compiler:
         """Load multiple locals onto stack (LOAD_MULTI var1 var2 var3...)"""
         for arg in args:
             var_index = int(arg)
-            reg = self._local_reg(var_index)
-            if reg:
-                self.emit(f"push {reg}")
-            else:
-                offset = self._local_offset(var_index)
-                self.emit(f"push qword ptr [rbp - {offset}]")
-            var_type = self.local_types.get(var_index, 'i64')
-            self.stack_types.append(var_type)
+            offset = (var_index + 1) * 8
+            self.emit(f"mov rax, [rbp - {offset}]")
+            self.emit("push rax")
 
     # LOAD2_* fused instructions (load two variables and perform operation)
 
     def _compile_load2_add_i64(self, args: List[str]):
         """Fused: load var1, load var2, add"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
-        if reg2:
-            self.emit(f"add rax, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"add rax, [rbp - {offset2}]")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"add rax, [rbp - {offset2}]")
         self.emit("push rax")
         self.stack_types.append('i64')
 
     def _compile_load2_sub_i64(self, args: List[str]):
         """Fused: load var1, load var2, subtract"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
-        if reg2:
-            self.emit(f"sub rax, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"sub rax, [rbp - {offset2}]")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"sub rax, [rbp - {offset2}]")
         self.emit("push rax")
         self.stack_types.append('i64')
 
     def _compile_load2_mul_i64(self, args: List[str]):
         """Fused: load var1, load var2, multiply"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
-        if reg2:
-            self.emit(f"imul rax, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"imul rax, [rbp - {offset2}]")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"imul rax, [rbp - {offset2}]")
         self.emit("push rax")
-        self.stack_types.append('i64')
 
     def _compile_load2_div_i64(self, args: List[str]):
-        """Fused: load var1, load var2, divide (var1 / var2) - true division"""
+        """Fused: load var1, load var2, divide (var1 / var2) - integer division"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
         # Load divisor and check for zero
-        if reg2:
-            self.emit(f"mov rbx, {reg2}  # divisor")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"mov rbx, [rbp - {offset2}]  # divisor")
-        if reg1:
-            self.emit(f"mov rax, {reg1}  # dividend")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]  # dividend")
+        self.emit(f"mov rbx, [rbp - {offset2}]  # divisor")
+        self.emit(f"mov rax, [rbp - {offset1}]  # dividend")
         self.emit("push rax  # save dividend")
         self.emit("push rbx  # save divisor")
         self.emit("mov rdi, rbx  # divisor for check")
@@ -2053,71 +1819,40 @@ class X86Compiler:
         self.emit_runtime_call("runtime_check_div_zero_i64_at")
         self.emit("pop rbx  # restore divisor")
         self.emit("pop rax  # restore dividend")
-        # Convert to float and divide
-        self.emit("cvtsi2sd xmm0, rax")
-        self.emit("cvtsi2sd xmm1, rbx")
-        self.emit("divsd xmm0, xmm1")
-        self.emit("sub rsp, 8")
-        self.emit("movsd [rsp], xmm0")
-        self.stack_types.append('f64')
+        # Perform signed integer division
+        self.emit("cqo  # sign-extend rax into rdx:rax")
+        self.emit("idiv rbx")
+        self.emit("push rax")
 
 
     def _compile_load2_mod_i64(self, args: List[str]):
         """Fused: load var1, load var2, modulo"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
-        if reg2:
-            self.emit(f"mov rbx, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"mov rbx, [rbp - {offset2}]")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"mov rbx, [rbp - {offset2}]")
         self.emit("cqo  # sign-extend rax into rdx:rax")
         self.emit("idiv rbx")
         self.emit("push rdx")
-        self.stack_types.append('i64')
 
     def _compile_load2_mul_f64(self, args: List[str]):
         """Fused: load var1, load var2, multiply (floats)"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        # Load divisor and check for zero
-        if reg2:
-            self.emit(f"mov rbx, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"mov rbx, [rbp - {offset2}]")
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"movsd xmm0, [rbp - {offset1}]")
+        self.emit(f"mulsd xmm0, [rbp - {offset2}]")
+        self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
-        self.stack_types.append('f64')
 
     def _compile_load2_div_f64(self, args: List[str]):
         """Fused: load var1, load var2, divide (var1 / var2) - handles int and float"""
         var1, var2 = int(args[0]), int(args[1])
-        offset1, offset2 = self._local_offset(var1), self._local_offset(var2)
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
         # Load both operands as integers and convert to float
         # (Assumes variables are i64 - if they're f64, this will produce wrong results)
         # TODO: Track variable types from .local declarations
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}  # load var1")
-        else:
-            self.emit(f"mov rax, [rbp - {offset1}]  # load var1")
-        if reg2:
-            self.emit(f"mov rbx, {reg2}  # load var2")
-        else:
-            self.emit(f"mov rbx, [rbp - {offset2}]  # load var2")
+        self.emit(f"mov rax, [rbp - {offset1}]  # load var1")
+        self.emit(f"mov rbx, [rbp - {offset2}]  # load var2")
         # Convert both to float
         self.emit("cvtsi2sd xmm0, rax  # convert dividend to double")
         self.emit("cvtsi2sd xmm1, rbx  # convert divisor to double")
@@ -2128,7 +1863,7 @@ class X86Compiler:
         self.emit("movsd [rsp], xmm0  # save dividend")
         self.emit("movsd xmm0, xmm1  # move divisor to xmm0 for check")
         self.emit(f"mov rdi, {self.current_line}  # line number")
-        self.emit("call runtime_check_div_zero_f64_at")
+        self.emit_runtime_call("runtime_check_div_zero_f64_at")
         self.emit("movsd xmm0, [rsp]  # restore dividend")
         self.emit("add rsp, 8")
         self.emit("cvtsi2sd xmm1, rbx  # reload and convert divisor")
@@ -2140,43 +1875,66 @@ class X86Compiler:
         # Update type stack
         self.stack_types.append('f64')
 
-    def _compile_load2_cmp(self, set_instr: str, args: List[str]):
-        """Fused: load var1, load var2, compare with given set instruction"""
+    def _compile_load2_cmp_lt(self, args: List[str]):
+
+        """Fused: load var1, load var2, compare <"""
         var1, var2 = int(args[0]), int(args[1])
-        reg1 = self._local_reg(var1)
-        reg2 = self._local_reg(var2)
-        if reg1:
-            self.emit(f"mov rax, {reg1}")
-        else:
-            offset1 = self._local_offset(var1)
-            self.emit(f"mov rax, [rbp - {offset1}]")
-        if reg2:
-            self.emit(f"cmp rax, {reg2}")
-        else:
-            offset2 = self._local_offset(var2)
-            self.emit(f"cmp rax, [rbp - {offset2}]")
-        self.emit(f"{set_instr} al")
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("setl al")
         self.emit("movzx rax, al")
         self.emit("push rax")
-        self.stack_types.append('bool')
-
-    def _compile_load2_cmp_lt(self, args: List[str]):
-        self._compile_load2_cmp('setl', args)
 
     def _compile_load2_cmp_gt(self, args: List[str]):
-        self._compile_load2_cmp('setg', args)
+        """Fused: load var1, load var2, compare >"""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("setg al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
 
     def _compile_load2_cmp_le(self, args: List[str]):
-        self._compile_load2_cmp('setle', args)
+        """Fused: load var1, load var2, compare <="""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("setle al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
 
     def _compile_load2_cmp_ge(self, args: List[str]):
-        self._compile_load2_cmp('setge', args)
+        """Fused: load var1, load var2, compare >="""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("setge al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
 
     def _compile_load2_cmp_eq(self, args: List[str]):
-        self._compile_load2_cmp('sete', args)
+        """Fused: load var1, load var2, compare =="""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("sete al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
 
     def _compile_load2_cmp_ne(self, args: List[str]):
-        self._compile_load2_cmp('setne', args)
+        """Fused: load var1, load var2, compare !="""
+        var1, var2 = int(args[0]), int(args[1])
+        offset1, offset2 = (var1 + 1) * 8, (var2 + 1) * 8
+        self.emit(f"mov rax, [rbp - {offset1}]")
+        self.emit(f"cmp rax, [rbp - {offset2}]")
+        self.emit("setne al")
+        self.emit("movzx rax, al")
+        self.emit("push rax")
 
     # ============================================================================
     # Stack Operations
@@ -2210,60 +1968,54 @@ class X86Compiler:
     # Runtime Library Calls
     # ============================================================================
 
-    # Type dispatch table for print: maps stack type to
-    # (convert_call_or_None, is_float_abi).
-    # The print/println suffix is chosen by the caller.
-    # If convert_call is not None, the value is first converted to a string
-    # via that runtime call, then printed with runtime_print[ln]_str.
-    _PRINT_TYPE_DISPATCH = {
-        'f64':  (None, True),         # use runtime_print[ln]_float directly
-        'str':  (None, False),        # use runtime_print[ln]_str directly
-        'bool': ('runtime_bool_to_str', False),
-        'list': ('runtime_list_to_str', False),
-        'set':  ('runtime_set_to_str', False),
-    }
-
-    def _emit_typed_print(self, newline: bool):
-        """Emit type-dispatched print code.  Centralised to avoid the
-        bug where _compile_builtin_print and _compile_builtin_println
-        diverged (convert-to-str then called runtime_print instead of
-        runtime_print_str, printing a raw pointer as an integer)."""
-        suffix = 'ln' if newline else ''
-        top = self.stack_types[-1] if self.stack_types else None
-        dispatch = self._PRINT_TYPE_DISPATCH.get(top)
-
-        if dispatch is not None:
-            convert_call, is_float = dispatch
-            if is_float:
-                self.emit("movsd xmm0, [rsp]")
-                self.emit("add rsp, 8")
-                self.emit("xor rax, rax")
-                self.emit_runtime_call(f"runtime_print{suffix}_float")
-            elif convert_call is not None:
-                # Convert to string, then print as string
-                self.emit("pop rdi")
-                self.emit_runtime_call(convert_call)
-                self.emit("mov rdi, rax")
-                self.emit_runtime_call(f"runtime_print{suffix}_str")
-            else:
-                # Already a string
-                self.emit("pop rdi")
-                self.emit_runtime_call(f"runtime_print{suffix}_str")
-            self.stack_types.pop()
-        else:
-            # Integer / unknown — use integer printer
-            self.emit("pop rdi")
-            self.emit_runtime_call(f"runtime_print{suffix}")
-            if self.stack_types:
-                self.stack_types.pop()
-
     def _compile_builtin_print(self, args: List[str]):
-        """Print value (call runtime) - type-dispatched"""
-        self._emit_typed_print(newline=False)
+        """Print value (call runtime)"""
+        # Pop value into rdi (first argument in System V ABI)
+        self.emit("pop rdi")
+        self.emit_runtime_call("runtime_print")
 
     def _compile_builtin_println(self, args: List[str]):
-        """Print value with newline (call runtime) - type-dispatched"""
-        self._emit_typed_print(newline=True)
+        """Print value with newline (call runtime)"""
+        # Check if top of stack is a float
+        if self.stack_types and self.stack_types[-1] == 'f64':
+            # Float value - use runtime_println_float
+            self.emit("movsd xmm0, [rsp]")
+            self.emit("add rsp, 8")
+            self.emit("xor rax, rax")  # Set rax=0 (number of XMM registers used per ABI)
+            self.emit_runtime_call("runtime_println_float")
+            self.stack_types.pop()
+        elif self.stack_types and self.stack_types[-1] == 'str':
+            # String value - use runtime_println_str
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_println_str")
+            self.stack_types.pop()
+        elif self.stack_types and self.stack_types[-1] == 'bool':
+            # Bool value - convert to string first
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_bool_to_str")
+            self.emit("mov rdi, rax")
+            self.emit_runtime_call("runtime_println")
+            self.stack_types.pop()
+        elif self.stack_types and self.stack_types[-1] == 'list':
+            # List value - convert to string and print
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_list_to_str")
+            self.emit("mov rdi, rax")
+            self.emit_runtime_call("runtime_println")
+            self.stack_types.pop()
+        elif self.stack_types and self.stack_types[-1] == 'set':
+            # Set value - convert to string and print
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_set_to_str")
+            self.emit("mov rdi, rax")
+            self.emit_runtime_call("runtime_println")
+            self.stack_types.pop()
+        else:
+            # Integer or other value - use regular runtime_println
+            self.emit("pop rdi")
+            self.emit_runtime_call("runtime_println")
+            if self.stack_types:
+                self.stack_types.pop()
 
     def _compile_halt(self, args: List[str]):
         """Halt/exit program"""
@@ -2705,7 +2457,7 @@ class X86Compiler:
         if label not in [d for d in self.data_section if d.startswith(label)]:
             self.data_section.append(f"{label}:")
             self.data_section.append("    .double 3.14159265358979323846")
-        self.emit(f"movsd xmm0, [{label}]")
+        self.emit(f"movsd xmm0, [rip + {label}]")
         self.emit("sub rsp, 8")
         self.emit("movsd [rsp], xmm0")
         # Update stack types: pi is f64
@@ -2806,19 +2558,6 @@ class X86Compiler:
         self.emit("push rax")
         self.stack_types.append('list')
 
-    def _compile_list_new_cap(self, args: List[str]):
-        """Create new list with reserved capacity (LIST_NEW_CAP capacity elem_type)"""
-        if len(args) < 2:
-            raise X86CompilerError("LIST_NEW_CAP requires capacity and elem_type")
-        capacity = args[0]
-        elem_type = args[1]
-        self.emit(f"mov rdi, {capacity}  # capacity")
-        self.emit(f"mov rsi, {elem_type}  # elem_type")
-        self.emit("mov rdx, 1  # is_static")
-        self.emit_runtime_call("runtime_list_new_capacity")
-        self.emit("push rax")
-        self.stack_types.append('list')
-
     def _compile_list_append(self, args: List[str]):
         """Append value to list"""
         self.emit("pop rsi")  # value
@@ -2881,7 +2620,7 @@ class X86Compiler:
         self.runtime_dependencies.add('runtime_list_get_int_at')
         self.emit(f".Llist_get_slow_{label_num}:")
         self.emit(f"mov rdx, {self.current_line}  # line number")
-        self.emit("call runtime_list_get_int_at")
+        self.emit_runtime_call("runtime_list_get_int_at")
         
         self.emit(f".Llist_get_done_{label_num}:")
         self.emit("push rax")
@@ -2926,7 +2665,7 @@ class X86Compiler:
         self.emit("mov [rip + list_append_scratch], rdi")
         self.emit("mov rdx, r8  # value")
         self.emit(f"mov rcx, {self.current_line}  # line number")
-        self.emit("call runtime_list_set_int_at")
+        self.emit_runtime_call("runtime_list_set_int_at")
         self.emit("mov rax, [rip + list_append_scratch]")
         
         self.emit(f".Llist_set_done_{label_num}:")
@@ -2976,26 +2715,25 @@ class X86Compiler:
         count = int(args[0])
         values = args[1:count+1]
 
-        if count == 0:
-            # Create new empty list
-            self.emit_runtime_call("runtime_list_new")
-            # Set elem_type to 0 (integer) - rax has the list pointer
-            self.emit("mov dword ptr [rax + 24], 0  # elem_type = 0 (int)")
-            self.emit("push rax")
-            self.stack_types.append('list')
-            return
+        # Create new list
+        self.emit_runtime_call("runtime_list_new")
 
-        label = f".ARR{self.array_counter}"
-        self.array_counter += 1
-        self._emit_quad_data(label, values)
-
-        # Call runtime_list_from_array(values_ptr, count)
-        self.emit(f"lea rdi, [{label}]")
-        self.emit(f"mov rsi, {count}")
-        self.emit_runtime_call("runtime_list_from_array")
-        # Set elem_type to 0 (integer)
+        # Set elem_type to 0 (integer) - rax has the list pointer
         self.emit("mov dword ptr [rax + 24], 0  # elem_type = 0 (int)")
+
+        # Save list pointer on stack
         self.emit("push rax")
+
+        # Append each value
+        for value in values:
+            # Peek at list pointer without popping
+            self.emit("mov rdi, [rsp]")  # Load list pointer to rdi (first param)
+            self.emit(f"mov rsi, {value}")  # value (second param)
+            self.emit_runtime_call("runtime_list_append_int")
+
+        # List pointer is already on stack
+
+        # Update type stack
         self.stack_types.append('list')
 
     def _compile_list_new_f64(self, args: List[str]):
@@ -3003,29 +2741,32 @@ class X86Compiler:
         count = int(args[0])
         values = args[1:count+1]
 
-        if count == 0:
-            # Create new empty list
-            self.emit_runtime_call("runtime_list_new")
-            self.emit("mov dword ptr [rax + 24], 2  # elem_type = 2 (float)")
-            self.emit("push rax")
-            self.stack_types.append('list')
-            return
+        # Create new list
+        self.emit_runtime_call("runtime_list_new")
 
-        label = f".ARR{self.array_counter}"
-        self.array_counter += 1
-        quad_values = []
-        for value in values:
-            bits = struct.unpack("<Q", struct.pack("<d", float(value)))[0]
-            quad_values.append(f"0x{bits:016x}")
-        self._emit_quad_data(label, quad_values)
-
-        # Call runtime_list_from_array(values_ptr, count)
-        self.emit(f"lea rdi, [{label}]")
-        self.emit(f"mov rsi, {count}")
-        self.emit_runtime_call("runtime_list_from_array")
         # Set elem_type to 2 (float)
         self.emit("mov dword ptr [rax + 24], 2  # elem_type = 2 (float)")
+
+        # Save list pointer on stack
         self.emit("push rax")
+
+        # Append each value
+        for value in values:
+            # Create a label for the float constant
+            label = f".FLOAT{self.string_counter}"
+            self.string_counter += 1
+            self.data_section.append(f"{label}:")
+            self.data_section.append(f"    .double {value}")
+
+            # Load float value and append
+            self.emit("mov rdi, [rsp]")  # Peek at list pointer
+            self.emit(f"movsd xmm0, [rip + {label}]")  # value in xmm0
+            self.emit("movq rsi, xmm0")  # Move xmm0 to rsi as int64 bits
+            self.emit_runtime_call("runtime_list_append_int")
+
+        # List pointer is already on stack
+
+        # Update type stack
         self.stack_types.append('list')
 
     def _compile_list_new_str(self, args: List[str]):
@@ -3053,38 +2794,12 @@ class X86Compiler:
 
             # Load string pointer and append
             self.emit("mov rdi, [rsp]")  # Peek at list pointer
-            self.emit(f"lea rsi, [{label}]")  # value as string pointer
+            self.emit(f"lea rsi, [rip + {label}]")  # value as string pointer
             self.emit_runtime_call("runtime_list_append_int")
 
         # List pointer is already on stack
 
         # Update type stack
-        self.stack_types.append('list')
-
-    def _compile_list_new_bool(self, args: List[str]):
-        """Create list from bool array (LIST_NEW_BOOL count val1 val2 ...)"""
-        count = int(args[0])
-        values = args[1:count+1]
-
-        if count == 0:
-            self.emit_runtime_call("runtime_list_new")
-            self.emit("mov dword ptr [rax + 24], 3  # elem_type = 3 (bool)")
-            self.emit("push rax")
-            self.stack_types.append('list')
-            return
-
-        label = f".ARR{self.array_counter}"
-        self.array_counter += 1
-        quad_values = ["1" if value in ("1", "true") else "0" for value in values]
-        self._emit_quad_data(label, quad_values)
-
-        # Call runtime_list_from_array(values_ptr, count)
-        self.emit(f"lea rdi, [{label}]")
-        self.emit(f"mov rsi, {count}")
-        self.emit_runtime_call("runtime_list_from_array")
-        # Set elem_type to 3 (bool)
-        self.emit("mov dword ptr [rax + 24], 3  # elem_type = 3 (bool)")
-        self.emit("push rax")
         self.stack_types.append('list')
 
     def _compile_list_new_bool(self, args: List[str]):
@@ -3114,37 +2829,6 @@ class X86Compiler:
         # List pointer is already on stack
 
         # Update type stack
-        self.stack_types.append('list')
-
-    def _compile_list_new_stack(self, args: List[str]):
-        """Create list from values on stack (LIST_NEW_STACK count)"""
-        count = int(args[0])
-
-        # Create new list
-        self.emit_runtime_call("runtime_list_new")
-
-        # Save list pointer in scratch (do not push onto stack or it will be popped as data)
-        self.emit("mov [rip + list_append_scratch], rax")
-
-        # Temporarily store values in memory (stack frame)
-        temp_location = self.current_function['stack_offset']
-        for i in range(count):
-            self.emit("pop rax")  # Pop value
-            self.emit(f"mov [rbp - {temp_location + (i + 1) * 8}], rax")  # Store in temp
-
-        # Now append in original order (reverse of pop order)
-        for i in range(count - 1, -1, -1):
-            self.emit("mov rdi, [rip + list_append_scratch]  # list pointer")
-            self.emit(f"mov rsi, [rbp - {temp_location + (i + 1) * 8}]")  # Restore value
-            self.emit_runtime_call("runtime_list_append_int")
-
-        # Push list pointer back onto stack
-        self.emit("mov rax, [rip + list_append_scratch]")
-        self.emit("push rax")
-
-        # Pop value types and push list type
-        for _ in range(min(count, len(self.stack_types))):
-            self.stack_types.pop()
         self.stack_types.append('list')
 
     def _compile_contains(self, args: List[str]):
@@ -3256,67 +2940,6 @@ class X86Compiler:
         self.emit("push rax")
         self.stack_types.append('set')
 
-    # ============================================================================
-    # Dict Operations
-    # ============================================================================
-
-    def _compile_dict_new(self, args: List[str]):
-        """Create new empty dict"""
-        self.emit_runtime_call("runtime_dict_new")
-        self.emit("push rax")
-        self.stack_types.append('dict')
-
-    def _compile_dict_get(self, args: List[str]):
-        """Get value by key from dict"""
-        key_type = self.stack_types[-1] if self.stack_types else 'i64'
-        # Pop key and dict
-        self.emit("pop rsi  # key")
-        self.emit("pop rdi  # dict")
-        if key_type == 'str':
-            self.emit("mov rdx, 1  # key_type: string")
-        else:
-            self.emit("mov rdx, 0  # key_type: int")
-        self.emit_runtime_call("runtime_dict_get")
-        self.emit("push rax")
-        if len(self.stack_types) >= 2:
-            self.stack_types.pop()  # key
-            self.stack_types.pop()  # dict
-        self.stack_types.append('i64')
-
-    def _compile_dict_set(self, args: List[str]):
-        """Set value by key in dict"""
-        key_type = self.stack_types[-2] if len(self.stack_types) >= 2 else 'i64'
-        self.emit("pop rcx  # value")
-        self.emit("pop rsi  # key")
-        self.emit("pop rdi  # dict")
-        if key_type == 'str':
-            self.emit("mov rdx, 1  # key_type: string")
-        else:
-            self.emit("mov rdx, 0  # key_type: int")
-        self.emit_runtime_call("runtime_dict_set")
-        self.emit("push rdi")
-        if len(self.stack_types) >= 3:
-            self.stack_types.pop()  # value
-            self.stack_types.pop()  # key
-            self.stack_types.pop()  # dict
-        self.stack_types.append('dict')
-
-    def _compile_dict_contains(self, args: List[str]):
-        """Check if dict contains key"""
-        key_type = self.stack_types[-1] if self.stack_types else 'i64'
-        self.emit("pop rsi  # key")
-        self.emit("pop rdi  # dict")
-        if key_type == 'str':
-            self.emit("mov rdx, 1  # key_type: string")
-        else:
-            self.emit("mov rdx, 0  # key_type: int")
-        self.emit_runtime_call("runtime_dict_contains")
-        self.emit("push rax")
-        if len(self.stack_types) >= 2:
-            self.stack_types.pop()  # key
-            self.stack_types.pop()  # dict
-        self.stack_types.append('bool')
-
     def _compile_set_add(self, args: List[str]):
         """Add value to set"""
         # Get the type of the value being added
@@ -3420,7 +3043,8 @@ class X86Compiler:
         # Extract instance_id from high bits
         self.emit("shr rax, 16")
         # Calculate base address in struct_data
-        self.emit("shl rax, 8  # rax = instance_id * 256")
+        self.emit("mov rcx, 256")
+        self.emit("imul rax, rcx  # rax = instance_id * 256")
         self.emit("lea rdx, [rip + struct_data]")
 
         # Allocate space for C struct on stack (field_count * 8 bytes)
@@ -3453,7 +3077,8 @@ class X86Compiler:
 
         # Allocate from struct_data area
         self.emit("lea rax, [rip + struct_counter]")
-        self.emit("mov rcx, [rax]  # rcx = current counter")
+        self.emit("mov rbx, [rax]  # rbx = current counter")
+        self.emit("mov rcx, rbx")
         self.emit("inc rcx")
         # Wrap around at 262144 to stay within allocated struct_data
         self.emit("cmp rcx, 262144")
@@ -3468,12 +3093,13 @@ class X86Compiler:
 
         # Calculate base offset for struct_data: instance_id * 256
         self.emit("mov rax, rcx  # rax = new instance_id after wrap")
-        self.emit("shl rax, 8  # rax = instance_id * 256")
-        self.emit("lea rdx, [rip + struct_data]")
+        self.emit("mov rdx, 256")
+        self.emit("imul rax, rdx  # rax = instance_id * 256")
 
         # Store fields in struct_data
         for i in range(field_count - 1, -1, -1):
             self.emit(f"pop rbx  # field {i}")
+            self.emit("lea rdx, [rip + struct_data]")
             self.emit(f"mov [rdx + rax + {i * 8}], rbx")
             if self.stack_types:
                 self.stack_types.pop()
@@ -3501,9 +3127,11 @@ class X86Compiler:
             if isinstance(popped_type, str) and popped_type.startswith('struct:'):
                 struct_id_from_stack = int(popped_type.split(':')[1])
 
-        # Decode: instance_id = rax >> 16
+        # Decode: instance_id = rax >> 16, struct_id = rax & 0xFFFF
         self.emit("mov rbx, rax")
         self.emit("shr rbx, 16  # rbx = instance_id")
+        self.emit("mov rcx, rax")
+        self.emit("and rcx, 0xFFFF  # rcx = struct_id")
 
         # Clamp instance_id to valid range (0-262143) to prevent out-of-bounds access
         self.emit("cmp rbx, 262144")
@@ -3516,7 +3144,8 @@ class X86Compiler:
         # Calculate address: base + (instance_id * 256) + (field_idx * 8)
         # rax = instance_id * 256
         self.emit("mov rax, rbx")
-        self.emit("shl rax, 8  # rax = instance_id * 256")
+        self.emit("mov rdx, 256")
+        self.emit("imul rax, rdx  # rax = instance_id * 256")
         self.emit(f"add rax, {field_idx * 8}  # rax += field_idx * 8")
 
         # Load field value from struct_data
@@ -3549,58 +3178,6 @@ class X86Compiler:
             else:
                 self.stack_types.append('i64')
 
-    def _emit_struct_get_from_local(
-        self,
-        reg: Optional[str],
-        offset: Optional[int],
-        field_idx: int,
-        struct_id_hint: Optional[int]
-    ):
-        """Emit struct field load directly from a local register/memory."""
-        if reg:
-            self.emit(f"mov rbx, {reg}")
-        else:
-            self.emit(f"mov rbx, [rbp - {offset}]")
-
-        self.emit("shr rbx, 16  # rbx = instance_id")
-
-        self.emit("cmp rbx, 262144")
-        label_num = self.label_counter
-        self.label_counter += 1
-        self.emit(f"jb .Linstance_ok_{label_num}")
-        self.emit("and rbx, 0x3FFFF  # Wrap to 0-262143")
-        self.emit(f".Linstance_ok_{label_num}:")
-
-        self.emit("mov rax, rbx")
-        self.emit("shl rax, 8  # rax = instance_id * 256")
-        self.emit(f"add rax, {field_idx * 8}  # rax += field_idx * 8")
-        self.emit("lea rdx, [rip + struct_data]")
-
-        field_type = 'i64'
-        struct_id_to_use = struct_id_hint if struct_id_hint is not None else self.last_struct_id
-        if struct_id_to_use is not None and struct_id_to_use in self.structs:
-            struct_def = self.structs[struct_id_to_use]
-            field_types = struct_def.get('field_types', [])
-            if field_idx < len(field_types):
-                field_type = field_types[field_idx]
-
-        if field_type == 'float':
-            self.emit("movsd xmm0, [rdx + rax]")
-            self.emit("sub rsp, 8")
-            self.emit("movsd [rsp], xmm0")
-            self.stack_types.append('f64')
-        else:
-            self.emit("mov rax, [rdx + rax]")
-            self.emit("push rax")
-            if field_type == 'str':
-                self.stack_types.append('str')
-            elif field_type == 'bool':
-                self.stack_types.append('bool')
-            else:
-                self.stack_types.append('i64')
-        if struct_id_to_use is not None:
-            self.last_struct_id = struct_id_to_use
-
     def _compile_struct_set(self, args: List[str]):
         """Set field in struct - store to struct data area"""
         field_idx = int(args[0])
@@ -3615,16 +3192,19 @@ class X86Compiler:
             self.stack_types.pop()  # Pop value
             self.stack_types.pop()  # Pop struct
 
-        # Decode: instance_id = rax >> 16
+        # Decode: instance_id = rax >> 16, struct_id = rax & 0xFFFF
         self.emit("mov rcx, rax")
         self.emit("shr rcx, 16  # rcx = instance_id")
+        self.emit("mov rdx, rax")
+        self.emit("and rdx, 0xFFFF  # rdx = struct_id")
 
         # Save struct reference for return
         self.emit("push rax  # save struct reference for return")
 
         # Calculate address: base + (instance_id * 256) + (field_idx * 8)
         self.emit("mov rax, rcx")
-        self.emit("shl rax, 8  # rax = instance_id * 256")
+        self.emit("mov rdx, 256")
+        self.emit("imul rax, rdx  # rax = instance_id * 256")
         self.emit(f"add rax, {field_idx * 8}  # rax += field_idx * 8")
 
         # Store new value to struct_data
@@ -3753,15 +3333,11 @@ class X86Compiler:
             self.emit("push rax")
             self.stack_types.pop()
         # Otherwise it's already an int, no-op
-        if self.stack_types:
-            self.stack_types[-1] = 'i64'
-        else:
-            self.stack_types.append('i64')
+        self.stack_types.append('i64')
 
     def _compile_to_float(self, args: List[str]):
         """Convert int or string to float"""
         value_type = self.stack_types[-1] if self.stack_types else 'i64'
-        converted = False
 
         if value_type == 'str':
             # Convert string to float
@@ -3770,7 +3346,6 @@ class X86Compiler:
             self.emit("sub rsp, 8")
             self.emit("movsd [rsp], xmm0")
             self.stack_types.pop()
-            converted = True
         elif value_type == 'i64':
             # Convert int to float
             self.emit("pop rax")
@@ -3778,16 +3353,10 @@ class X86Compiler:
             self.emit("sub rsp, 8")
             self.emit("movsd [rsp], xmm0")
             self.stack_types.pop()
-            converted = True
         # Otherwise assume it's already a float, no-op
 
         # Update type stack
-        if converted:
-            self.stack_types.append('f64')
-        elif self.stack_types:
-            self.stack_types[-1] = 'f64'
-        else:
-            self.stack_types.append('f64')
+        self.stack_types.append('f64')
 
     def _compile_to_bool(self, args: List[str]):
         """Convert to bool"""
@@ -3813,14 +3382,14 @@ class X86Compiler:
         """Load global variable"""
         var_index = int(args[0])
         # Globals are stored in .bss section
-        self.emit(f"mov rax, [global_vars + {var_index * 8}]")
+        self.emit(f"mov rax, [rip + global_vars + {var_index * 8}]")
         self.emit("push rax")
 
     def _compile_store_global(self, args: List[str]):
         """Store to global variable"""
         var_index = int(args[0])
         self.emit("pop rax")
-        self.emit(f"mov [global_vars + {var_index * 8}], rax")
+        self.emit(f"mov [rip + global_vars + {var_index * 8}], rax")
 
     def _compile_try_begin(self, args: List[str]):
         """Begin exception handler block (TRY_BEGIN "exc_type" handler_label)"""
@@ -3848,13 +3417,16 @@ class X86Compiler:
         self.runtime_dependencies.add('runtime_exception_push')
         self.runtime_dependencies.add('runtime_exception_get_jump_buffer')
 
-        self.emit(f"lea rdi, [{exc_type_label}]  # exc_type")
-        self.emit("call runtime_exception_push")
+        self.emit(f"lea rdi, [rip + {exc_type_label}]  # exc_type")
+        self.emit_runtime_call("runtime_exception_push")
 
         # Get the jump buffer and save the current context with setjmp
-        self.emit("call runtime_exception_get_jump_buffer")
-        self.emit("mov rdi, rax  # jump buffer pointer")
-        self.emit("call setjmp@PLT  # returns 0 first time, 1 when longjmp is called")
+        self.emit_runtime_call("runtime_exception_get_jump_buffer")
+        if IS_WINDOWS:
+            self.emit("mov rcx, rax  # jump buffer pointer")
+        else:
+            self.emit("mov rdi, rax  # jump buffer pointer")
+        self._emit_external_call("setjmp")
 
         # Check if we just returned from setjmp (0) or from longjmp (non-zero)
         self.emit("test rax, rax")
@@ -3865,7 +3437,7 @@ class X86Compiler:
         """End exception handler block (TRY_END)"""
         # Pop exception handler from stack
         self.runtime_dependencies.add('runtime_exception_pop')
-        self.emit("call runtime_exception_pop")
+        self.emit_runtime_call("runtime_exception_pop")
 
     def _compile_raise(self, args: List[str]):
         """Raise an exception (RAISE "exc_type" "message")"""
@@ -3886,10 +3458,10 @@ class X86Compiler:
         # This either jumps to a handler via longjmp or exits the program
         self.runtime_dependencies.add('runtime_exception_raise_at')
 
-        self.emit(f"lea rdi, [{exc_type_label}]")
-        self.emit(f"lea rsi, [{message_label}]")
+        self.emit(f"lea rdi, [rip + {exc_type_label}]")
+        self.emit(f"lea rsi, [rip + {message_label}]")
         self.emit(f"mov rdx, {self.current_line}  # line number")
-        self.emit("call runtime_exception_raise_at")
+        self.emit_runtime_call("runtime_exception_raise_at")
         # This function never returns if a handler is found
         # If we get here, the program has exited
 

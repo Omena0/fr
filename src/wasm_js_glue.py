@@ -322,6 +322,15 @@ JS_RUNTIME_FUNCTIONS = {
         }''',
         'wasm_signature': '(param i32) (result i64)',
     },
+    'list_contains': {
+        'signature': '(listId, value) => i32',
+        'implementation': '''(listId, value) => {
+            const list = lists.get(listId);
+            if (!list) return 0;
+            return list.includes(value) ? 1 : 0;
+        }''',
+        'wasm_signature': '(param i32 i64) (result i32)',
+    },
     'list_pop': {
         'signature': '(listId) => [listId, value]',
         'implementation': '''(listId) => {
@@ -420,14 +429,16 @@ JS_RUNTIME_FUNCTIONS = {
 
     # Error handling
     'runtime_error': {
-        'signature': '(typePtr, typeLen, msgPtr, msgLen, lineNum) => {}',
-        'implementation': '''(typePtr, typeLen, msgPtr, msgLen, lineNum) => {
+        'signature': '(typePtr, typeLen, msgPtr, msgLen, lineNum, colNum) => {}',
+        'implementation': '''(typePtr, typeLen, msgPtr, msgLen, lineNum, colNum) => {
             const type = readString(typePtr, typeLen) || 'Error';
             const msg = readString(msgPtr, msgLen) || '';
             const line = Number(lineNum) || 0;
-            throw new FrRuntimeError(`${type}: ${msg}` + (line ? ` (line ${line})` : ''));
+            const col = Number(colNum) || 0;
+            const where = (line && col) ? ` (line ${line}, col ${col})` : (line ? ` (line ${line})` : '');
+            throw new FrRuntimeError(`${type}: ${msg}` + where);
         }''',
-        'wasm_signature': '(param i32 i32 i32 i32 i32)',
+        'wasm_signature': '(param i32 i32 i32 i32 i32 i32)',
     },
     'index_error': {
         'signature': '(typePtr, typeLen, index, length) => {}',
@@ -454,6 +465,22 @@ JS_RUNTIME_FUNCTIONS = {
             while (performance.now() < end) {}
         }''',
         'wasm_signature': '(param f64)',
+    },
+
+    # Process control stubs (not supported in browser)
+    'fork': {
+        'signature': '() => pid',
+        'implementation': '''() => {
+            throw new FrRuntimeError('fork is not supported in WebAssembly JS glue');
+        }''',
+        'wasm_signature': '(result i64)',
+    },
+    'wait': {
+        'signature': '(pid) => status',
+        'implementation': '''(pid) => {
+            throw new FrRuntimeError('wait is not supported in WebAssembly JS glue');
+        }''',
+        'wasm_signature': '(param i64) (result i64)',
     },
 
     # File I/O stubs (not supported in browser, but satisfy imports)

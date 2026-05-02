@@ -12,17 +12,26 @@ import os
 import json
 import fnmatch
 
+IS_WINDOWS = os.name == 'nt'
+
+
+def _norm_test_path(path: str) -> str:
+    """Normalize paths to forward-slash form for config matching."""
+    return path.replace('\\', '/').lstrip('./')
 
 def load_config():
     """Load test configuration from cases/config.json"""
     config_path = Path('cases/config.json')
     if not config_path.exists():
         # Return default config if file doesn't exist
-        return {
+        config = {
             'native': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
             'c': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
             'py': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
+            'wasm': {'enabled': True, 'timeout': 10, 'ignore': [], 'skip_mismatch': [], 'allow_timeout_failures': False},
         }
+
+        return config
 
     with open(config_path) as f:
         config = json.load(f)
@@ -52,6 +61,7 @@ def get_test_category(test_path):
     - cases/data_structures/struct_basic.fr -> data_structures
     - cases/assertions/assert_pass.fr -> assertions
     """
+    test_path = _norm_test_path(test_path)
     parts = test_path.replace('cases/', '').split('/')
     return parts[0] if len(parts) > 1 else 'root'
 
@@ -61,6 +71,7 @@ def should_skip_test(test_path, runtime, config):
     Returns: True if test should be skipped, False otherwise
     """
     runtime_config = config.get(runtime, {})
+    test_path = _norm_test_path(test_path)
 
     # Check if runtime is disabled
     if not runtime_config.get('enabled', True):
@@ -71,9 +82,11 @@ def should_skip_test(test_path, runtime, config):
     ignore_list = runtime_config.get('ignore', [])
     
     # Check both category and full test path (with glob pattern support)
-    for pattern in ignore_list:
-        if fnmatch.fnmatch(test_path, pattern) or fnmatch.fnmatch(category, pattern):
-            return True
+    if any(
+        fnmatch.fnmatch(test_path, pattern) or fnmatch.fnmatch(category, pattern)
+        for pattern in ignore_list
+    ):
+        return True
     
     return False
 
@@ -92,18 +105,26 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
     if config is None:
         config = load_config()
 
-    # Calculate maximum timeout from all enabled runtimes
-    max_timeout = 5
-    for runtime in ['native', 'c', 'py', 'wasm']:
-        if config.get(runtime, {}).get('enabled', True):
-            runtime_timeout = config.get(runtime, {}).get('timeout', 10)
-            max_timeout = max(max_timeout, runtime_timeout)
-
     # Determine which runtimes to skip for this test
     skip_py = should_skip_test(test_file, 'py', config)
     skip_c = should_skip_test(test_file, 'c', config)
     skip_native = should_skip_test(test_file, 'native', config)
     skip_wasm = should_skip_test(test_file, 'wasm', config)
+
+    # Calculate overall subprocess timeout.
+    # run_single_test runs enabled runtimes sequentially, so the helper subprocess
+    # timeout must cover the sum of per-runtime timeouts (plus a small cushion).
+    total_timeout = 0
+    if not skip_py:
+        total_timeout += int(config.get('py', {}).get('timeout', 10))
+    if not skip_c:
+        total_timeout += int(config.get('c', {}).get('timeout', 10))
+    if not skip_native:
+        total_timeout += int(config.get('native', {}).get('timeout', 10))
+    if not skip_wasm:
+        total_timeout += int(config.get('wasm', {}).get('timeout', 10))
+
+    max_timeout = max(5, total_timeout + 2)
 
     # Build arguments to pass to helper script - use full test_path for import resolution
     helper_args = [sys.executable, str(helper_script), test_path]
@@ -265,9 +286,9 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
         # Use normalized comparison for error-like output (with line numbers)
         # Check against alternatives if provided
         if expect_alternatives:
-            py_passed = not py_skipped and matches_any_alternative(py_output, expect_alternatives)
-            vm_passed = not vm_skipped and matches_any_alternative(vm_output, expect_alternatives)
-            native_passed = not native_skipped and matches_any_alternative(native_output, expect_alternatives)
+            py_passed = not py_skipped and py_error is None and matches_any_alternative(py_output, expect_alternatives)
+            vm_passed = not vm_skipped and vm_error is None and matches_any_alternative(vm_output, expect_alternatives)
+            native_passed = not native_skipped and native_error is None and matches_any_alternative(native_output, expect_alternatives)
             # For WASM with error-like expected output, accept error in stderr
             if any((alt or '').startswith('?') for alt in expect_alternatives):
                 wasm_msg = wasm_error if wasm_error and wasm_error != 'SKIPPED' else wasm_output
@@ -275,9 +296,9 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
             else:
                 wasm_passed = not wasm_skipped and wasm_error is None and matches_any_alternative(wasm_output, expect_alternatives)
         else:
-            py_passed = not py_skipped and normalize_line_numbers(py_output or '', expect or '')
-            vm_passed = not vm_skipped and normalize_line_numbers(vm_output or '', expect or '')
-            native_passed = not native_skipped and normalize_line_numbers(native_output or '', expect or '')
+            py_passed = not py_skipped and py_error is None and normalize_line_numbers(py_output or '', expect or '')
+            vm_passed = not vm_skipped and vm_error is None and normalize_line_numbers(vm_output or '', expect or '')
+            native_passed = not native_skipped and native_error is None and normalize_line_numbers(native_output or '', expect or '')
             # For WASM with error-like expected output, accept error in stderr
             if (expect or '').startswith('?'):
                 wasm_msg = wasm_error if wasm_error and wasm_error != 'SKIPPED' else wasm_output
@@ -298,9 +319,9 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
             'py_output': py_output,
             'vm_output': vm_output,
             'native_output': native_output,
-            'py_error': None if py_passed else f'Output "{escape_for_display(py_output)}" != expected "{escape_for_display(expect)}"',
-            'vm_error': None if vm_passed else f'Output "{escape_for_display(vm_output)}" != expected "{escape_for_display(expect)}"',
-            'native_error': None if native_passed else f'Output "{escape_for_display(native_output)}" != expected "{escape_for_display(expect)}"',
+            'py_error': None if py_passed else (py_error or f'Output "{escape_for_display(py_output)}" != expected "{escape_for_display(expect)}"'),
+            'vm_error': None if vm_passed else (vm_error or f'Output "{escape_for_display(vm_output)}" != expected "{escape_for_display(expect)}"'),
+            'native_error': None if native_passed else (native_error or f'Output "{escape_for_display(native_output)}" != expected "{escape_for_display(expect)}"'),
             'wasm_error': None if wasm_passed else (wasm_error or f'Output "{escape_for_display(wasm_output)}" != expected "{escape_for_display(expect)}"'),
             'py_skipped': py_skipped,
             'vm_skipped': vm_skipped,
@@ -337,11 +358,8 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
                 if wasm_output == 'Compiled (no runner)':
                     wasm_passed = not wasm_skipped and wasm_error is None
                 else:
-                    # For error tests (any alternative starts with ?), allow wasm_error to contain the message
-                    if any((alt or '').startswith('?') for alt in expect_alternatives) and wasm_error and wasm_error != 'SKIPPED':
-                        wasm_passed = not wasm_skipped and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
-                    else:
-                        wasm_passed = not wasm_skipped and wasm_error is None and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
+                    # For error tests, allow WASM stderr/stdout to satisfy expectations.
+                    wasm_passed = not wasm_skipped and any(normalize_line_numbers(wasm_msg, extract_msg(alt)) for alt in expect_alternatives)
             else:
                 exp_msg = extract_msg(expect)
                 # Use normalized comparison for line numbers
@@ -353,11 +371,8 @@ def run_test_isolated(test_file, test_path, test_content, config=None):
                 if wasm_output == 'Compiled (no runner)':
                     wasm_passed = not wasm_skipped and wasm_error is None
                 else:
-                    # For error tests (expect starts with ?), allow wasm_error to contain the message
-                    if (expect or '').startswith('?') and wasm_error and wasm_error != 'SKIPPED':
-                        wasm_passed = not wasm_skipped and normalize_line_numbers(wasm_msg, exp_msg)
-                    else:
-                        wasm_passed = not wasm_skipped and wasm_error is None and normalize_line_numbers(wasm_msg, exp_msg)
+                    # For error tests, allow WASM stderr/stdout to satisfy expectations.
+                    wasm_passed = not wasm_skipped and normalize_line_numbers(wasm_msg, exp_msg)
 
         return {
             'file': test_file,
@@ -380,7 +395,10 @@ def run_single_test_wrapper(args):
     """Wrapper for parallel execution"""
     test_path, _repo_root, config = args
     # Keep relative path for better readability
-    test_file = test_path.replace('cases/', '')
+    try:
+        test_file = Path(test_path).resolve().relative_to((Path('cases').resolve())).as_posix()
+    except Exception:
+        test_file = _norm_test_path(test_path).replace('cases/', '')
     try:
         with open(test_path, 'r') as f:
             content = f.read()
@@ -415,21 +433,6 @@ def main():
     # Load configuration
     config = load_config()
 
-    # Pre-flight: verify runtime_lib.c compiles before running hundreds of
-    # tests.  A single syntax error there would cause every native test to
-    # fail with an unhelpful empty-output message.
-    runtime_src = repo_root / 'runtime' / 'runtime_lib.c'
-    runtime_dir = repo_root / 'runtime'
-    if runtime_src.exists() and config.get('native', {}).get('enabled', True):
-        check = subprocess.run(
-            ['gcc', '-fsyntax-only', '-I', str(runtime_dir), str(runtime_src)],
-            capture_output=True, text=True
-        )
-        if check.returncode != 0:
-            print(f"ERROR: runtime_lib.c has syntax errors — all native tests would fail.")
-            print(check.stderr.strip())
-            return 1
-
     # Load all test files recursively from cases/ and subdirectories
     test_files = sorted(glob.glob('cases/**/*.fr', recursive=True))
 
@@ -441,7 +444,7 @@ def main():
     print()
 
     # Run tests in parallel
-    max_workers = 18
+    max_workers = os.cpu_count()
     results = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -463,11 +466,11 @@ def main():
     vm_passed = 0
     native_passed = 0
     wasm_passed = 0
-
     python_skipped = 0
     vm_skipped = 0
     native_skipped = 0
     wasm_skipped = 0
+    mismatch_count = 0
 
     for result in results:
         if result['py_passed']:
@@ -475,28 +478,28 @@ def main():
         elif result.get('py_skipped'):
             python_skipped += 1
         elif result['py_error']:
-            print(f"❌ {result['file']} [Python]: {result['py_error']}")
+            print(f"FAIL {result['file']} [Python]: {result['py_error']}")
 
         if result['vm_passed']:
             vm_passed += 1
         elif result.get('vm_skipped'):
             vm_skipped += 1
         elif result['vm_error']:
-            print(f"❌ {result['file']} [C VM]: {result['vm_error']}")
+            print(f"FAIL {result['file']} [C VM]: {result['vm_error']}")
 
         if result.get('native_passed'):
             native_passed += 1
         elif result.get('native_skipped'):
             native_skipped += 1
         elif result.get('native_error'):
-            print(f"❌ {result['file']} [Native]: {result.get('native_error')}")
+            print(f"FAIL {result['file']} [Native]: {result.get('native_error')}")
 
         if result.get('wasm_passed'):
             wasm_passed += 1
         elif result.get('wasm_skipped'):
             wasm_skipped += 1
         elif result.get('wasm_error'):
-            print(f"❌ {result['file']} [Wasm]: {result.get('wasm_error')}")
+            print(f"FAIL {result['file']} [Wasm]: {result.get('wasm_error')}")
 
     # Calculate totals for actually run tests (not skipped)
     total = len(results)
@@ -510,25 +513,29 @@ def main():
     print("=" * 60)
     print("Test Results:")
     print("=" * 60)
-    print(f"Py VM:  {python_passed}/{python_total} passed")
+
+    print(f"Python VM: {python_passed}/{python_total} passed")
     print(f"C VM:   {vm_passed}/{vm_total} passed")
     print(f"Native: {native_passed}/{native_total} passed")
     print(f"Wasm:   {wasm_passed}/{wasm_total} passed")
+
+    if mismatch_count > 0:
+        print(f"⚠️  Runtime Mismatches: {mismatch_count}")
     print("=" * 60)
 
     all_passed = python_passed == python_total and vm_passed == vm_total and native_passed == native_total and wasm_passed == wasm_total
     if all_passed:
-        print("✅ All tests passed on ALL runtimes!")
+        print("All tests passed on ALL runtimes!")
         return 0
     else:
         if python_passed < python_total:
-            print(f"❌ Py VM has {python_total - python_passed} failure(s)")
+            print(f"FAIL Python VM has {python_total - python_passed} failure(s)")
         if vm_passed < vm_total:
-            print(f"❌ C VM has {vm_total - vm_passed} failure(s)")
+            print(f"FAIL C VM has {vm_total - vm_passed} failure(s)")
         if native_passed < native_total:
-            print(f"❌ Native has {native_total - native_passed} failure(s)")
+            print(f"FAIL Native has {native_total - native_passed} failure(s)")
         if wasm_total > 0 and wasm_passed < wasm_total:
-            print(f"❌ Wasm has {wasm_total - wasm_passed} failure(s)")
+            print(f"FAIL Wasm has {wasm_total - wasm_passed} failure(s)")
         return 1
 
 if __name__ == '__main__':

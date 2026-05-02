@@ -28,7 +28,6 @@
         "enabled": true,
         "timeout": 2,
         "ignore": [
-            "runtime",
             "imports/c_import.fr",
             "misc/goto_with_return.fr"
         ],
@@ -40,7 +39,6 @@
         "timeout": 2,
         "ignore": [
             "syntax_errors",
-            "runtime",
             "python_interop",
             "io/file*",
             "io/socket*",

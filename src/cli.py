@@ -19,31 +19,49 @@ from debug_runtime import run_with_debug, init_debug_runtime
 
 def get_vm_path():
     """Get path to the C VM executable"""
+    is_windows = os.name == 'nt'
+
     # Try package installation location (installed via pip)
     try:
         import importlib.util
         spec = importlib.util.find_spec('runtime')
         if spec and spec.origin:
             runtime_pkg_path = Path(spec.origin).parent
-            vm_path = runtime_pkg_path / 'vm'
-            if vm_path.exists() and vm_path.is_file():
-                return str(vm_path)
+            vm_candidates = [runtime_pkg_path / 'vm']
+            if is_windows:
+                vm_candidates.insert(0, runtime_pkg_path / 'vm.exe')
+            for vm_path in vm_candidates:
+                if vm_path.exists() and vm_path.is_file():
+                    return str(vm_path)
     except (ImportError, AttributeError):
         pass
 
     # Try relative to src (development location - sibling to src)
-    vm_path = Path(__file__).parent.parent / 'runtime' / 'vm'
-    if vm_path.exists():
-        return str(vm_path)
+    runtime_dir = Path(__file__).parent.parent / 'runtime'
+    vm_candidates = [runtime_dir / 'vm']
+    if is_windows:
+        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+    for vm_path in vm_candidates:
+        if vm_path.exists():
+            return str(vm_path)
 
     # Try legacy runtime directory name (backward compatibility)
-    vm_path = Path(__file__).parent.parent / 'runtime' / 'vm'
-    if vm_path.exists():
-        return str(vm_path)
+    vm_candidates = [runtime_dir / 'vm']
+    if is_windows:
+        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+    for vm_path in vm_candidates:
+        if vm_path.exists():
+            return str(vm_path)
 
     # Try one level up (alternate development structure)
-    vm_path = Path(__file__).parent.parent.parent / 'runtime' / 'vm'
-    return str(vm_path) if vm_path.exists() else None
+    runtime_dir = Path(__file__).parent.parent.parent / 'runtime'
+    vm_candidates = [runtime_dir / 'vm']
+    if is_windows:
+        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+    for vm_path in vm_candidates:
+        if vm_path.exists():
+            return str(vm_path)
+    return None
 
 def has_untyped_functions(ast):
     """Check if AST contains functions with untyped parameters"""
@@ -615,7 +633,7 @@ def wasm_cmd(args):
     # Compile bytecode to WebAssembly
     try:
         from wasm_compiler import compile_to_wasm
-        wat_code, metadata = compile_to_wasm(bytecode)
+        wat_code, metadata = compile_to_wasm(bytecode, source_file=input_file)
     except Exception as e:
         print(f"WebAssembly compilation error: {e}", file=sys.stderr)
         import traceback
@@ -640,10 +658,36 @@ def wasm_cmd(args):
         json.dump(metadata, f, indent=2)
     print(f"Generated metadata: {metadata_path}")
 
-    # Try to compile WAT to WASM using wat2wasm if available
+    # Try to compile WAT to WASM using wat2wasm
+    def _find_wat2wasm() -> str | None:
+        import shutil
+        exe = shutil.which('wat2wasm')
+        if exe:
+            return exe
+
+        # Fallback: repo-local tool under .tools/**/wat2wasm(.exe)
+        try:
+            repo_root = Path(__file__).resolve().parents[1]
+            tools_dir = repo_root / '.tools'
+            if tools_dir.exists():
+                candidates = list(tools_dir.glob('**/wat2wasm.exe')) + list(tools_dir.glob('**/wat2wasm'))
+                if candidates:
+                    # Prefer shortest path (usually the bin/ one)
+                    candidates.sort(key=lambda p: len(str(p)))
+                    return str(candidates[0])
+        except Exception:
+            pass
+        return None
+
+    wat2wasm_exe = _find_wat2wasm()
+    if wat2wasm_exe is None:
+        print("Error: wat2wasm not found. Install WABT (wat2wasm) to generate .wasm binaries.", file=sys.stderr)
+        print(f"Looked for wat2wasm on PATH and under {Path(__file__).resolve().parents[1] / '.tools'}", file=sys.stderr)
+        sys.exit(1)
+
     try:
         result = subprocess.run(
-            ['wat2wasm', str(wat_path), '-o', str(output_path)],
+            [wat2wasm_exe, str(wat_path), '-o', str(output_path)],
             capture_output=True,
             text=True
         )
@@ -678,12 +722,8 @@ def wasm_cmd(args):
             metadata['wasm_binary'] = False
 
     except FileNotFoundError:
-        print("Note: wat2wasm not found. Install WABT to generate .wasm binary.")
-        print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
-        metadata['wasm_binary'] = False
-        # Update metadata
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+        print(f"Error: wat2wasm executable not found: {wat2wasm_exe}", file=sys.stderr)
+        sys.exit(1)
 
     # Clean up intermediate files if -d not specified
     if '-d' not in args:

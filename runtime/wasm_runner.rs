@@ -4,6 +4,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use std::io::{Read, Write};
+use std::process::{Command, Stdio, Child};
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -13,6 +14,7 @@ fn main() -> Result<()> {
     }
 
     let wasm_path = &args[1];
+    let wasm_path_str = wasm_path.to_string();
     let wasm_bytes = fs::read(wasm_path)?;
 
     let engine = Engine::default();
@@ -44,11 +46,11 @@ fn main() -> Result<()> {
     });
 
     // Runtime error function - prints error to stderr and exits
-    // Takes: error_type_ptr, error_type_len, message_ptr, message_len, line_num
+    // Takes: error_type_ptr, error_type_len, message_ptr, message_len, line_num, col_num
     let runtime_error = Func::wrap::<_, _, ()>(&mut store, |mut caller: Caller<'_, ()>, 
         error_type_ptr: i32, error_type_len: i32,
         message_ptr: i32, message_len: i32,
-        line_num: i32| {
+        line_num: i32, col_num: i32| {
         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
         let data = mem.data(&caller);
         
@@ -64,9 +66,17 @@ fn main() -> Result<()> {
             "".to_string()
         };
         
-        // If error_type is provided, format as "[ErrorType] message"
-        // Otherwise just print the message
-        if !error_type.is_empty() {
+        // Match fr test formats:
+        // - ?line,col:message (no type)
+        // - ?line:[Type] message (col==0)
+        // - ?line,col:[Type] message (if both are present)
+        if col_num > 0 {
+            if !error_type.is_empty() {
+                eprintln!("?{},{}:[{}] {}", line_num, col_num, error_type, message);
+            } else {
+                eprintln!("?{},{}:{}", line_num, col_num, message);
+            }
+        } else if !error_type.is_empty() {
             eprintln!("?{}:[{}] {}", line_num, error_type, message);
         } else {
             eprintln!("?{}:{}", line_num, message);
@@ -443,32 +453,6 @@ fn main() -> Result<()> {
         lists_lock.push(Vec::new());
         (lists_lock.len() - 1) as i32
     });
-
-    let lists_clone = lists.clone();
-    let list_from_array = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, ptr: i32, count: i64| -> i32 {
-        let mut lists_lock = lists_clone.lock().unwrap();
-        lists_lock.push(Vec::new());
-        let list_id = (lists_lock.len() - 1) as i32;
-        
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-        let data = mem.data(&caller);
-        
-        let start = ptr as usize;
-        let cnt = count as usize;
-        
-        if let Some(list_vec) = lists_lock.get_mut(list_id as usize) {
-            for i in 0..cnt {
-                let offset = start + i * 8;
-                if offset + 8 <= data.len() {
-                    let bytes = &data[offset..offset+8];
-                    let val = i64::from_le_bytes(bytes.try_into().unwrap());
-                    list_vec.push(val);
-                }
-            }
-        }
-        
-        list_id
-    });
     
     let lists_clone = lists.clone();
     let list_append = Func::wrap(&mut store, move |_: Caller<'_, ()>, list: i32, value: i64| -> i32 {
@@ -533,7 +517,7 @@ fn main() -> Result<()> {
     let list_contains = Func::wrap(&mut store, move |_: Caller<'_, ()>, list: i32, value: i64| -> i32 {
         let lists_lock = lists_clone.lock().unwrap();
         if let Some(list_vec) = lists_lock.get(list as usize) {
-            if list_vec.contains(&value) { 1 } else { 0 }
+            if list_vec.iter().any(|&v| v == value) { 1 } else { 0 }
         } else {
             0
         }
@@ -731,6 +715,69 @@ fn main() -> Result<()> {
         std::thread::sleep(duration);
     });
 
+    // fork()/wait() emulation: spawn a new fr-wasm process and coordinate via PID->Child table.
+    // This mirrors the Windows fork emulation used by the other runtimes: both parent and child
+    // re-run from the start and diverge at the first fork() call.
+    let fork_child_pending = Arc::new(Mutex::new(env::var("FR_FORK_CHILD").ok().as_deref() == Some("1")));
+    let fork_children: Arc<Mutex<Vec<Option<Child>>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let fork_fn = {
+        let fork_child_pending = fork_child_pending.clone();
+        let fork_children = fork_children.clone();
+        let wasm_path_str = wasm_path_str.clone();
+        Func::wrap(&mut store, move |_: Caller<'_, ()>| -> i64 {
+            let mut pending = fork_child_pending.lock().unwrap();
+            if *pending {
+                *pending = false;
+                return 0;
+            }
+
+            let exe = match env::current_exe() {
+                Ok(p) => p,
+                Err(_) => return -1,
+            };
+
+            let mut cmd = Command::new(exe);
+            cmd.arg(&wasm_path_str);
+            cmd.env("FR_FORK_CHILD", "1");
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+
+            let child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(_) => return -1,
+            };
+
+            let mut children = fork_children.lock().unwrap();
+            children.push(Some(child));
+            children.len() as i64
+        })
+    };
+
+    let wait_fn = {
+        let fork_children = fork_children.clone();
+        Func::wrap(&mut store, move |_: Caller<'_, ()>, pid: i64| -> i64 {
+            if pid <= 0 {
+                return -1;
+            }
+            let idx = (pid - 1) as usize;
+            let mut children = fork_children.lock().unwrap();
+            if idx >= children.len() {
+                return -1;
+            }
+            let child_opt = children.get_mut(idx).and_then(|slot| slot.take());
+            let mut child = match child_opt {
+                Some(c) => c,
+                None => return -1,
+            };
+            match child.wait() {
+                Ok(status) => status.code().unwrap_or(0) as i64,
+                Err(_) => -1,
+            }
+        })
+    };
+
     let mut linker = Linker::new(&engine);
     linker.define(&store, "env", "print", print)?;
     linker.define(&store, "env", "println", println)?;
@@ -754,7 +801,6 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "str_join", str_join)?;
     linker.define(&store, "env", "str_split", str_split)?;
     linker.define(&store, "env", "list_new", list_new)?;
-    linker.define(&store, "env", "list_from_array", list_from_array)?;
     linker.define(&store, "env", "list_append", list_append)?;
     linker.define(&store, "env", "list_get", list_get)?;
     linker.define(&store, "env", "list_set", list_set)?;
@@ -775,14 +821,27 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "file_close", file_close)?;
     linker.define(&store, "env", "exit_process", exit_process)?;
     linker.define(&store, "env", "sleep", sleep_fn)?;
+    linker.define(&store, "env", "fork", fork_fn)?;
+    linker.define(&store, "env", "wait", wait_fn)?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     
-    // Try to get main with different signatures (void return or i64 return)
+    // Try to get main with different signatures.
+    // Some programs declare `int main(str *args)` which currently compiles to `(param i32) (result i64)`.
     if let Ok(main) = instance.get_typed_func::<(), ()>(&mut store, "main") {
         main.call(&mut store, ())?;
     } else if let Ok(main) = instance.get_typed_func::<(), i64>(&mut store, "main") {
-        let _ = main.call(&mut store, ())?;
+        let code = main.call(&mut store, ())?;
+        if env::var("FR_FORK_CHILD").ok().as_deref() == Some("1") {
+            std::process::exit(code as i32);
+        }
+    } else if let Ok(main) = instance.get_typed_func::<i32, ()>(&mut store, "main") {
+        main.call(&mut store, 0)?;
+    } else if let Ok(main) = instance.get_typed_func::<i32, i64>(&mut store, "main") {
+        let code = main.call(&mut store, 0)?;
+        if env::var("FR_FORK_CHILD").ok().as_deref() == Some("1") {
+            std::process::exit(code as i32);
+        }
     } else {
         eprintln!("Error: main function not found with expected signature");
         std::process::exit(1);

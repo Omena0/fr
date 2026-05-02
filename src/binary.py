@@ -1,6 +1,11 @@
 from typing import Any
 import struct
-import zstd
+import zlib
+
+try:
+    import zstd  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    zstd = None
 
 AstType = list[dict[str, Any]]
 
@@ -123,8 +128,11 @@ def encode_binary(ast: AstType) -> bytes:
     """Encode AST to compressed binary format with header"""
     # Encode the top-level list
     raw_data = _encode_value(ast)
-    # Compress with zstd
-    compressed = zstd.compress(raw_data, 22)  # Level 22 for maximum compression
+    # Compress (prefer zstd if available, otherwise fallback to zlib)
+    if zstd is not None:
+        compressed = zstd.compress(raw_data, 22)  # Level 22 for maximum compression
+    else:
+        compressed = zlib.compress(raw_data, 9)
     
     # Compute checksum of compressed data
     checksum = _compute_checksum(compressed)
@@ -161,8 +169,22 @@ def decode_binary(data: bytes) -> AstType:
     if stored_checksum != computed_checksum:
         raise ValueError(f"Checksum mismatch: file may be corrupted (expected {stored_checksum:08x}, got {computed_checksum:08x})")
     
-    # Decompress
-    raw_data = zstd.decompress(compressed)
+    # Decompress (try zstd first for backward compatibility, then zlib)
+    raw_data = None
+    if zstd is not None:
+        try:
+            raw_data = zstd.decompress(compressed)
+        except Exception:
+            raw_data = None
+    if raw_data is None:
+        try:
+            raw_data = zlib.decompress(compressed)
+        except Exception as exc:
+            if zstd is None:
+                raise ModuleNotFoundError(
+                    "Missing optional dependency 'zstd'. Install dependencies from requirements.txt to read zstd-compressed .bin files."
+                ) from exc
+            raise
     # Decode the top-level list
     result, _ = _decode_value(raw_data, 0)
     return result
