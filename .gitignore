@@ -8,6 +8,7 @@ extension
 plan.md
 src/_version.py
 .tools
+.trunk
 
 # Build artifacts
 build/

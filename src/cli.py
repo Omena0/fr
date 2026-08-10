@@ -1,6 +1,7 @@
 """
 Command-line interface for Fr script
 """
+
 import sys
 import os
 import subprocess
@@ -14,22 +15,24 @@ sys.path.insert(0, str(src_dir))
 from binary import encode_binary, decode_binary
 from compiler import compile_ast_to_bytecode
 from parser import parse
-from runtime import run, format_runtime_exception # type: ignore
+from runtime import run, format_runtime_exception  # type: ignore
 from debug_runtime import run_with_debug, init_debug_runtime
+
 
 def get_vm_path():
     """Get path to the C VM executable"""
-    is_windows = os.name == 'nt'
+    is_windows = os.name == "nt"
 
     # Try package installation location (installed via pip)
     try:
         import importlib.util
-        spec = importlib.util.find_spec('runtime')
+
+        spec = importlib.util.find_spec("runtime")
         if spec and spec.origin:
             runtime_pkg_path = Path(spec.origin).parent
-            vm_candidates = [runtime_pkg_path / 'vm']
+            vm_candidates = [runtime_pkg_path / "vm"]
             if is_windows:
-                vm_candidates.insert(0, runtime_pkg_path / 'vm.exe')
+                vm_candidates.insert(0, runtime_pkg_path / "vm.exe")
             for vm_path in vm_candidates:
                 if vm_path.exists() and vm_path.is_file():
                     return str(vm_path)
@@ -37,37 +40,38 @@ def get_vm_path():
         pass
 
     # Try relative to src (development location - sibling to src)
-    runtime_dir = Path(__file__).parent.parent / 'runtime'
-    vm_candidates = [runtime_dir / 'vm']
+    runtime_dir = Path(__file__).parent.parent / "runtime"
+    vm_candidates = [runtime_dir / "vm"]
     if is_windows:
-        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+        vm_candidates.insert(0, runtime_dir / "vm.exe")
     for vm_path in vm_candidates:
         if vm_path.exists():
             return str(vm_path)
 
     # Try legacy runtime directory name (backward compatibility)
-    vm_candidates = [runtime_dir / 'vm']
+    vm_candidates = [runtime_dir / "vm"]
     if is_windows:
-        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+        vm_candidates.insert(0, runtime_dir / "vm.exe")
     for vm_path in vm_candidates:
         if vm_path.exists():
             return str(vm_path)
 
     # Try one level up (alternate development structure)
-    runtime_dir = Path(__file__).parent.parent.parent / 'runtime'
-    vm_candidates = [runtime_dir / 'vm']
+    runtime_dir = Path(__file__).parent.parent.parent / "runtime"
+    vm_candidates = [runtime_dir / "vm"]
     if is_windows:
-        vm_candidates.insert(0, runtime_dir / 'vm.exe')
+        vm_candidates.insert(0, runtime_dir / "vm.exe")
     for vm_path in vm_candidates:
         if vm_path.exists():
             return str(vm_path)
     return None
 
+
 def has_untyped_functions(ast):
     """Check if AST contains functions with untyped parameters"""
     for node in ast:
-        if isinstance(node, dict) and node.get('type') == 'function':
-            args = node.get('args', [])
+        if isinstance(node, dict) and node.get("type") == "function":
+            args = node.get("args", [])
             for arg in args:
                 if isinstance(arg, (tuple, list)) and len(arg) == 2:
                     if arg[1] is None:
@@ -78,58 +82,68 @@ def has_untyped_functions(ast):
 
 
 def has_c_imports(ast):
-    return any(isinstance(node, dict) and node.get('type') == 'c_import' for node in ast)
+    return any(
+        isinstance(node, dict) and node.get("type") == "c_import" for node in ast
+    )
 
 
 def load_ast_from_file(filepath):
     file_type = detect_file_type(filepath)
-    if file_type == 'source':
+    if file_type == "source":
         with open(filepath) as f:
             source = f.read()
         return parse(source, file=filepath)
-    if file_type == 'json':
+    if file_type == "json":
         with open(filepath) as f:
             return json.load(f)
-    if file_type == 'binary_ast':
-        with open(filepath, 'rb') as f:
+    if file_type == "binary_ast":
+        with open(filepath, "rb") as f:
             return decode_binary(f.read())
-    raise ValueError('Input must be source (.fr), JSON AST, or binary AST file for wasm compilation')
+    raise ValueError(
+        "Input must be source (.fr), JSON AST, or binary AST file for wasm compilation"
+    )
+
 
 def detect_file_type(filepath):
     """Detect if file is binary AST, bytecode, WASM, or JSON"""
-    with open(filepath, 'rb') as f:
+    with open(filepath, "rb") as f:
         header = f.read(8)
 
-    if header[:4] == b'L2AS':
-        return 'binary_ast'
+    if header[:4] == b"L2AS":
+        return "binary_ast"
 
     # Check for WASM magic number (0x00 0x61 0x73 0x6d)
-    if header[:4] == b'\x00asm':
-        return 'wasm'
+    if header[:4] == b"\x00asm":
+        return "wasm"
 
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, "r") as f:
             first_line = f.readline().strip()
-            if first_line.startswith('.version') or first_line.startswith('FUNCTION') or first_line.startswith('CONST_'):
-                return 'bytecode'
+            if (
+                first_line.startswith(".version")
+                or first_line.startswith("FUNCTION")
+                or first_line.startswith("CONST_")
+            ):
+                return "bytecode"
     except:
         pass
 
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, "r") as f:
             json.load(f)
-        return 'json'
+        return "json"
     except:
         pass
 
-    return 'source'
+    return "source"
+
 
 def run_cmd(cmd, args):
     """Run a file using appropriate runtime based on file type and flags"""
     # Check for backend flags
-    force_c_backend = '-c' in args or '--compile' in args
-    force_py_backend = '-py' in args or '--python' in args
-    debug_mode = '--debug' in args
+    force_c_backend = "-c" in args or "--compile" in args
+    force_py_backend = "-py" in args or "--python" in args
+    debug_mode = "--debug" in args
 
     # Validate flags
     if force_c_backend and force_py_backend:
@@ -138,11 +152,23 @@ def run_cmd(cmd, args):
 
     # Debug mode requires Python backend
     if debug_mode and force_c_backend:
-        print("Error: Debug mode requires Python backend, cannot use -c flag", file=sys.stderr)
+        print(
+            "Error: Debug mode requires Python backend, cannot use -c flag",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Filter out flags to get program arguments
-    excluded_flags = {'-c', '--compile', '-py', '--python', '-O', '-O0', '--optimize', '--debug'}
+    excluded_flags = {
+        "-c",
+        "--compile",
+        "-py",
+        "--python",
+        "-O",
+        "-O0",
+        "--optimize",
+        "--debug",
+    }
     program_args = [arg for arg in args if arg not in excluded_flags]
 
     import tempfile
@@ -152,8 +178,10 @@ def run_cmd(cmd, args):
     file_type = detect_file_type(cmd)
 
     # Handle WASM files specially - run with Rust runtime
-    if file_type == 'wasm':
-        runner_path = Path(__file__).parent.parent / 'runtime' / 'target' / 'release' / 'fr-wasm'
+    if file_type == "wasm":
+        runner_path = (
+            Path(__file__).parent.parent / "runtime" / "target" / "release" / "fr-wasm"
+        )
         if not runner_path.exists():
             print("Error: WASM runner not found. Build it with:", file=sys.stderr)
             print("  cd runtime && cargo build --release", file=sys.stderr)
@@ -173,7 +201,7 @@ def run_cmd(cmd, args):
 
     try:
         # ===== PHASE 1: Load/Parse input file =====
-        if file_type == 'source':
+        if file_type == "source":
             # Parse .fr source file
             with open(cmd) as f:
                 source = f.read()
@@ -181,24 +209,24 @@ def run_cmd(cmd, args):
             try:
                 ast = parse(source, file=cmd)
             except SyntaxError as e:
-                print(f'Exception: {e}')
+                print(f"Exception: {e}")
                 sys.exit(1)
 
-        elif file_type == 'json':
+        elif file_type == "json":
             # Load JSON AST file
             with open(cmd) as f:
                 ast = json.load(f)
             source = None
             line_map = None
 
-        elif file_type == 'binary_ast':
+        elif file_type == "binary_ast":
             # Load binary AST file
-            with open(cmd, 'rb') as f:
+            with open(cmd, "rb") as f:
                 ast = decode_binary(f.read())
             source = None
             line_map = None
 
-        elif file_type == 'bytecode':
+        elif file_type == "bytecode":
             # Load bytecode file directly
             with open(cmd) as f:
                 bytecode = f.read()
@@ -217,14 +245,23 @@ def run_cmd(cmd, args):
 
             if force_py_backend or debug_mode:
                 # User forced Python backend
-                has_c_imports = any(node.get('type') == 'c_import' for node in ast) if isinstance(ast, list) else False
+                has_c_imports = (
+                    any(node.get("type") == "c_import" for node in ast)
+                    if isinstance(ast, list)
+                    else False
+                )
                 if has_c_imports:
-                    print("Error: C imports require compilation, cannot use Python backend", file=sys.stderr)
+                    print(
+                        "Error: C imports require compilation, cannot use Python backend",
+                        file=sys.stderr,
+                    )
                     sys.exit(1)
                 use_c_backend = False
             else:
                 # Auto-detect or use forced C backend
-                use_c_backend = True if force_c_backend else not has_untyped_functions(ast)
+                use_c_backend = (
+                    True if force_c_backend else not has_untyped_functions(ast)
+                )
         elif not force_py_backend and not debug_mode:
             use_c_backend = True
 
@@ -241,17 +278,19 @@ def run_cmd(cmd, args):
             # ===== PHASE 4: Prepare bytecode file =====
             c_link_flags = []
 
-            for line in bytecode.split('\n'):
-                if line.startswith('# c_link:'):
+            for line in bytecode.split("\n"):
+                if line.startswith("# c_link:"):
                     # Extract flag after "# c_link: "
-                    flag = line[len('# c_link:'):].strip()
+                    flag = line[len("# c_link:") :].strip()
                     if flag and flag not in c_link_flags:
                         c_link_flags.append(flag)
 
         if use_c_backend:
             # Need to write bytecode to file for C VM
             if temp_bc is None:
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".bc", delete=False
+                ) as f:
                     f.write(bytecode)
                     temp_bc = f.name
                     should_cleanup_temp = True
@@ -259,22 +298,24 @@ def run_cmd(cmd, args):
             if vm_path := get_vm_path():
                 try:
                     # Prepare debug info for stdin
-                    debug_info = json.dumps({
-                        'file': cmd,
-                        'source': source or '',
-                        'line_map': line_map or []
-                    })
+                    debug_info = json.dumps(
+                        {
+                            "file": cmd,
+                            "source": source or "",
+                            "line_map": line_map or [],
+                        }
+                    )
 
                     # Pass program arguments to the VM with --debug-info flag
                     result = subprocess.run(
-                        [vm_path, '--debug-info', temp_bc] + program_args,
+                        [vm_path, "--debug-info", temp_bc] + program_args,
                         input=debug_info,
-                        text=True
+                        text=True,
                     )
                     sys.exit(result.returncode)
 
                 except KeyboardInterrupt:
-                    print(end='\r')
+                    print(end="\r")
                     sys.exit(1)
                 finally:
                     if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
@@ -291,7 +332,10 @@ def run_cmd(cmd, args):
             # Run with Python runtime
             if ast is None:
                 # We must have bytecode if ast is None - cannot run bytecode with Python
-                print("Error: Cannot run compiled bytecode with Python runtime, use C VM instead", file=sys.stderr)
+                print(
+                    "Error: Cannot run compiled bytecode with Python runtime, use C VM instead",
+                    file=sys.stderr,
+                )
                 if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
                     os.unlink(temp_bc)
                 sys.exit(1)
@@ -302,9 +346,9 @@ def run_cmd(cmd, args):
                     init_debug_runtime()
                     run_with_debug(ast, cmd)
                 else:
-                    run(ast, file=cmd, source=source or '')
+                    run(ast, file=cmd, source=source or "")
             except RuntimeError as e:
-                print(f'Exception: {format_runtime_exception(e)}')
+                print(f"Exception: {format_runtime_exception(e)}")
                 sys.exit(1)
             finally:
                 if should_cleanup_temp and temp_bc and os.path.exists(temp_bc):
@@ -322,6 +366,7 @@ def run_cmd(cmd, args):
             os.unlink(temp_bc)
         sys.exit(1)
 
+
 def parse_cmd(args):
     """Parse source code to AST"""
     if len(args) < 1:
@@ -329,7 +374,7 @@ def parse_cmd(args):
         sys.exit(1)
 
     source_file = args[0]
-    output_json = '--json' in args or '-j' in args
+    output_json = "--json" in args or "-j" in args
 
     with open(source_file) as f:
         source = f.read()
@@ -337,19 +382,20 @@ def parse_cmd(args):
     try:
         ast = parse(source, file=source_file)
     except SyntaxError as e:
-        print(f'Exception: {e}')
+        print(f"Exception: {e}")
         sys.exit(1)
 
     if output_json:
-        output_file = 'out.json'
-        with open(output_file, 'w') as f:
+        output_file = "out.json"
+        with open(output_file, "w") as f:
             json.dump(ast, f, indent=2)
         print(f"Parsed to JSON: {output_file}")
     else:
-        output_file = 'out.bin'
-        with open(output_file, 'wb') as f:
+        output_file = "out.bin"
+        with open(output_file, "wb") as f:
             f.write(encode_binary(ast))
         print(f"Parsed to binary AST: {output_file}")
+
 
 def compile_cmd(args=None):
     """Compile AST to bytecode"""
@@ -363,29 +409,29 @@ def compile_cmd(args=None):
     input_file = args[0]
 
     # Determine output file
-    output_file = 'out.bc'
-    if '-o' in args:
-        idx = args.index('-o')
+    output_file = "out.bc"
+    if "-o" in args:
+        idx = args.index("-o")
         if idx + 1 < len(args):
             output_file = args[idx + 1]
 
     # Load AST
     file_type = detect_file_type(input_file)
 
-    if file_type == 'json':
-        with open(input_file, 'r') as f:
+    if file_type == "json":
+        with open(input_file, "r") as f:
             ast = json.load(f)
-    elif file_type == 'binary_ast':
-        with open(input_file, 'rb') as f:
+    elif file_type == "binary_ast":
+        with open(input_file, "rb") as f:
             ast = decode_binary(f.read())
-    elif input_file.endswith('.fr'):
+    elif input_file.endswith(".fr"):
         # Parse source file to AST first
         try:
             with open(input_file) as f:
                 source = f.read()
             ast = parse(source, file=input_file)
         except SyntaxError as e:
-            print(f'Parse error: {e}')
+            print(f"Parse error: {e}")
             sys.exit(1)
         except FileNotFoundError:
             print(f"Error: File not found: {input_file}")
@@ -398,13 +444,14 @@ def compile_cmd(args=None):
     try:
         bytecode, _line_map = compile_ast_to_bytecode(ast)
 
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             f.write(bytecode)
 
         print(f"Compiled to bytecode: {output_file}")
     except Exception as e:
         print(f"Compilation error: {e}")
         sys.exit(1)
+
 
 def encode_cmd(args):
     """Encode JSON AST to binary"""
@@ -413,15 +460,16 @@ def encode_cmd(args):
         sys.exit(1)
 
     input_file = args[0]
-    output_file = args[2] if '-o' in args and len(args) > 2 else 'out.bin'
+    output_file = args[2] if "-o" in args and len(args) > 2 else "out.bin"
 
-    with open(input_file, 'r') as f:
+    with open(input_file, "r") as f:
         ast = json.load(f)
 
-    with open(output_file, 'wb') as f:
+    with open(output_file, "wb") as f:
         f.write(encode_binary(ast))
 
     print(f"Encoded to binary: {output_file}")
+
 
 def decode_cmd(args):
     """Decode binary AST to JSON"""
@@ -430,15 +478,16 @@ def decode_cmd(args):
         sys.exit(1)
 
     input_file = args[0]
-    output_file = args[2] if '-o' in args and len(args) > 2 else 'out.json'
+    output_file = args[2] if "-o" in args and len(args) > 2 else "out.json"
 
-    with open(input_file, 'rb') as f:
+    with open(input_file, "rb") as f:
         ast = decode_binary(f.read())
 
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(ast, f, indent=2)
 
     print(f"Decoded to JSON: {output_file}")
+
 
 def native_cmd(args):
     """Compile bytecode to x86_64 native binary"""
@@ -449,37 +498,37 @@ def native_cmd(args):
         sys.exit(1)
 
     input_file = args[0]
-    keep_asm = '-a' in args or '--asm' in args
+    keep_asm = "-a" in args or "--asm" in args
 
     # Determine output filename
-    if '-o' in args:
-        output_idx = args.index('-o') + 1
-        output_base = args[output_idx] if output_idx < len(args) else 'out'
+    if "-o" in args:
+        output_idx = args.index("-o") + 1
+        output_base = args[output_idx] if output_idx < len(args) else "out"
     else:
-        output_base = 'out'
+        output_base = "out"
 
-    asm_file = output_base if output_base.endswith('.asm') else f'{output_base}.asm'
-    exe_file = output_base.replace('.asm', '').replace('.s', '')
+    asm_file = output_base if output_base.endswith(".asm") else f"{output_base}.asm"
+    exe_file = output_base.replace(".asm", "").replace(".s", "")
 
     # Ensure input is bytecode
     file_type = detect_file_type(input_file)
-    if file_type != 'bytecode':
+    if file_type != "bytecode":
         print(f"Error: Input must be bytecode file (.bc), got {file_type}")
         sys.exit(1)
 
     # Read bytecode
-    with open(input_file, 'r') as f:
+    with open(input_file, "r") as f:
         bytecode = f.read()
 
     # Extract C import files and linker flags from bytecode comments
     c_import_files = []
     link_libs = []
-    for line in bytecode.split('\n'):
-        if line.startswith('# C import:'):
-            c_file = line.split('# C import:')[1].strip()
+    for line in bytecode.split("\n"):
+        if line.startswith("# C import:"):
+            c_file = line.split("# C import:")[1].strip()
             c_import_files.append(c_file)
-        elif line.startswith('# Link:'):
-            lib = line.split('# Link:')[1].strip()
+        elif line.startswith("# Link:"):
+            lib = line.split("# Link:")[1].strip()
             # Split the library flags by spaces to handle multiple flags like "-L./lib -lraylib"
             lib_flags = lib.split()
             for flag in lib_flags:
@@ -489,16 +538,17 @@ def native_cmd(args):
     # Compile to x86_64
     try:
         # Check for optimization flag, but -O0 disables it
-        optimize = '-O' in args and '-O0' not in args
+        optimize = "-O" in args and "-O0" not in args
 
         from optimizer import compile_native_ssa
-        opt_level = 3 if '-O3' in args else (2 if optimize else 1)
+
+        opt_level = 3 if "-O3" in args else (2 if optimize else 1)
         if optimize:
-            print(f'Optimizer (level {opt_level})')
+            print(f"Optimizer (level {opt_level})")
         asm = compile_native_ssa(bytecode, opt_level)
 
         # Always write assembly to temp file for building
-        with open(asm_file, 'w') as f:
+        with open(asm_file, "w") as f:
             f.write(asm)
 
         if keep_asm:
@@ -510,18 +560,33 @@ def native_cmd(args):
             c_obj_files = []
             for c_file in c_import_files:
                 # Skip header files - they're for parsing only
-                if c_file.endswith('.h'):
+                if c_file.endswith(".h"):
                     continue
 
-                c_obj = c_file.replace('.c', '.o')
+                c_obj = c_file.replace(".c", ".o")
                 print(f"Compiling C file: {c_file}")
-                result = subprocess.run([
-                    'gcc', '-c', c_file, '-o', c_obj,
-                    '-O3', '-march=native', '-mtune=native',
-                    '-finline-functions', '-funroll-loops',
-                    '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
-                    '-ffunction-sections', '-fdata-sections'
-                ], capture_output=True, text=True)
+                result = subprocess.run(
+                    [
+                        "gcc",
+                        "-c",
+                        c_file,
+                        "-o",
+                        c_obj,
+                        "-O3",
+                        "-march=native",
+                        "-mtune=native",
+                        "-finline-functions",
+                        "-funroll-loops",
+                        "-fno-strict-aliasing",
+                        "-fwrapv",
+                        "-fno-tree-pre",
+                        "-fno-ipa-cp",
+                        "-ffunction-sections",
+                        "-fdata-sections",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
 
                 if result.returncode != 0:
                     print(f"Error compiling C file {c_file}:")
@@ -534,26 +599,42 @@ def native_cmd(args):
                 c_obj_files.append(c_obj)
 
             # Assemble to object file
-            obj_file = asm_file.replace('.s', '.o').replace('.asm', '.o')
-            subprocess.run(['as', asm_file, '-o', obj_file], check=True,
-                         capture_output=True)
+            obj_file = asm_file.replace(".s", ".o").replace(".asm", ".o")
+            subprocess.run(
+                ["as", asm_file, "-o", obj_file], check=True, capture_output=True
+            )
 
-            if 'runtime' not in os.listdir():
-                runtime_dir = '/'.join(__file__.split('/')[:-2])
-                runtime_dir = os.path.join(runtime_dir, 'runtime')
+            if "runtime" not in os.listdir():
+                runtime_dir = "/".join(__file__.split("/")[:-2])
+                runtime_dir = os.path.join(runtime_dir, "runtime")
                 print(runtime_dir)
             else:
-                runtime_dir = 'runtime'
-            runtime_lib = f'{runtime_dir}/runtime_lib.c'
+                runtime_dir = "runtime"
+            runtime_lib = f"{runtime_dir}/runtime_lib.c"
 
             gcc_flags = [
-                'gcc', obj_file, *c_obj_files, str(runtime_lib), '-o', exe_file,
-                f'-I{runtime_dir}', '-O3', '-march=native', '-mtune=native',
-                '-finline-functions', '-funroll-loops',
-                '-fno-strict-aliasing', '-fwrapv', '-fno-tree-pre', '-fno-ipa-cp',
-                '-ffunction-sections', '-fdata-sections',
-                '-Wl,--gc-sections',
-                '-lm', *link_libs, '-no-pie'
+                "gcc",
+                obj_file,
+                *c_obj_files,
+                str(runtime_lib),
+                "-o",
+                exe_file,
+                f"-I{runtime_dir}",
+                "-O3",
+                "-march=native",
+                "-mtune=native",
+                "-finline-functions",
+                "-funroll-loops",
+                "-fno-strict-aliasing",
+                "-fwrapv",
+                "-fno-tree-pre",
+                "-fno-ipa-cp",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-Wl,--gc-sections",
+                "-lm",
+                *link_libs,
+                "-no-pie",
             ]
 
             # Build native binary executable
@@ -577,21 +658,25 @@ def native_cmd(args):
     except Exception as e:
         print(f"Compilation error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
+
 def wasm_cmd(args):
     if len(args) < 1:
-        print("Usage: fr wasm <file.fr|ast.json|ast.bin> [-d] [-o output.wasm] [-r|--run] [-w|--web]")
+        print(
+            "Usage: fr wasm <file.fr|ast.json|ast.bin> [-d] [-o output.wasm] [-r|--run] [-w|--web]"
+        )
         sys.exit(1)
 
     input_file = args[0]
-    output_path = Path('out.wasm')
-    run_after = '-r' in args or '--run' in args
-    web_mode = '-w' in args or '--web' in args
+    output_path = Path("out.wasm")
+    run_after = "-r" in args or "--run" in args
+    web_mode = "-w" in args or "--web" in args
 
-    if '-o' in args:
-        idx = args.index('-o')
+    if "-o" in args:
+        idx = args.index("-o")
         if idx + 1 >= len(args):
             print("Error: -o requires a path", file=sys.stderr)
             sys.exit(1)
@@ -614,57 +699,64 @@ def wasm_cmd(args):
     # Compile AST to bytecode first
     try:
         bytecode, line_map = compile_ast_to_bytecode(ast)
-        if '-d' in args:
-            with open('out.bc', 'w') as f:
+        if "-d" in args:
+            with open("out.bc", "w") as f:
                 f.write(bytecode)
 
     except Exception as e:
         print(f"Compilation error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
     # Compile bytecode to WebAssembly
     try:
         from wasm_compiler import compile_to_wasm
+
         wat_code, metadata = compile_to_wasm(bytecode, source_file=input_file)
     except Exception as e:
         print(f"WebAssembly compilation error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
     # Optimize WAT code
     from wasm_optimizer import optimize_wat
+
     wat_code = optimize_wat(wat_code)
 
     # Write WAT file
-    wat_path = output_path.with_suffix('.wat')
-    with open(wat_path, 'w') as f:
+    wat_path = output_path.with_suffix(".wat")
+    with open(wat_path, "w") as f:
         f.write(wat_code)
     print(f"Generated WAT: {wat_path}")
 
     # Write metadata file
-    metadata_path = output_path.with_suffix('.wasm.json')
-    metadata['source_file'] = input_file
-    metadata['line_map'] = line_map
-    with open(metadata_path, 'w') as f:
+    metadata_path = output_path.with_suffix(".wasm.json")
+    metadata["source_file"] = input_file
+    metadata["line_map"] = line_map
+    with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"Generated metadata: {metadata_path}")
 
     # Try to compile WAT to WASM using wat2wasm
     def _find_wat2wasm() -> str | None:
         import shutil
-        exe = shutil.which('wat2wasm')
+
+        exe = shutil.which("wat2wasm")
         if exe:
             return exe
 
         # Fallback: repo-local tool under .tools/**/wat2wasm(.exe)
         try:
             repo_root = Path(__file__).resolve().parents[1]
-            tools_dir = repo_root / '.tools'
+            tools_dir = repo_root / ".tools"
             if tools_dir.exists():
-                candidates = list(tools_dir.glob('**/wat2wasm.exe')) + list(tools_dir.glob('**/wat2wasm'))
+                candidates = list(tools_dir.glob("**/wat2wasm.exe")) + list(
+                    tools_dir.glob("**/wat2wasm")
+                )
                 if candidates:
                     # Prefer shortest path (usually the bin/ one)
                     candidates.sort(key=lambda p: len(str(p)))
@@ -675,21 +767,27 @@ def wasm_cmd(args):
 
     wat2wasm_exe = _find_wat2wasm()
     if wat2wasm_exe is None:
-        print("Error: wat2wasm not found. Install WABT (wat2wasm) to generate .wasm binaries.", file=sys.stderr)
-        print(f"Looked for wat2wasm on PATH and under {Path(__file__).resolve().parents[1] / '.tools'}", file=sys.stderr)
+        print(
+            "Error: wat2wasm not found. Install WABT (wat2wasm) to generate .wasm binaries.",
+            file=sys.stderr,
+        )
+        print(
+            f"Looked for wat2wasm on PATH and under {Path(__file__).resolve().parents[1] / '.tools'}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
         result = subprocess.run(
-            [wat2wasm_exe, str(wat_path), '-o', str(output_path)],
+            [wat2wasm_exe, str(wat_path), "-o", str(output_path)],
             capture_output=True,
-            text=True
+            text=True,
         )
         if result.returncode == 0:
             print(f"Compiled to WebAssembly: {output_path}")
-            metadata['wasm_binary'] = True
+            metadata["wasm_binary"] = True
             # Update metadata
-            with open(metadata_path, 'w') as f:
+            with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2)
         else:
             if result.stderr:
@@ -697,10 +795,11 @@ def wasm_cmd(args):
                 # Print WAT content around error line
                 try:
                     import re
-                    match = re.search(r':(\d+):(\d+):', result.stderr)
+
+                    match = re.search(r":(\d+):(\d+):", result.stderr)
                     if match:
                         line_num = int(match.group(1))
-                        with open(wat_path, 'r') as f:
+                        with open(wat_path, "r") as f:
                             lines = f.readlines()
                             start = max(0, line_num - 5)
                             end = min(len(lines), line_num + 5)
@@ -710,25 +809,27 @@ def wasm_cmd(args):
                 except Exception as e:
                     print(f"Could not print context: {e}")
             else:
-                print("Warning: wat2wasm failed. Install WABT to generate .wasm binary.")
+                print(
+                    "Warning: wat2wasm failed. Install WABT to generate .wasm binary."
+                )
                 print(f"You can manually run: wat2wasm {wat_path} -o {output_path}")
 
-            metadata['wasm_binary'] = False
+            metadata["wasm_binary"] = False
 
     except FileNotFoundError:
         print(f"Error: wat2wasm executable not found: {wat2wasm_exe}", file=sys.stderr)
         sys.exit(1)
 
     # Clean up intermediate files if -d not specified
-    if '-d' not in args:
-        print('Cleaning up intermediate files. (run with -d to keep them)')
+    if "-d" not in args:
+        print("Cleaning up intermediate files. (run with -d to keep them)")
         if wat_path.exists():
             os.remove(wat_path)
             os.remove(metadata_path)
 
     # Generate web bundle if -w/--web specified
     if web_mode:
-        if not metadata.get('wasm_binary'):
+        if not metadata.get("wasm_binary"):
             print("Error: Web mode requires a compiled WASM binary", file=sys.stderr)
             sys.exit(1)
 
@@ -738,39 +839,47 @@ def wasm_cmd(args):
             from wasm_js_glue import generate_js_glue, generate_html_template
 
             # Use imports that are actually used by the WASM binary
-            used_imports = set(metadata.get('imports', []))
+            used_imports = set(metadata.get("imports", []))
             js_glue = generate_js_glue(used_imports, for_inline=True, metadata=metadata)
 
             # Read WASM binary, compress, and encode as base64
             import gzip
-            with open(output_path, 'rb') as f:
+
+            with open(output_path, "rb") as f:
                 wasm_bytes = f.read()
 
             wasm_compressed = gzip.compress(wasm_bytes)
-            wasm_base64 = base64.b64encode(wasm_compressed).decode('ascii')
+            wasm_base64 = base64.b64encode(wasm_compressed).decode("ascii")
 
             # Determine output filenames
-            html_filename = output_path.with_suffix('.html').name
+            html_filename = output_path.with_suffix(".html").name
 
             # Write HTML file with embedded WASM
             html_path = output_path.with_name(html_filename)
-            html_content = generate_html_template(js_glue, wasm_base64, metadata=metadata)
-            with open(html_path, 'w') as f:
+            html_content = generate_html_template(
+                js_glue, wasm_base64, metadata=metadata
+            )
+            with open(html_path, "w") as f:
                 f.write(html_content)
             print(f"Generated HTML: {html_path}")
 
         except ImportError as e:
-            print(f"Error: Could not import WASM JS glue generator: {e}", file=sys.stderr)
+            print(
+                f"Error: Could not import WASM JS glue generator: {e}", file=sys.stderr
+            )
             sys.exit(1)
         except Exception as e:
             print(f"Error generating web bundle: {e}", file=sys.stderr)
             import traceback
+
             traceback.print_exc()
             sys.exit(1)
 
     # Run the WASM file if -r/--run specified
-    if run_after and metadata.get('wasm_binary'):
-        runner_path = Path(__file__).parent.parent / 'runtime' / 'target' / 'release' / 'fr-wasm'
+    if run_after and metadata.get("wasm_binary"):
+        runner_path = (
+            Path(__file__).parent.parent / "runtime" / "target" / "release" / "fr-wasm"
+        )
         if runner_path.exists():
             print(f"\nRunning {output_path}:")
             print("-" * 40)
@@ -780,6 +889,7 @@ def wasm_cmd(args):
             print("\nError: WASM runner not found. Build it with:")
             print("  cd runtime && cargo build --release")
             sys.exit(1)
+
 
 def main():
     """Main CLI entry point"""
@@ -792,24 +902,28 @@ def main():
         print("                                   -py: Force Python runtime")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file> [-o out.bc] - Compile to bytecode")
-        print("  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary")
-        print("  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] [-w|--web] - Compile typed module to Wasm")
+        print(
+            "  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary"
+        )
+        print(
+            "  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] [-w|--web] - Compile typed module to Wasm"
+        )
         sys.exit(1)
 
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
-    if cmd == 'parse':
+    if cmd == "parse":
         parse_cmd(args)
-    elif cmd == 'compile':
+    elif cmd == "compile":
         compile_cmd(args)
-    elif cmd == 'native':
+    elif cmd == "native":
         native_cmd(args)
-    elif cmd == 'wasm':
+    elif cmd == "wasm":
         wasm_cmd(args)
-    elif cmd == 'encode':
+    elif cmd == "encode":
         encode_cmd(args)
-    elif cmd == 'decode':
+    elif cmd == "decode":
         decode_cmd(args)
     elif os.path.exists(cmd):
         run_cmd(cmd, args)
@@ -819,5 +933,6 @@ def main():
         print("Run 'fr' without arguments for usage information.")
         sys.exit(1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -11,34 +11,40 @@ AstType = list[dict[str, Any]]
 # Python module cache for py_import/py_call
 _python_modules = {}
 
+
 # I/O helper functions
 def _print(text: str) -> None:
     """Print text without newline"""
     import sys as _sys
+
     _sys.stdout.write(str(text))
     _sys.stdout.flush()
 
-def _encode(text: str, encoding: str = 'utf-8') -> bytes:
+
+def _encode(text: str, encoding: str = "utf-8") -> bytes:
     """Encode a string to bytes"""
     return text.encode(encoding)
 
-def _decode(data: bytes, encoding: str = 'utf-8') -> str:
+
+def _decode(data: bytes, encoding: str = "utf-8") -> str:
     """Decode bytes to a string"""
     return data.decode(encoding)
 
+
 # File I/O helper functions
-def _file_open(path: str, mode: str = 'r'):
+def _file_open(path: str, mode: str = "r"):
     """Open a file and return file handle (as integer fd)"""
     flags = _os.O_RDONLY
-    if mode == 'w':
+    if mode == "w":
         flags = _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC
-    elif mode == 'a':
+    elif mode == "a":
         flags = _os.O_WRONLY | _os.O_CREAT | _os.O_APPEND
-    elif mode == 'r+':
+    elif mode == "r+":
         flags = _os.O_RDWR
-    elif mode == 'w+':
+    elif mode == "w+":
         flags = _os.O_RDWR | _os.O_CREAT | _os.O_TRUNC
     return _os.open(path, flags, 0o666)
+
 
 def _file_read(fd: int, size: int = -1):
     """Read from file descriptor"""
@@ -50,53 +56,64 @@ def _file_read(fd: int, size: int = -1):
                 chunks.append(chunk)
             else:
                 break
-        return b''.join(chunks).decode('utf-8', errors='replace')
-    return _os.read(fd, size).decode('utf-8', errors='replace')
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    return _os.read(fd, size).decode("utf-8", errors="replace")
+
 
 def _file_write(fd: int, data: str):
     """Write to file descriptor"""
-    return _os.write(fd, data.encode('utf-8'))
+    return _os.write(fd, data.encode("utf-8"))
+
 
 def _file_close(fd: int):
     """Close file descriptor"""
     _os.close(fd)
     return None
 
+
 def _file_exists(path: str):
     """Check if a file or directory exists"""
     return _os.path.exists(path)
+
 
 def _file_isfile(path: str):
     """Check if path is a file"""
     return _os.path.isfile(path)
 
+
 def _file_isdir(path: str):
     """Check if path is a directory"""
     return _os.path.isdir(path)
 
-def _file_listdir(path: str = '.'):
+
+def _file_listdir(path: str = "."):
     """List directory contents"""
     return _os.listdir(path)
+
 
 def _file_mkdir(path: str):
     """Create a directory"""
     _os.mkdir(path)
     return None
 
+
 def _file_makedirs(path: str):
     """Create a directory and all parent directories"""
     _os.makedirs(path, exist_ok=True)
     return None
+
 
 def _file_remove(path: str):
     """Remove a file"""
     _os.remove(path)
     return None
 
+
 def _file_rmdir(path: str):
     """Remove an empty directory"""
     _os.rmdir(path)
     return None
+
 
 def _assert(condition: bool, message: str = "Assertion failed"):
     """Assert that condition is true, otherwise print message and exit"""
@@ -105,71 +122,82 @@ def _assert(condition: bool, message: str = "Assertion failed"):
         sys.exit(1)
     return None
 
+
 def _file_rename(old_path: str, new_path: str):
     """Rename or move a file or directory"""
     _os.rename(old_path, new_path)
     return None
 
+
 def _file_getsize(path: str):
     """Get file size in bytes"""
     return _os.path.getsize(path)
 
+
 def _file_getcwd():
     """Get current working directory"""
     return _os.getcwd()
+
 
 def _file_chdir(path: str):
     """Change current working directory"""
     _os.chdir(path)
     return None
 
+
 def _file_abspath(path: str):
     """Get absolute path"""
     return _os.path.abspath(path)
+
 
 def _file_basename(path: str):
     """Get basename of path"""
     return _os.path.basename(path)
 
+
 def _file_dirname(path: str):
     """Get directory name of path"""
     return _os.path.dirname(path)
+
 
 def _file_join(*paths: str):
     """Join path components"""
     return _os.path.join(*paths)
 
+
 # Process management functions
 _fork_processes = {}  # Maps synthetic pid -> subprocess.Popen
 _next_fork_pid = 1
 
+
 def _fork() -> int:
     """Fork the current process. Returns 0 in child, child PID in parent, -1 on error."""
-    if _os.name == 'nt':
+    if _os.name == "nt":
         global _next_fork_pid
         # Child-mode marker: the child process will start from the beginning and must
         # treat the first fork() call as returning 0.
-        if _os.environ.get('FR_FORK_CHILD') == '1':
-            _os.environ.pop('FR_FORK_CHILD', None)
+        if _os.environ.get("FR_FORK_CHILD") == "1":
+            _os.environ.pop("FR_FORK_CHILD", None)
             return 0
 
         try:
             import subprocess
             import sys
+
             # Lazily import to avoid import cycles at module load time.
             import runtime as _runtime  # type: ignore
 
-            fr_file = getattr(_runtime, '_runtime_file', '')
+            fr_file = getattr(_runtime, "_runtime_file", "")
             if not fr_file:
                 return -1
 
             env = _os.environ.copy()
-            env['FR_FORK_CHILD'] = '1'
+            env["FR_FORK_CHILD"] = "1"
 
             # Re-run the same file under the Python runtime.
             # Note: This is a pragmatic Windows fallback (no OS-level fork).
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'src.cli', fr_file, '--python'],
+                [sys.executable, "-m", "src.cli", fr_file, "--python"],
                 cwd=_os.getcwd(),
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -190,7 +218,8 @@ def _fork() -> int:
             # This is Linux-specific
             try:
                 import ctypes
-                libc = ctypes.CDLL('libc.so.6')
+
+                libc = ctypes.CDLL("libc.so.6")
                 PR_SET_PDEATHSIG = 1
                 SIGTERM = 15
                 libc.prctl(PR_SET_PDEATHSIG, SIGTERM)
@@ -201,9 +230,10 @@ def _fork() -> int:
     except OSError:
         return -1
 
+
 def _wait(pid: int) -> int:
     """Wait for a child process to finish. Returns exit status."""
-    if _os.name == 'nt':
+    if _os.name == "nt":
         proc = _fork_processes.get(pid)
         if proc is None:
             return -1
@@ -219,39 +249,46 @@ def _wait(pid: int) -> int:
     except OSError:
         return -1
 
+
 def _sleep(seconds: float) -> None:
     """Sleep for specified number of seconds."""
     import time as _time
+
     _time.sleep(seconds)
+
 
 def _exit(code: int = 0) -> None:
     """Exit the program with the given exit code."""
     import sys as _sys
+
     _sys.exit(code)
+
 
 def _getpid() -> int:
     """Get the current process ID."""
     return _os.getpid()
 
+
 # Socket I/O helper functions
 _socket_map = {}  # Map integer IDs to socket objects
 _next_socket_id = 1
 
-def _socket_create(family: str = 'inet', type_: str = 'stream'):
+
+def _socket_create(family: str = "inet", type_: str = "stream"):
     """Create a socket and return its ID"""
     global _next_socket_id
 
     # Parse family
-    if family.lower() == 'inet' or family.lower() not in ['inet6', 'unix']:
+    if family.lower() == "inet" or family.lower() not in ["inet6", "unix"]:
         fam = _socket.AF_INET
-    elif family.lower() == 'inet6':
+    elif family.lower() == "inet6":
         fam = _socket.AF_INET6
     else:
         fam = _socket.AF_UNIX
     # Parse type
-    if type_.lower() == 'stream' or type_.lower() not in ['dgram', 'raw']:
+    if type_.lower() == "stream" or type_.lower() not in ["dgram", "raw"]:
         typ = _socket.SOCK_STREAM
-    elif type_.lower() == 'dgram':
+    elif type_.lower() == "dgram":
         typ = _socket.SOCK_DGRAM
     else:
         typ = _socket.SOCK_RAW
@@ -263,6 +300,7 @@ def _socket_create(family: str = 'inet', type_: str = 'stream'):
     _socket_map[sock_id] = sock
     return sock_id
 
+
 def _socket_connect(sock_id: int, host: str, port):
     """Connect socket to address"""
     if sock_id not in _socket_map:
@@ -270,6 +308,7 @@ def _socket_connect(sock_id: int, host: str, port):
     sock = _socket_map[sock_id]
     sock.connect((host, int(port)))
     return None
+
 
 def _socket_bind(sock_id: int, host: str, port):
     """Bind socket to address"""
@@ -279,13 +318,15 @@ def _socket_bind(sock_id: int, host: str, port):
     sock.bind((host, int(port)))
     return None
 
-def _socket_listen(sock_id: int, backlog = 5):
+
+def _socket_listen(sock_id: int, backlog=5):
     """Listen for connections"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
     sock.listen(int(backlog))
     return None
+
 
 def _socket_accept(sock_id: int):
     """Accept a connection and return new socket ID"""
@@ -299,6 +340,7 @@ def _socket_accept(sock_id: int):
     _socket_map[conn_id] = conn
     return conn_id
 
+
 def _socket_send(sock_id: int, data: bytes):
     """Send data through socket"""
     if sock_id not in _socket_map:
@@ -306,13 +348,15 @@ def _socket_send(sock_id: int, data: bytes):
     sock = _socket_map[sock_id]
     return sock.send(data)
 
-def _socket_recv(sock_id: int, size = 4096):
+
+def _socket_recv(sock_id: int, size=4096):
     """Receive data from socket"""
     if sock_id not in _socket_map:
         raise RuntimeError(f"Invalid socket ID: {sock_id}")
     sock = _socket_map[sock_id]
     data = sock.recv(int(size))
     return data
+
 
 def _socket_close(sock_id: int):
     """Close socket"""
@@ -323,6 +367,7 @@ def _socket_close(sock_id: int):
     del _socket_map[sock_id]
     return None
 
+
 def _socket_setsockopt(sock_id: int, level: str, option: str, value):
     """Set socket option"""
     if sock_id not in _socket_map:
@@ -330,27 +375,28 @@ def _socket_setsockopt(sock_id: int, level: str, option: str, value):
     sock = _socket_map[sock_id]
 
     # Parse level
-    if level.upper() == 'SOL_SOCKET' or level.upper() not in [
-        'IPPROTO_TCP',
-        'IPPROTO_IP',
+    if level.upper() == "SOL_SOCKET" or level.upper() not in [
+        "IPPROTO_TCP",
+        "IPPROTO_IP",
     ]:
         lev = _socket.SOL_SOCKET
-    elif level.upper() == 'IPPROTO_TCP':
+    elif level.upper() == "IPPROTO_TCP":
         lev = _socket.IPPROTO_TCP
     else:
         lev = _socket.IPPROTO_IP
     # Parse option
     opt_map = {
-        'SO_REUSEADDR': _socket.SO_REUSEADDR,
-        'SO_KEEPALIVE': _socket.SO_KEEPALIVE,
-        'SO_BROADCAST': _socket.SO_BROADCAST,
-        'SO_RCVBUF': _socket.SO_RCVBUF,
-        'SO_SNDBUF': _socket.SO_SNDBUF,
+        "SO_REUSEADDR": _socket.SO_REUSEADDR,
+        "SO_KEEPALIVE": _socket.SO_KEEPALIVE,
+        "SO_BROADCAST": _socket.SO_BROADCAST,
+        "SO_RCVBUF": _socket.SO_RCVBUF,
+        "SO_SNDBUF": _socket.SO_SNDBUF,
     }
     opt = opt_map.get(option.upper(), _socket.SO_REUSEADDR)
 
     sock.setsockopt(lev, opt, int(value))
     return None
+
 
 # Python library integration functions
 def _py_import(module_name: str):
@@ -359,20 +405,24 @@ def _py_import(module_name: str):
         try:
             _python_modules[module_name] = importlib.import_module(module_name)
         except ImportError as e:
-            raise RuntimeError(f"Cannot import Python module '{module_name}': {e}") from e
+            raise RuntimeError(
+                f"Cannot import Python module '{module_name}': {e}"
+            ) from e
     return None
+
 
 def _py_call(module_name: str, func_name: str, *args):
     """Call a Python function from an imported module"""
     # Resolve alias if needed (runtime mode only)
     import runtime as runtime_module
-    if runtime_module.runtime and hasattr(runtime_module, 'py_imports'): #type: ignore
-        if module_name in runtime_module.py_imports:                     #type: ignore
-            import_info = runtime_module.py_imports[module_name]         #type: ignore
-            if import_info.get('type') == 'name':
-                import_name = import_info['name']
+
+    if runtime_module.runtime and hasattr(runtime_module, "py_imports"):  # type: ignore
+        if module_name in runtime_module.py_imports:  # type: ignore
+            import_info = runtime_module.py_imports[module_name]  # type: ignore
+            if import_info.get("type") == "name":
+                import_name = import_info["name"]
                 func_name = import_name
-            module_name = import_info['module']
+            module_name = import_info["module"]
     # Import module if not already cached
     if module_name not in _python_modules:
         _py_import(module_name)
@@ -409,6 +459,7 @@ def _py_call(module_name: str, func_name: str, *args):
     except Exception as e:
         raise RuntimeError(f"Error calling {module_name}.{func_name}: {e}") from e
 
+
 def _py_getattr(obj, attr_name: str):
     """Get an attribute or call a method on a Python object"""
     try:
@@ -442,6 +493,7 @@ def _py_getattr(obj, attr_name: str):
     except Exception as e:
         raise RuntimeError(f"Error accessing attribute '{attr_name}': {e}") from e
 
+
 def _py_setattr(obj, attr_name: str, value):
     """Set an attribute on a Python object"""
     try:
@@ -451,6 +503,7 @@ def _py_setattr(obj, attr_name: str, value):
         raise RuntimeError(f"Cannot set attribute '{attr_name}' on object") from e
     except Exception as e:
         raise RuntimeError(f"Error setting attribute '{attr_name}': {e}") from e
+
 
 def _py_call_method(obj, method_name: str, *args):
     """Call a method on a Python object"""
@@ -484,1097 +537,958 @@ def _py_call_method(obj, method_name: str, *args):
         raise RuntimeError(f"Error calling method '{method_name}': {e}") from e
 
 
-funcs:dict[ # Holy type annotations
+funcs: dict[  # Holy type annotations
     str,
     dict[
         str,
-        str | dict[str,str] | Callable | bool | AstType | list[str] | list[tuple[str, str | None]]
-    ]
+        str
+        | dict[str, str]
+        | Callable
+        | bool
+        | AstType
+        | list[str]
+        | list[tuple[str, str | None]],
+    ],
 ] = {
-    'print': {
+    "print": {
         "type": "builtin",
-        "args": {
-            "text": "string"
-        },
+        "args": {"text": "string"},
         "func": _print,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'println': {
+    "println": {
         "type": "builtin",
-        "args": {
-            "text": "string"
-        },
+        "args": {"text": "string"},
         "func": print,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'assert': {
+    "assert": {
         "type": "builtin",
-        "args": {
-            "condition": "bool",
-            "message": "str"
-        },
+        "args": {"condition": "bool", "message": "str"},
         "func": _assert,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'encode': {
+    "encode": {
         "type": "builtin",
-        "args": {
-            "text": "str",
-            "encoding": "str"
-        },
+        "args": {"text": "str", "encoding": "str"},
         "func": _encode,
         "return_type": "bytes",
-        "can_eval": True
+        "can_eval": True,
     },
-    'decode': {
+    "decode": {
         "type": "builtin",
-        "args": {
-            "data": "bytes",
-            "encoding": "str"
-        },
+        "args": {"data": "bytes", "encoding": "str"},
         "func": _decode,
         "return_type": "str",
-        "can_eval": True
+        "can_eval": True,
     },
-    'input': {
+    "input": {
         "type": "builtin",
-        "args": {
-            "text": "str"
-        },
+        "args": {"text": "str"},
         "func": input,
         "return_type": "str",
-        "can_eval": False
+        "can_eval": False,
     },
-    'round': {
+    "round": {
         "type": "builtin",
-        "args": {
-            "num": "float"
-        },
+        "args": {"num": "float"},
         "func": round,
         "return_type": "int",
-        "can_eval": True
+        "can_eval": True,
     },
-    'len': {
+    "len": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
+        "args": {"value": "any"},
         "func": len,
         "return_type": "int",
-        "can_eval": False  # Cannot evaluate at parse time - arguments may be runtime values
+        "can_eval": False,  # Cannot evaluate at parse time - arguments may be runtime values
     },
-    'append': {
+    "append": {
         "type": "builtin",
-        "args": {
-            "lst": "list",
-            "value": "any"
-        },
+        "args": {"lst": "list", "value": "any"},
         "func": lambda lst, value: lst.append(value) or lst,
         "return_type": "list",
-        "can_eval": True
+        "can_eval": True,
     },
-    'pop': {
+    "pop": {
         "type": "builtin",
-        "args": {
-            "lst": "list"
-        },
+        "args": {"lst": "list"},
         "func": lambda lst: lst.pop() if lst else None,
         "return_type": "any",
-        "can_eval": False
+        "can_eval": False,
     },
-    'set_add': {
+    "set_add": {
         "type": "builtin",
-        "args": {
-            "s": "set",
-            "value": "any"
-        },
+        "args": {"s": "set", "value": "any"},
         "func": lambda s, value: s.add(value) or s,
         "return_type": "set",
-        "can_eval": True
+        "can_eval": True,
     },
-    'set_remove': {
+    "set_remove": {
         "type": "builtin",
-        "args": {
-            "s": "set",
-            "value": "any"
-        },
+        "args": {"s": "set", "value": "any"},
         "func": lambda s, value: s.discard(value) or s,
         "return_type": "set",
-        "can_eval": True
+        "can_eval": True,
     },
-    'set_contains': {
+    "set_contains": {
         "type": "builtin",
-        "args": {
-            "s": "set",
-            "value": "any"
-        },
+        "args": {"s": "set", "value": "any"},
         "func": lambda s, value: value in s,
         "return_type": "bool",
-        "can_eval": True
+        "can_eval": True,
     },
-
     # Types
-    'str': {
+    "str": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
+        "args": {"value": "any"},
         "func": lambda value: (
-            'true' if value is True else 
-            'false' if value is False else 
-            '{}' if isinstance(value, set) and len(value) == 0 else
-            '{' + ', '.join(x if isinstance(x, str) else str(x) for x in sorted(value, key=lambda x: (type(x).__name__, str(x)))) + '}' if isinstance(value, set) else
-            repr(value) if isinstance(value, bytes) else
-            str(value)
+            "true"
+            if value is True
+            else (
+                "false"
+                if value is False
+                else (
+                    "{}"
+                    if isinstance(value, set) and len(value) == 0
+                    else (
+                        "{"
+                        + ", ".join(
+                            x if isinstance(x, str) else str(x)
+                            for x in sorted(
+                                value, key=lambda x: (type(x).__name__, str(x))
+                            )
+                        )
+                        + "}"
+                        if isinstance(value, set)
+                        else repr(value) if isinstance(value, bytes) else str(value)
+                    )
+                )
+            )
         ),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-    'int': {
+    "int": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
-        "func": lambda value: int(float(value)) if isinstance(value, str) and '.' in value else int(value),
+        "args": {"value": "any"},
+        "func": lambda value: (
+            int(float(value)) if isinstance(value, str) and "." in value else int(value)
+        ),
         "return_type": "int",
-        "can_eval": True
+        "can_eval": True,
     },
-    'float': {
+    "float": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
+        "args": {"value": "any"},
         "func": float,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'bool': {
+    "bool": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
+        "args": {"value": "any"},
         "func": lambda value: str(bool(value)).lower(),
         "return_type": "bool",
-        "can_eval": True
+        "can_eval": True,
     },
-
     # String manipulation
-    'upper': {
+    "upper": {
         "type": "builtin",
-        "args": {
-            "text": "string"
-        },
+        "args": {"text": "string"},
         "func": lambda text: str(text).upper(),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-    'lower': {
+    "lower": {
         "type": "builtin",
-        "args": {
-            "text": "string"
-        },
+        "args": {"text": "string"},
         "func": lambda text: str(text).lower(),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-    'strip': {
+    "strip": {
         "type": "builtin",
-        "args": {
-            "text": "string"
-        },
+        "args": {"text": "string"},
         "func": lambda text: str(text).strip(),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-    'split': {
+    "split": {
         "type": "builtin",
-        "args": {
-            "text": "string",
-            "separator": "string"
-        },
-        "func": lambda text, sep=' ': str(text).split(str(sep)),
+        "args": {"text": "string", "separator": "string"},
+        "func": lambda text, sep=" ": str(text).split(str(sep)),
         "return_type": "list",
-        "can_eval": False  # Don't evaluate at parse time
+        "can_eval": False,  # Don't evaluate at parse time
     },
-    'join': {
+    "join": {
         "type": "builtin",
-        "args": {
-            "separator": "string",
-            "items": "list"
-        },
+        "args": {"separator": "string", "items": "list"},
         "func": lambda sep, items: str(sep).join([str(x) for x in items]),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-    'replace': {
+    "replace": {
         "type": "builtin",
-        "args": {
-            "text": "string",
-            "old": "string",
-            "new": "string"
-        },
+        "args": {"text": "string", "old": "string", "new": "string"},
         "func": lambda text, old, new: str(text).replace(str(old), str(new)),
         "return_type": "string",
-        "can_eval": True
+        "can_eval": True,
     },
-
     # Math functions
-    'abs': {
+    "abs": {
         "type": "builtin",
-        "args": {
-            "value": "any"
-        },
+        "args": {"value": "any"},
         "func": abs,
         "return_type": "any",
-        "can_eval": True
+        "can_eval": True,
     },
-    'pow': {
+    "pow": {
         "type": "builtin",
-        "args": {
-            "base": "any",
-            "exponent": "any"
-        },
+        "args": {"base": "any", "exponent": "any"},
         "func": pow,
         "return_type": "any",
-        "can_eval": True
+        "can_eval": True,
     },
-    'min': {
+    "min": {
         "type": "builtin",
-        "args": {
-            "a": "any",
-            "b": "any"
-        },
+        "args": {"a": "any", "b": "any"},
         "func": min,
         "return_type": "any",
-        "can_eval": True
+        "can_eval": True,
     },
-    'max': {
+    "max": {
         "type": "builtin",
-        "args": {
-            "a": "any",
-            "b": "any"
-        },
+        "args": {"a": "any", "b": "any"},
         "func": max,
         "return_type": "any",
-        "can_eval": True
+        "can_eval": True,
     },
-    'floor': {
+    "floor": {
         "type": "builtin",
-        "args": {
-            "value": "float"
-        },
+        "args": {"value": "float"},
         "func": floor,
         "return_type": "int",
-        "can_eval": True
+        "can_eval": True,
     },
-    'ceil': {
+    "ceil": {
         "type": "builtin",
-        "args": {
-            "value": "float"
-        },
+        "args": {"value": "float"},
         "func": ceil,
         "return_type": "int",
-        "can_eval": True
+        "can_eval": True,
     },
-    'sqrt': {
+    "sqrt": {
         "type": "builtin",
-        "args": {
-            "num": "float"
-        },
+        "args": {"num": "float"},
         "func": sqrt,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'sin': {
+    "sin": {
         "type": "builtin",
-        "args": {
-            "value": "float"
-        },
+        "args": {"value": "float"},
         "func": sin,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'cos': {
+    "cos": {
         "type": "builtin",
-        "args": {
-            "value": "float"
-        },
+        "args": {"value": "float"},
         "func": cos,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'tan': {
+    "tan": {
         "type": "builtin",
-        "args": {
-            "value": "float"
-        },
+        "args": {"value": "float"},
         "func": tan,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'PI': {
+    "PI": {
         "type": "builtin",
         "args": {},
         "func": lambda: pi,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-    'E': {
+    "E": {
         "type": "builtin",
         "args": {},
         "func": lambda: e,
         "return_type": "float",
-        "can_eval": True
+        "can_eval": True,
     },
-
     # File I/O functions
-    'fopen': {
+    "fopen": {
         "type": "builtin",
-        "args": {
-            "path": "string",
-            "mode": "string"
-        },
+        "args": {"path": "string", "mode": "string"},
         "func": _file_open,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'fread': {
+    "fread": {
         "type": "builtin",
-        "args": {
-            "fd": "int",
-            "size": "int"
-        },
+        "args": {"fd": "int", "size": "int"},
         "func": _file_read,
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'fwrite': {
+    "fwrite": {
         "type": "builtin",
-        "args": {
-            "fd": "int",
-            "data": "string"
-        },
+        "args": {"fd": "int", "data": "string"},
         "func": _file_write,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'fclose': {
+    "fclose": {
         "type": "builtin",
-        "args": {
-            "fd": "int"
-        },
+        "args": {"fd": "int"},
         "func": _file_close,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'exists': {
+    "exists": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_exists,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'isfile': {
+    "isfile": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_isfile,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'isdir': {
+    "isdir": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_isdir,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'listdir': {
+    "listdir": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_listdir,
         "return_type": "list",
-        "can_eval": False
+        "can_eval": False,
     },
-    'mkdir': {
+    "mkdir": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_mkdir,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'makedirs': {
+    "makedirs": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_makedirs,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'remove': {
+    "remove": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_remove,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'rmdir': {
+    "rmdir": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_rmdir,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'rename': {
+    "rename": {
         "type": "builtin",
-        "args": {
-            "old_path": "string",
-            "new_path": "string"
-        },
+        "args": {"old_path": "string", "new_path": "string"},
         "func": _file_rename,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'getsize': {
+    "getsize": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_getsize,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'getcwd': {
+    "getcwd": {
         "type": "builtin",
         "args": {},
         "func": _file_getcwd,
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'chdir': {
+    "chdir": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_chdir,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'abspath': {
+    "abspath": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_abspath,
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'basename': {
+    "basename": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_basename,
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dirname': {
+    "dirname": {
         "type": "builtin",
-        "args": {
-            "path": "string"
-        },
+        "args": {"path": "string"},
         "func": _file_dirname,
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'pathjoin': {
+    "pathjoin": {
         "type": "builtin",
-        "args": {
-            "paths": "list"
-        },
+        "args": {"paths": "list"},
         "func": lambda paths: _file_join(*paths),
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Process management functions
-    'fork': {
+    "fork": {
         "type": "builtin",
         "args": {},
         "func": _fork,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'wait': {
+    "wait": {
         "type": "builtin",
         "args": {"pid": "int"},
         "func": _wait,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'sleep': {
+    "sleep": {
         "type": "builtin",
         "args": {"seconds": "float"},
         "func": _sleep,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'exit': {
+    "exit": {
         "type": "builtin",
         "args": {},  # Optional argument with default: code=0
         "func": _exit,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'getpid': {
+    "getpid": {
         "type": "builtin",
         "args": {},
         "func": _getpid,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Socket I/O functions
-    'socket': {
+    "socket": {
         "type": "builtin",
         "args": {},  # Optional arguments with defaults: family="inet", type="stream"
         "func": _socket_create,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'connect': {
+    "connect": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int",
-            "host": "string",
-            "port": "int"
-        },
+        "args": {"sock_id": "int", "host": "string", "port": "int"},
         "func": _socket_connect,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'bind': {
+    "bind": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int",
-            "host": "string",
-            "port": "int"
-        },
+        "args": {"sock_id": "int", "host": "string", "port": "int"},
         "func": _socket_bind,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'listen': {
+    "listen": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int",
-            "backlog": "int"
-        },
+        "args": {"sock_id": "int", "backlog": "int"},
         "func": _socket_listen,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'accept': {
+    "accept": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int"
-        },
+        "args": {"sock_id": "int"},
         "func": _socket_accept,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'send': {
+    "send": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int",
-            "data": "bytes"
-        },
+        "args": {"sock_id": "int", "data": "bytes"},
         "func": _socket_send,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'recv': {
+    "recv": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int",
-            "size": "int"
-        },
+        "args": {"sock_id": "int", "size": "int"},
         "func": _socket_recv,
         "return_type": "bytes",
-        "can_eval": False
+        "can_eval": False,
     },
-    'sclose': {
+    "sclose": {
         "type": "builtin",
-        "args": {
-            "sock_id": "int"
-        },
+        "args": {"sock_id": "int"},
         "func": _socket_close,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'setsockopt': {
+    "setsockopt": {
         "type": "builtin",
         "args": {
             "sock_id": "int",
             "level": "string",
             "option": "string",
-            "value": "int"
+            "value": "int",
         },
         "func": _socket_setsockopt,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'py_import': {
+    "py_import": {
         "type": "builtin",
-        "args": {
-            "module_name": "string"
-        },
+        "args": {"module_name": "string"},
         "func": _py_import,
         "return_type": "none",
-        "can_eval": False
+        "can_eval": False,
     },
-    'py_call': {
+    "py_call": {
         "type": "builtin",
         "args": {},  # Variable arguments
         "func": _py_call,
         "return_type": "any",
         "can_eval": False,
-        "variadic": True
+        "variadic": True,
     },
-    'py_getattr': {
+    "py_getattr": {
         "type": "builtin",
         "args": {},  # Variable arguments: (object, attribute_name)
         "func": _py_getattr,
         "return_type": "any",
         "can_eval": False,
-        "variadic": True
+        "variadic": True,
     },
-    'py_setattr': {
+    "py_setattr": {
         "type": "builtin",
         "args": {},  # Variable arguments: (object, attribute_name, value)
         "func": _py_setattr,
         "return_type": "none",
         "can_eval": False,
-        "variadic": True
+        "variadic": True,
     },
-    'py_call_method': {
+    "py_call_method": {
         "type": "builtin",
         "args": {},  # Variable arguments: (object, method_name, *args)
         "func": _py_call_method,
         "return_type": "any",
         "can_eval": False,
-        "variadic": True
+        "variadic": True,
     },
-
     # Web/WASM Functions - DOM Query
-    'dom_query': {
+    "dom_query": {
         "type": "builtin",
         "args": {"selector": "string"},
         "func": lambda selector: 0,  # Placeholder - runs only in WASM
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_query_all': {
+    "dom_query_all": {
         "type": "builtin",
         "args": {"selector": "string"},
         "func": lambda selector: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_create': {
+    "dom_create": {
         "type": "builtin",
         "args": {"tag": "string"},
         "func": lambda tag: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_body': {
+    "dom_get_body": {
         "type": "builtin",
         "args": {},
         "func": lambda: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_document': {
+    "dom_get_document": {
         "type": "builtin",
         "args": {},
         "func": lambda: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - DOM Manipulation
-    'dom_set_text': {
+    "dom_set_text": {
         "type": "builtin",
         "args": {"elemId": "int", "text": "string"},
         "func": lambda elemId, text: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_text': {
+    "dom_get_text": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_set_html': {
+    "dom_set_html": {
         "type": "builtin",
         "args": {"elemId": "int", "html": "string"},
         "func": lambda elemId, html: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_html': {
+    "dom_get_html": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_set_attr': {
+    "dom_set_attr": {
         "type": "builtin",
         "args": {"elemId": "int", "name": "string", "value": "string"},
         "func": lambda elemId, name, value: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_attr': {
+    "dom_get_attr": {
         "type": "builtin",
         "args": {"elemId": "int", "name": "string"},
         "func": lambda elemId, name: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_remove_attr': {
+    "dom_remove_attr": {
         "type": "builtin",
         "args": {"elemId": "int", "name": "string"},
         "func": lambda elemId, name: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - DOM Tree
-    'dom_append': {
+    "dom_append": {
         "type": "builtin",
         "args": {"parentId": "int", "childId": "int"},
         "func": lambda parentId, childId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_prepend': {
+    "dom_prepend": {
         "type": "builtin",
         "args": {"parentId": "int", "childId": "int"},
         "func": lambda parentId, childId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_remove': {
+    "dom_remove": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_clone': {
+    "dom_clone": {
         "type": "builtin",
         "args": {"elemId": "int", "deep": "bool"},
         "func": lambda elemId, deep: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_parent': {
+    "dom_parent": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_children': {
+    "dom_children": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - CSS/Style
-    'dom_add_class': {
+    "dom_add_class": {
         "type": "builtin",
         "args": {"elemId": "int", "class": "string"},
         "func": lambda elemId, cls: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_remove_class': {
+    "dom_remove_class": {
         "type": "builtin",
         "args": {"elemId": "int", "class": "string"},
         "func": lambda elemId, cls: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_toggle_class': {
+    "dom_toggle_class": {
         "type": "builtin",
         "args": {"elemId": "int", "class": "string"},
         "func": lambda elemId, cls: False,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_has_class': {
+    "dom_has_class": {
         "type": "builtin",
         "args": {"elemId": "int", "class": "string"},
         "func": lambda elemId, cls: False,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_set_style': {
+    "dom_set_style": {
         "type": "builtin",
         "args": {"elemId": "int", "prop": "string", "value": "string"},
         "func": lambda elemId, prop, value: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_get_style': {
+    "dom_get_style": {
         "type": "builtin",
         "args": {"elemId": "int", "prop": "string"},
         "func": lambda elemId, prop: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Form Elements
-    'dom_get_value': {
+    "dom_get_value": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_set_value': {
+    "dom_set_value": {
         "type": "builtin",
         "args": {"elemId": "int", "value": "string"},
         "func": lambda elemId, value: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_focus': {
+    "dom_focus": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_blur': {
+    "dom_blur": {
         "type": "builtin",
         "args": {"elemId": "int"},
         "func": lambda elemId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Events
-    'dom_on': {
+    "dom_on": {
         "type": "builtin",
         "args": {"elemId": "int", "event": "string", "callbackId": "int"},
         "func": lambda elemId, event, callbackId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'dom_off': {
+    "dom_off": {
         "type": "builtin",
         "args": {"callbackId": "int"},
         "func": lambda callbackId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'event_prevent_default': {
+    "event_prevent_default": {
         "type": "builtin",
         "args": {},
         "func": lambda: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'event_stop_propagation': {
+    "event_stop_propagation": {
         "type": "builtin",
         "args": {},
         "func": lambda: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'event_target': {
+    "event_target": {
         "type": "builtin",
         "args": {},
         "func": lambda: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Timers
-    'set_timeout': {
+    "set_timeout": {
         "type": "builtin",
         "args": {"callbackId": "int", "ms": "int"},
         "func": lambda callbackId, ms: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'set_interval': {
+    "set_interval": {
         "type": "builtin",
         "args": {"callbackId": "int", "ms": "int"},
         "func": lambda callbackId, ms: 0,
         "return_type": "int",
-        "can_eval": False
+        "can_eval": False,
     },
-    'clear_timeout': {
+    "clear_timeout": {
         "type": "builtin",
         "args": {"timerId": "int"},
         "func": lambda timerId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'clear_interval': {
+    "clear_interval": {
         "type": "builtin",
         "args": {"timerId": "int"},
         "func": lambda timerId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Console
-    'console_log': {
+    "console_log": {
         "type": "builtin",
         "args": {"text": "string"},
         "func": lambda text: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'console_error': {
+    "console_error": {
         "type": "builtin",
         "args": {"text": "string"},
         "func": lambda text: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'console_warn': {
+    "console_warn": {
         "type": "builtin",
         "args": {"text": "string"},
         "func": lambda text: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Browser APIs
-    'alert': {
+    "alert": {
         "type": "builtin",
         "args": {"text": "string"},
         "func": lambda text: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'confirm': {
+    "confirm": {
         "type": "builtin",
         "args": {"text": "string"},
         "func": lambda text: False,
         "return_type": "bool",
-        "can_eval": False
+        "can_eval": False,
     },
-    'prompt': {
+    "prompt": {
         "type": "builtin",
         "args": {"msg": "string", "default": "string"},
         "func": lambda msg, default: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'get_location_href': {
+    "get_location_href": {
         "type": "builtin",
         "args": {},
         "func": lambda: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'set_location_href': {
+    "set_location_href": {
         "type": "builtin",
         "args": {"url": "string"},
         "func": lambda url: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Storage
-    'get_local_storage': {
+    "get_local_storage": {
         "type": "builtin",
         "args": {"key": "string"},
         "func": lambda key: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'set_local_storage': {
+    "set_local_storage": {
         "type": "builtin",
         "args": {"key": "string", "value": "string"},
         "func": lambda key, value: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'remove_local_storage': {
+    "remove_local_storage": {
         "type": "builtin",
         "args": {"key": "string"},
         "func": lambda key: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - Fetch API
-    'fetch_text': {
+    "fetch_text": {
         "type": "builtin",
         "args": {"url": "string", "callbackId": "int"},
         "func": lambda url, callbackId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-    'fetch_json': {
+    "fetch_json": {
         "type": "builtin",
         "args": {"url": "string", "callbackId": "int"},
         "func": lambda url, callbackId: None,
         "return_type": "void",
-        "can_eval": False
+        "can_eval": False,
     },
-
     # Web/WASM Functions - JS Interop
-    'js_call': {
+    "js_call": {
         "type": "builtin",
         "args": {"funcName": "string", "argsJson": "string"},
         "func": lambda funcName, argsJson: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'js_eval': {
+    "js_eval": {
         "type": "builtin",
         "args": {"code": "string"},
         "func": lambda code: "",
         "return_type": "string",
-        "can_eval": False
+        "can_eval": False,
     },
-    'js_get_global': {
+    "js_get_global": {
         "type": "builtin",
         "args": {"name": "string"},
         "func": lambda name: "",
         "return_type": "string",
-        "can_eval": False
-    }
+        "can_eval": False,
+    },
 }

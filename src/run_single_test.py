@@ -4,6 +4,7 @@ Helper script to run a single test in isolation.
 This is called by tests_isolated.py for each test.
 Test content is read from stdin.
 """
+
 import sys
 import os
 import shutil
@@ -13,37 +14,41 @@ import sysconfig
 from io import StringIO
 from pathlib import Path
 
-IS_WINDOWS = os.name == 'nt'
+IS_WINDOWS = os.name == "nt"
 
 
 def _prepend_python_base_to_path(env: dict) -> dict:
     """On Windows, embed builds may need python3.dll discoverable via PATH."""
     if not IS_WINDOWS:
         return env
-    base = sysconfig.get_config_var('base') or sysconfig.get_config_var('installed_base')
+    base = sysconfig.get_config_var("base") or sysconfig.get_config_var(
+        "installed_base"
+    )
     if not base:
         return env
     env = env.copy()
-    env['PATH'] = str(base) + os.pathsep + env.get('PATH', '')
+    env["PATH"] = str(base) + os.pathsep + env.get("PATH", "")
     return env
+
 
 # Save original argv before modifying it
 original_argv = sys.argv.copy()
 
 # Setup paths
-sys.path.insert(0, 'src')
-sys.argv = [sys.argv[0], '-d']  # Enable debug mode
+sys.path.insert(0, "src")
+sys.argv = [sys.argv[0], "-d"]  # Enable debug mode
 
 # Import after path setup
 from parser import parse
 from compiler import compile_ast_to_bytecode
-from runtime import run, format_runtime_exception # type: ignore
+from runtime import run, format_runtime_exception  # type: ignore
 from optimizer import compile_native_ssa
 
-RUNTIME_DIR = Path(__file__).parent.parent / 'runtime'
-RUNTIME_SRC = RUNTIME_DIR / 'runtime_lib.c'
+RUNTIME_DIR = Path(__file__).parent.parent / "runtime"
+RUNTIME_SRC = RUNTIME_DIR / "runtime_lib.c"
 RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
-RUNTIME_OBJ = Path(tempfile.gettempdir()) / 'frscript_runtime_lib.o'
+RUNTIME_OBJ = Path(tempfile.gettempdir()) / "frscript_runtime_lib.o"
+
 
 def ensure_runtime_object():
     """Compile runtime_lib.c to an object file and reuse it across tests."""
@@ -55,12 +60,20 @@ def ensure_runtime_object():
         except OSError:
             pass
 
-    tmp_obj = RUNTIME_OBJ.with_suffix('.o.tmp')
+    tmp_obj = RUNTIME_OBJ.with_suffix(".o.tmp")
     compile_cmd = [
-        'gcc', '-c', '-O3', '-march=native', '-mtune=native',
-        '-ffunction-sections', '-fdata-sections',
-        '-I', RUNTIME_INCLUDE_DIR,
-        '-o', str(tmp_obj), str(RUNTIME_SRC)
+        "gcc",
+        "-c",
+        "-O3",
+        "-march=native",
+        "-mtune=native",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-I",
+        RUNTIME_INCLUDE_DIR,
+        "-o",
+        str(tmp_obj),
+        str(RUNTIME_SRC),
     ]
     result = subprocess.run(compile_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -68,29 +81,30 @@ def ensure_runtime_object():
             tmp_obj.unlink()
         except OSError:
             pass
-        raise RuntimeError(result.stderr.strip() or 'Failed to compile runtime_lib.c')
+        raise RuntimeError(result.stderr.strip() or "Failed to compile runtime_lib.c")
 
     tmp_obj.replace(RUNTIME_OBJ)
     return str(RUNTIME_OBJ)
 
+
 def extract_error_message(error_text):
     """Extract and normalize error message to match expected format"""
     if not error_text:
-        return ''
+        return ""
 
-    lines = error_text.strip().split('\n')
-    
+    lines = error_text.strip().split("\n")
+
     # For WAT validation errors, look for "error:" lines
     for line in lines:
-        if 'error:' in line.lower() and ('out.wat' in line or '.wat:' in line):
+        if "error:" in line.lower() and ("out.wat" in line or ".wat:" in line):
             # Extract the actual error message after "error:"
-            error_part = line.split('error:', 1)
+            error_part = line.split("error:", 1)
             if len(error_part) > 1:
                 return error_part[1].strip()
-    
+
     # Check if already in ?line,col:message format (from runtime errors)
     for line in reversed(lines):
-        if line.startswith('?'):
+        if line.startswith("?"):
             # Already in correct format, just return it
             return line
 
@@ -100,29 +114,30 @@ def extract_error_message(error_text):
     # Look for the last line with either pattern
     for line in reversed(lines):
         # Try to match "file.fr:line:char: Message" first
-        if '.fr:' in line and ':' in line:
-            parts = line.split('.fr:', 1)
+        if ".fr:" in line and ":" in line:
+            parts = line.split(".fr:", 1)
             if len(parts) > 1:
                 loc_and_msg = parts[1]
                 # Format is "line:char: Message"
                 # Split only the first two colons (line and char), keep rest as message
-                first_colon = loc_and_msg.find(':')
+                first_colon = loc_and_msg.find(":")
                 if first_colon != -1:
                     line_num = loc_and_msg[:first_colon].strip()
-                    rest = loc_and_msg[first_colon+1:]
-                    second_colon = rest.find(':')
+                    rest = loc_and_msg[first_colon + 1 :]
+                    second_colon = rest.find(":")
                     if second_colon != -1:
                         char_num = rest[:second_colon].strip()
-                        message = rest[second_colon+1:].strip()
+                        message = rest[second_colon + 1 :].strip()
                         # Return in format ?line,char:message
                         return f"?{line_num},{char_num}:{message}"
 
         # Try to match "Line line:char: Message" or "filename:line:char: Message" format
         # This handles errors where file is not .fr or Line prefix is used
-        if ': ' in line and any(x in line for x in ['Line ', ':', ' line ']):
+        if ": " in line and any(x in line for x in ["Line ", ":", " line "]):
             # Look for pattern like "Line 5:16: " or "file:5:16: "
             import re
-            if match := re.search(r'(?:Line\s+)?(\d+):(\d+):\s+(.+)$', line):
+
+            if match := re.search(r"(?:Line\s+)?(\d+):(\d+):\s+(.+)$", line):
                 line_num = match.group(1)
                 char_num = match.group(2)
                 message = match.group(3)
@@ -130,28 +145,33 @@ def extract_error_message(error_text):
 
     # For Python exceptions, look for the actual exception message
     for line in reversed(lines):
-        if line.strip() and not line.startswith(' ') and not line.startswith('File ') and not line.startswith('Traceback'):
+        if (
+            line.strip()
+            and not line.startswith(" ")
+            and not line.startswith("File ")
+            and not line.startswith("Traceback")
+        ):
             # This is likely the exception message
-            if ':' in line and 'Error' in line:
+            if ":" in line and "Error" in line:
                 # Format like "WasmCompilerError: message"
-                parts = line.split(':', 1)
+                parts = line.split(":", 1)
                 if len(parts) > 1:
                     return parts[1].strip()
 
     # Parser errors have format: "...Line X:Y: Message" or "...Line X: Message"
     # Expected format is: "?X:Message" or "?X,Y:Message"
-    if 'Line ' in error_text:
+    if "Line " in error_text:
         # Extract the line number and message
-        parts = error_text.split('Line ', 1)
+        parts = error_text.split("Line ", 1)
         if len(parts) > 1:
             line_part = parts[1]
             # Format is "X:Y: Message" or "X: Message"
-            if ':' in line_part:
-                line_info, rest = line_part.split(':', 1)
-                if ':' not in rest:
+            if ":" in line_part:
+                line_info, rest = line_part.split(":", 1)
+                if ":" not in rest:
                     return f"?{line_info}:{rest.strip()}"
 
-                col_part, message = rest.split(':', 1)
+                col_part, message = rest.split(":", 1)
                 message = message.strip()
                 # Check if col_part is a column number
                 try:
@@ -159,23 +179,26 @@ def extract_error_message(error_text):
                     return f"?{line_info},{col}:{message}"
                 except ValueError:
                     # col_part is part of message
-                    return f"?{line_info}:{col_part}:{message}".replace('::', ':').strip()
+                    return f"?{line_info}:{col_part}:{message}".replace(
+                        "::", ":"
+                    ).strip()
     # For other error formats, just clean up
-    if ':' in error_text:
-        parts = error_text.split(':', 2)
+    if ":" in error_text:
+        parts = error_text.split(":", 2)
         if len(parts) >= 3:
-            return parts[2].strip().rstrip('.')
-    return error_text.rstrip('.')
+            return parts[2].strip().rstrip(".")
+    return error_text.rstrip(".")
+
 
 def main():
     # Filename can be passed as first argument
-    test_filename = original_argv[1] if len(original_argv) > 1 else ''
+    test_filename = original_argv[1] if len(original_argv) > 1 else ""
 
     # Check for skip flags
-    skip_py = '--skip-py' in original_argv
-    skip_c = '--skip-c' in original_argv
-    skip_native = '--skip-native' in original_argv
-    skip_wasm = '--skip-wasm' in original_argv
+    skip_py = "--skip-py" in original_argv
+    skip_c = "--skip-c" in original_argv
+    skip_native = "--skip-native" in original_argv
+    skip_wasm = "--skip-wasm" in original_argv
 
     # Test content is read from stdin
     content = sys.stdin.read()
@@ -183,19 +206,18 @@ def main():
     # Windows does not have a real /tmp; many tests use it as a convenience path.
     # Rewrite to the OS temp directory for consistent behavior.
     if IS_WINDOWS and content:
-        tmp_dir = tempfile.gettempdir().replace('\\', '/')
+        tmp_dir = tempfile.gettempdir().replace("\\", "/")
         content = (
-            content
-            .replace('"/tmp/','"' + tmp_dir + '/')
-            .replace("'/tmp/","'" + tmp_dir + '/')
-            .replace('"/tmp"','"' + tmp_dir + '"')
-            .replace("'/tmp'","'" + tmp_dir + "'")
+            content.replace('"/tmp/', '"' + tmp_dir + "/")
+            .replace("'/tmp/", "'" + tmp_dir + "/")
+            .replace('"/tmp"', '"' + tmp_dir + '"')
+            .replace("'/tmp'", "'" + tmp_dir + "'")
         )
 
     # Parse test - collect expectation comment lines at the beginning
     # First line: MUST be a comment (can be any comment)
     # Subsequent lines: ONLY if they start with '!', '?', or '@' (expectation markers)
-    lines = content.split('\n')
+    lines = content.split("\n")
     expect_lines = []
     code_start_idx = 0
 
@@ -203,29 +225,33 @@ def main():
         stripped = line.strip()
 
         # Skip pragma directives when looking for expectations
-        if stripped.startswith('#pragma'):
+        if stripped.startswith("#pragma"):
             code_start_idx = i + 1
             continue
 
-        if stripped.startswith('//'):
+        if stripped.startswith("//"):
             comment_content = stripped[2:].strip()  # Remove '//' and whitespace
 
             if not expect_lines:
                 # First expectation line: Always treat as expectation
                 expect_lines.append(comment_content)
                 code_start_idx = i + 1
-            elif comment_content.startswith('!') or comment_content.startswith('?') or comment_content.startswith('@'):
+            elif (
+                comment_content.startswith("!")
+                or comment_content.startswith("?")
+                or comment_content.startswith("@")
+            ):
                 # Subsequent lines: Only if they're expectation markers
                 # For lines after the first, remove the '!' prefix if present
                 # (only first line's '!' indicates output test)
-                if comment_content.startswith('!'):
+                if comment_content.startswith("!"):
                     comment_content = comment_content[1:]
                 expect_lines.append(comment_content)
                 code_start_idx = i + 1
             else:
                 # Regular comment (not an expectation) - stop looking for expectations
                 break
-        elif stripped == '':
+        elif stripped == "":
             # Blank line after expectations - stop
             if expect_lines:
                 break
@@ -240,42 +266,55 @@ def main():
         return 1
 
     # Join all expectation lines with newlines
-    expect_line = '\n'.join(expect_lines)
+    expect_line = "\n".join(expect_lines)
 
     # Build code with blank lines to preserve line numbers
-    code = '\n' * code_start_idx + '\n'.join(lines[code_start_idx:])
+    code = "\n" * code_start_idx + "\n".join(lines[code_start_idx:])
 
     # Check for runtime-specific test markers
     runtime_filter = None  # None means run on both, 'python' or 'c' for specific
-    if '@python-only' in expect_line or '@python' in expect_line:
-        runtime_filter = 'python'
-    elif '@c-only' in expect_line or '@c' in expect_line:
-        runtime_filter = 'c'
+    if "@python-only" in expect_line or "@python" in expect_line:
+        runtime_filter = "python"
+    elif "@c-only" in expect_line or "@c" in expect_line:
+        runtime_filter = "c"
 
     # Extract expectation
-    expect = expect_line.replace('//', '').strip()
+    expect = expect_line.replace("//", "").strip()
     # Remove runtime markers from expectation
-    expect = expect.replace('@python-only', '').replace('@python', '').replace('@c-only', '').replace('@c', '').strip()
+    expect = (
+        expect.replace("@python-only", "")
+        .replace("@python", "")
+        .replace("@c-only", "")
+        .replace("@c", "")
+        .strip()
+    )
 
-    is_output_test = expect.startswith('!')
+    is_output_test = expect.startswith("!")
 
     # Split by || to get alternative expected outputs first
-    if '||' in expect:
-        expect_alternatives = [e.strip() for e in expect.split('||')]
+    if "||" in expect:
+        expect_alternatives = [e.strip() for e in expect.split("||")]
         # Remove ! from each alternative if this is an output test
         if is_output_test:
-            expect_alternatives = [e[1:].strip().replace('\\n', '\n') if e.startswith('!') else e.strip().replace('\\n', '\n') for e in expect_alternatives]
+            expect_alternatives = [
+                (
+                    e[1:].strip().replace("\\n", "\n")
+                    if e.startswith("!")
+                    else e.strip().replace("\\n", "\n")
+                )
+                for e in expect_alternatives
+            ]
         expect = expect_alternatives[0]  # Use first alternative as primary
     else:
         if is_output_test:
-            expect = expect[1:].strip().replace('\\n', '\n')
+            expect = expect[1:].strip().replace("\\n", "\n")
         else:
-            expect = expect.rstrip('.')
+            expect = expect.rstrip(".")
         expect_alternatives = [expect]
 
     # Special case: if expect is "none", test passes if parsing succeeds
     # Don't run the code to avoid timeouts from infinite loops
-    if expect.lower() == 'none' and not is_output_test:
+    if expect.lower() == "none" and not is_output_test:
         try:
             ast = parse(code, file=test_filename)
             # Parse succeeded - all runtimes pass
@@ -311,7 +350,7 @@ def main():
         return 0
 
     # Determine whether we need bytecode for VM/native runtimes
-    needs_bytecode = (runtime_filter != 'python' and not skip_c) or not skip_native
+    needs_bytecode = (runtime_filter != "python" and not skip_c) or not skip_native
     bytecode = None
     line_map = []
     compile_error = None
@@ -324,7 +363,7 @@ def main():
     # Run on Python runtime (unless filtered out or skipped)
     py_error = None
     py_output = None
-    if runtime_filter != 'c' and not skip_py:
+    if runtime_filter != "c" and not skip_py:
         old_stdout = sys.stdout
         string_io = StringIO()
         sys.stdout = string_io
@@ -342,7 +381,9 @@ def main():
                 if py_output:
                     py_error = py_output
                 else:
-                    py_error = extract_error_message(f"Binary exited with code {exit_code}")
+                    py_error = extract_error_message(
+                        f"Binary exited with code {exit_code}"
+                    )
                 py_output = None
         except Exception as e:
             py_output = None
@@ -359,38 +400,44 @@ def main():
     # Run on C VM runtime (unless filtered out or skipped)
     vm_error = None
     vm_output = None
-    if runtime_filter != 'python' and not skip_c:
+    if runtime_filter != "python" and not skip_c:
         if compile_error:
             vm_error = compile_error
         else:
             try:
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.bc', delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".bc", delete=False
+                ) as f:
                     bc_file = f.name
                     f.write(bytecode)
 
                 # Extract and compile C imports
                 c_import_so_files = []
-                for line in bytecode.split('\n'):
-                    if line.startswith('# C import:'):
-                        c_file = line.split(':', 1)[1].strip()
+                for line in bytecode.split("\n"):
+                    if line.startswith("# C import:"):
+                        c_file = line.split(":", 1)[1].strip()
                         # Make C file path absolute relative to test file
                         test_dir = os.path.dirname(os.path.abspath(test_filename))
                         c_file_abs = os.path.join(test_dir, c_file)
 
                         # Compile to shared library
-                        shared_suffix = '.dll' if IS_WINDOWS else '.so'
-                        with tempfile.NamedTemporaryFile(mode='w', suffix=shared_suffix, delete=False) as so_f:
+                        shared_suffix = ".dll" if IS_WINDOWS else ".so"
+                        with tempfile.NamedTemporaryFile(
+                            mode="w", suffix=shared_suffix, delete=False
+                        ) as so_f:
                             so_file = so_f.name
                             c_import_so_files.append(so_file)
 
                         # Compile C file to shared library
                         compile_result = subprocess.run(
-                            ['gcc', '-fPIC', '-shared', '-o', so_file, c_file_abs],
+                            ["gcc", "-fPIC", "-shared", "-o", so_file, c_file_abs],
                             capture_output=True,
-                            text=True
+                            text=True,
                         )
                         if compile_result.returncode != 0:
-                            vm_error = f"Failed to compile {c_file}: {compile_result.stderr}"
+                            vm_error = (
+                                f"Failed to compile {c_file}: {compile_result.stderr}"
+                            )
                             break
 
                 # Try to find VM path
@@ -398,13 +445,15 @@ def main():
                 # Try new package location
                 try:
                     import importlib.util
-                    spec = importlib.util.find_spec('runtime')
+
+                    spec = importlib.util.find_spec("runtime")
                     if spec and spec.origin:
                         from pathlib import Path
+
                         runtime_pkg_path = Path(spec.origin).parent
-                        vm_candidates = [runtime_pkg_path / 'vm']
+                        vm_candidates = [runtime_pkg_path / "vm"]
                         if IS_WINDOWS:
-                            vm_candidates.insert(0, runtime_pkg_path / 'vm.exe')
+                            vm_candidates.insert(0, runtime_pkg_path / "vm.exe")
                         for vm_candidate in vm_candidates:
                             if vm_candidate.exists():
                                 vm_path = str(vm_candidate)
@@ -415,29 +464,29 @@ def main():
                 # Fall back to development locations
                 if not vm_path:
                     from pathlib import Path
-                    vm_candidates = [Path('runtime/vm')]
+
+                    vm_candidates = [Path("runtime/vm")]
                     if IS_WINDOWS:
-                        vm_candidates.insert(0, Path('runtime/vm.exe'))
+                        vm_candidates.insert(0, Path("runtime/vm.exe"))
                     for vm_candidate in vm_candidates:
                         if vm_candidate.exists():
                             vm_path = str(vm_candidate)
                             break
                     if not vm_path:
-                        vm_path = 'runtime/vm.exe' if IS_WINDOWS else 'runtime/vm'
+                        vm_path = "runtime/vm.exe" if IS_WINDOWS else "runtime/vm"
                 # Prepare debug info for VM
                 import json
-                debug_info = json.dumps({
-                    'file': test_filename,
-                    'source': code,
-                    'line_map': line_map
-                })
+
+                debug_info = json.dumps(
+                    {"file": test_filename, "source": code, "line_map": line_map}
+                )
 
                 # Build VM command with .so files
-                vm_command = [vm_path, '--debug-info', bc_file] + c_import_so_files
+                vm_command = [vm_path, "--debug-info", bc_file] + c_import_so_files
 
                 # Set FR_TEST_MODE=1 for test error format
                 env = os.environ.copy()
-                env['FR_TEST_MODE'] = '1'
+                env["FR_TEST_MODE"] = "1"
                 env = _prepend_python_base_to_path(env)
 
                 result = subprocess.run(
@@ -446,7 +495,7 @@ def main():
                     capture_output=True,
                     text=True,
                     timeout=5,
-                    env=env
+                    env=env,
                 )
 
                 os.unlink(bc_file)
@@ -461,13 +510,17 @@ def main():
                 vm_output = result.stdout.strip() if result.stdout else ""
 
                 if result.returncode != 0:
-                    stderr_text = result.stderr.strip() if result.stderr else f"VM exited with code {result.returncode}"
+                    stderr_text = (
+                        result.stderr.strip()
+                        if result.stderr
+                        else f"VM exited with code {result.returncode}"
+                    )
                     # Extract the error message from stderr
                     vm_error = extract_error_message(stderr_text)
 
                     # If there's an error in stderr (exception, runtime error), discard partial stdout
                     # to match Python runtime behavior where exceptions override partial output
-                    if (stderr_text and "Exception:" in stderr_text or not vm_output):
+                    if stderr_text and "Exception:" in stderr_text or not vm_output:
                         vm_output = None
 
             except subprocess.TimeoutExpired:
@@ -502,9 +555,9 @@ def main():
             try:
                 # Extract C imports from bytecode
                 c_import_files = []
-                for line in bytecode.split('\n'):
-                    if line.startswith('# C import:'):
-                        c_file = line.split(':', 1)[1].strip()
+                for line in bytecode.split("\n"):
+                    if line.startswith("# C import:"):
+                        c_file = line.split(":", 1)[1].strip()
                         # Make C file path absolute relative to test file
                         test_dir = os.path.dirname(os.path.abspath(test_filename))
                         c_file_abs = os.path.join(test_dir, c_file)
@@ -514,15 +567,17 @@ def main():
                 assembly = compile_native_ssa(bytecode, opt_level=2)
 
                 # Assemble via stdin without writing the assembly file
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.o', delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".o", delete=False
+                ) as f:
                     obj_file = f.name
 
                 asm_result = subprocess.run(
-                    ['as', '-o', obj_file, '-'],
+                    ["as", "-o", obj_file, "-"],
                     input=assembly,
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
                 )
 
                 if asm_result.returncode != 0:
@@ -530,7 +585,7 @@ def main():
                     native_output = None
                 else:
                     # Compile assembly and runtime to binary using gcc
-                    native_suffix = '.exe' if IS_WINDOWS else ''
+                    native_suffix = ".exe" if IS_WINDOWS else ""
                     fd, native_bin = tempfile.mkstemp(suffix=native_suffix)
                     os.close(fd)
                     # Ensure gcc can create/overwrite freely
@@ -539,26 +594,30 @@ def main():
                     except OSError:
                         pass
 
-                    compile_cmd = [
-                        'gcc',
-                        obj_file,
-                        runtime_obj,
-                        f'-I{RUNTIME_INCLUDE_DIR}',
-                        '-O3', '-march=native', '-mtune=native',
-                        '-ffunction-sections', '-fdata-sections',
-                        '-Wl,--gc-sections',
-                        '-o',
-                        native_bin,
-                    ] + c_import_files + [  # Add C import files to the command
-                        '-lm',
-                        '-no-pie',
-                    ]
+                    compile_cmd = (
+                        [
+                            "gcc",
+                            obj_file,
+                            runtime_obj,
+                            f"-I{RUNTIME_INCLUDE_DIR}",
+                            "-O3",
+                            "-march=native",
+                            "-mtune=native",
+                            "-ffunction-sections",
+                            "-fdata-sections",
+                            "-Wl,--gc-sections",
+                            "-o",
+                            native_bin,
+                        ]
+                        + c_import_files
+                        + [  # Add C import files to the command
+                            "-lm",
+                            "-no-pie",
+                        ]
+                    )
 
                     result = subprocess.run(
-                        compile_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=10
+                        compile_cmd, capture_output=True, text=True, timeout=10
                     )
 
                     if result.returncode != 0:
@@ -566,14 +625,14 @@ def main():
                         native_output = None
                     else:
                         env = os.environ.copy()
-                        env['FR_TEST_MODE'] = '1'
+                        env["FR_TEST_MODE"] = "1"
 
                         result = subprocess.run(
                             [native_bin],
                             capture_output=True,
                             text=True,
                             timeout=5,
-                            env=env
+                            env=env,
                         )
 
                         native_output = result.stdout.strip() if result.stdout else ""
@@ -581,11 +640,22 @@ def main():
                         if result.returncode != 0:
                             if result.returncode < 0:
                                 signal_num = -result.returncode
-                                signal_names = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL", 15: "SIGTERM"}
-                                signal_name = signal_names.get(signal_num, f"SIGNAL{signal_num}")
+                                signal_names = {
+                                    11: "SIGSEGV",
+                                    6: "SIGABRT",
+                                    9: "SIGKILL",
+                                    15: "SIGTERM",
+                                }
+                                signal_name = signal_names.get(
+                                    signal_num, f"SIGNAL{signal_num}"
+                                )
                                 stderr_text = f"Binary crashed: {signal_name} (exit code {result.returncode})"
                             else:
-                                stderr_text = result.stderr.strip() if result.stderr else f"Binary exited with code {result.returncode}"
+                                stderr_text = (
+                                    result.stderr.strip()
+                                    if result.stderr
+                                    else f"Binary exited with code {result.returncode}"
+                                )
                             native_error = extract_error_message(stderr_text)
 
                             if stderr_text and not native_output:
@@ -610,25 +680,37 @@ def main():
 
     # Run Wasm emission command (unless skipped)
     from pathlib import Path as _Path
+
     wasm_error = None
     wasm_output = None
     if skip_wasm:
         wasm_error = "SKIPPED"
     else:
-        wasm_dir = tempfile.mkdtemp(prefix='fr-wasm-')
+        wasm_dir = tempfile.mkdtemp(prefix="fr-wasm-")
         os.makedirs(wasm_dir, exist_ok=True)
-        wasm_dest = _Path(wasm_dir) / 'output.wasm'
+        wasm_dest = _Path(wasm_dir) / "output.wasm"
         repo_root = _Path(__file__).parent.parent
         wasm_input = _Path(test_filename)
         if not wasm_input.is_absolute():
             wasm_input = (repo_root / wasm_input).resolve()
 
         # Use -d to keep .wat/.wasm.json so we can detect toolchain limitations.
-        wasm_command = [sys.executable, '-m', 'src.cli', 'wasm', str(wasm_input), '-d', '-o', str(wasm_dest)]
+        wasm_command = [
+            sys.executable,
+            "-m",
+            "src.cli",
+            "wasm",
+            str(wasm_input),
+            "-d",
+            "-o",
+            str(wasm_dest),
+        ]
         try:
             # Compile to WASM
             env = os.environ.copy()
-            env['PYTHONPATH'] = str(repo_root) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+            env["PYTHONPATH"] = str(repo_root) + (
+                os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+            )
             result = subprocess.run(
                 wasm_command,
                 capture_output=True,
@@ -638,18 +720,18 @@ def main():
                 env=env,
             )
             if result.returncode != 0:
-                stderr_text = (result.stderr or '').strip()
-                stdout_text = (result.stdout or '').strip()
+                stderr_text = (result.stderr or "").strip()
+                stdout_text = (result.stdout or "").strip()
                 combined = (stderr_text + "\n" + stdout_text).strip()
 
                 # Only skip when the backend explicitly cannot support the test semantics.
                 # Missing toolchain (wat2wasm) should be a hard failure so WASM isn't silently skipped.
                 unsupported_markers = [
-                    'Wasm backend requires typed functions',
-                    'Wasm backend does not support C imports',
+                    "Wasm backend requires typed functions",
+                    "Wasm backend does not support C imports",
                 ]
                 if any(marker in combined for marker in unsupported_markers):
-                    wasm_error = 'SKIPPED'
+                    wasm_error = "SKIPPED"
                 else:
                     wasm_error = extract_error_message(combined)
             else:
@@ -658,26 +740,36 @@ def main():
                 if wasm_dest.exists():
                     # Try to run with fr-wasm runner
                     runner_candidates = [
-                        repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm',
-                        repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm',
+                        repo_root / "runtime" / "target" / "release" / "fr-wasm",
+                        repo_root / "runtime" / "target" / "debug" / "fr-wasm",
                     ]
                     if IS_WINDOWS:
                         runner_candidates = [
-                            repo_root / 'runtime' / 'target' / 'release' / 'fr-wasm.exe',
-                            repo_root / 'runtime' / 'target' / 'debug' / 'fr-wasm.exe',
+                            repo_root
+                            / "runtime"
+                            / "target"
+                            / "release"
+                            / "fr-wasm.exe",
+                            repo_root / "runtime" / "target" / "debug" / "fr-wasm.exe",
                         ] + runner_candidates
 
-                    runner_path = next((p for p in runner_candidates if p.exists()), None)
+                    runner_path = next(
+                        (p for p in runner_candidates if p.exists()), None
+                    )
                     if runner_path is not None:
                         run_result = subprocess.run(
                             [str(runner_path), str(wasm_dest)],
                             capture_output=True,
                             text=True,
                             timeout=10,
-                            cwd=str(repo_root)
+                            cwd=str(repo_root),
                         )
                         if run_result.returncode != 0:
-                            stderr_text = run_result.stderr.strip() if run_result.stderr else run_result.stdout.strip()
+                            stderr_text = (
+                                run_result.stderr.strip()
+                                if run_result.stderr
+                                else run_result.stdout.strip()
+                            )
                             wasm_error = extract_error_message(stderr_text)
                         else:
                             wasm_output = run_result.stdout.strip()
@@ -689,7 +781,10 @@ def main():
                     stderr_text = result.stderr.strip() if result.stderr else ""
                     stdout_text = result.stdout.strip() if result.stdout else ""
                     combined_output = (stderr_text + "\n" + stdout_text).strip()
-                    wasm_error = extract_error_message(combined_output) or "WASM file not generated"
+                    wasm_error = (
+                        extract_error_message(combined_output)
+                        or "WASM file not generated"
+                    )
 
         except subprocess.TimeoutExpired:
             wasm_error = "Timeout"
@@ -702,14 +797,18 @@ def main():
     if py_error and py_error != "SKIPPED":
         print(f"PY_ERROR:{py_error}")
     elif py_error != "SKIPPED":
-        escaped_py = py_output.replace('\\', '\\\\').replace('\n', '\\n') if py_output is not None else ''
+        escaped_py = (
+            py_output.replace("\\", "\\\\").replace("\n", "\\n")
+            if py_output is not None
+            else ""
+        )
         print(f"PY_OUTPUT:{escaped_py}")
     # Don't output PY results if skipped
 
     # For VM: prioritize output over error if we have valid output
     # EXCEPT for error tests (expect starts with ?), where we prefer stderr
     # This handles cases where program outputs correctly but crashes during cleanup
-    is_error_test = expect.startswith('?')
+    is_error_test = expect.startswith("?")
     if vm_error == "SKIPPED":
         # Don't output VM results if skipped
         pass
@@ -719,7 +818,7 @@ def main():
     elif vm_output is not None:
         # Has output (could be empty string)
         # Escape newlines so multiline output is on one line
-        escaped_output = vm_output.replace('\\', '\\\\').replace('\n', '\\n')
+        escaped_output = vm_output.replace("\\", "\\\\").replace("\n", "\\n")
         print(f"VM_OUTPUT:{escaped_output}")
     elif vm_error:
         # Has error and no output
@@ -730,7 +829,7 @@ def main():
 
     # For native: prioritize output over error if we have valid output
     # EXCEPT for error tests (expect starts with ?), where we prefer stderr
-    is_error_test = expect.startswith('?')
+    is_error_test = expect.startswith("?")
     if native_error == "SKIPPED":
         # Don't output native results if skipped
         pass
@@ -740,7 +839,7 @@ def main():
     elif native_output is not None:
         # Has output (could be empty string)
         # Escape newlines so multiline output is on one line
-        escaped_output = native_output.replace('\\', '\\\\').replace('\n', '\\n')
+        escaped_output = native_output.replace("\\", "\\\\").replace("\n", "\\n")
         print(f"NATIVE_OUTPUT:{escaped_output}")
     elif native_error:
         # Has error and no output
@@ -753,18 +852,23 @@ def main():
     if wasm_error:
         print(f"WASM_ERROR:{wasm_error}")
     else:
-        escaped_wasm = wasm_output.replace('\\', '\\\\').replace('\n', '\\n') if wasm_output is not None else ''
+        escaped_wasm = (
+            wasm_output.replace("\\", "\\\\").replace("\n", "\\n")
+            if wasm_output is not None
+            else ""
+        )
         print(f"WASM_OUTPUT:{escaped_wasm}")
 
-    escaped_expect = expect.replace('\\', '\\\\').replace('\n', '\\n')
+    escaped_expect = expect.replace("\\", "\\\\").replace("\n", "\\n")
     print(f"EXPECT:{escaped_expect}")
     escaped_alts = []
     for alt in expect_alternatives:
-        escaped = alt.replace('\\', '\\\\').replace('\n', '\\n')
+        escaped = alt.replace("\\", "\\\\").replace("\n", "\\n")
         escaped_alts.append(escaped)
     print(f"EXPECT_ALTERNATIVES:{'||'.join(escaped_alts)}")
     print(f"IS_OUTPUT:{is_output_test}")
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     sys.exit(main())

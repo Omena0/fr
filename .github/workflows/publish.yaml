@@ -2,21 +2,21 @@ name: Publish
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - 'src/**'
-      - 'cases/**'
-      - 'runtime/**'
-      - 'requirements.txt'
-      - 'setup.py'
+      - "src/**"
+      - "cases/**"
+      - "runtime/**"
+      - "requirements.txt"
+      - "setup.py"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 1.0.0) - leave empty to use commit message'
+        description: "Version to publish (e.g., 1.0.0) - leave empty to use commit message"
         required: false
         type: string
       reason:
-        description: 'Reason for manual run'
+        description: "Reason for manual run"
         required: false
         type: string
 
@@ -30,84 +30,84 @@ jobs:
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
       version: ${{ steps.check.outputs.version }}
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: Check if new version
-      id: check
-      run: |
-        # Check if manually triggered with a version
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
-          INPUT_VERSION="${{ inputs.version }}"
-          
-          # Convert short format (e.g. "10A") to semver (e.g. "10.0.0")
-          if [[ $INPUT_VERSION =~ ^([0-9]+)([A-Z])$ ]]; then
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if new version
+        id: check
+        run: |
+          # Check if manually triggered with a version
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+            INPUT_VERSION="${{ inputs.version }}"
+            
+            # Convert short format (e.g. "10A") to semver (e.g. "10.0.0")
+            if [[ $INPUT_VERSION =~ ^([0-9]+)([A-Z])$ ]]; then
+              MAJOR="${BASH_REMATCH[1]}"
+              MINOR_LETTER="${BASH_REMATCH[2]}"
+              MINOR=$(($(printf '%d' "'${MINOR_LETTER}") - 65))
+              VERSION="${MAJOR}.${MINOR}.0"
+            else
+              VERSION="$INPUT_VERSION"
+            fi
+            
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "✅ Manual run with version: $VERSION (input: $INPUT_VERSION)"
+            exit 0
+          fi
+
+          # Get the latest commit message
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+
+          # Check if commit message matches version pattern (e.g., "1A - message")
+          if [[ $COMMIT_MSG =~ ^([0-9]+)([A-Z])\ -\ .+ ]]; then
             MAJOR="${BASH_REMATCH[1]}"
             MINOR_LETTER="${BASH_REMATCH[2]}"
+            
+            # Convert letter to number (A=0, B=1, C=2, etc.)
             MINOR=$(($(printf '%d' "'${MINOR_LETTER}") - 65))
+            
+            # Create semantic version
             VERSION="${MAJOR}.${MINOR}.0"
+            
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "✅ New version detected: $VERSION (from commit: $COMMIT_MSG)"
           else
-            VERSION="$INPUT_VERSION"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "version=0.0.0" >> $GITHUB_OUTPUT
+            echo "ℹ️  No version tag in commit message. Skipping publish."
+            echo "   Expected format: '<MAJOR><LETTER> - <message>' (e.g., '1A - Initial release')"
           fi
-          
-          echo "should_publish=true" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Manual run with version: $VERSION (input: $INPUT_VERSION)"
-          exit 0
-        fi
-        
-        # Get the latest commit message
-        COMMIT_MSG=$(git log -1 --pretty=%B)
-        
-        # Check if commit message matches version pattern (e.g., "1A - message")
-        if [[ $COMMIT_MSG =~ ^([0-9]+)([A-Z])\ -\ .+ ]]; then
-          MAJOR="${BASH_REMATCH[1]}"
-          MINOR_LETTER="${BASH_REMATCH[2]}"
-          
-          # Convert letter to number (A=0, B=1, C=2, etc.)
-          MINOR=$(($(printf '%d' "'${MINOR_LETTER}") - 65))
-          
-          # Create semantic version
-          VERSION="${MAJOR}.${MINOR}.0"
-          
-          echo "should_publish=true" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ New version detected: $VERSION (from commit: $COMMIT_MSG)"
-        else
-          echo "should_publish=false" >> $GITHUB_OUTPUT
-          echo "version=0.0.0" >> $GITHUB_OUTPUT
-          echo "ℹ️  No version tag in commit message. Skipping publish."
-          echo "   Expected format: '<MAJOR><LETTER> - <message>' (e.g., '1A - Initial release')"
-        fi
 
   test:
     needs: check-version
     if: needs.check-version.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13.7'
-        cache: 'pip'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Build C runtime
-      run: |
-        cd runtime
-        make
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build C runtime
+        run: |
+          cd runtime
+          make
 
   publish:
     needs: [check-version, test]
@@ -116,52 +116,52 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/p/frscript
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13.7'
-        cache: 'pip'
-    
-    - name: Install build dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build twine
-    
-    - name: Set git version tag
-      env:
-        VERSION: ${{ needs.check-version.outputs.version }}
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git tag -a "v$VERSION" -m "Release version $VERSION" --force
-        echo "Created tag v$VERSION on current commit"
-        git describe --tags
-    
-    - name: Build package
-      env:
-        PACKAGE_VERSION: ${{ needs.check-version.outputs.version }}
-        SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.check-version.outputs.version }}
-      run: |
-        echo "Building version $PACKAGE_VERSION"
-        python -m build
-        
-        # Verify the built version matches expected version
-        BUILT_VERSION=$(ls dist/*.whl | grep -oP 'frscript-\K[^-]+' | head -1)
-        echo "Built version: $BUILT_VERSION"
-        echo "Expected version: $PACKAGE_VERSION"
-        
-        if [[ "$BUILT_VERSION" != "$PACKAGE_VERSION" ]]; then
-          echo "::error::Version mismatch! Built: $BUILT_VERSION, Expected: $PACKAGE_VERSION"
-          exit 1
-        fi
-    
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        skip-existing: true
-        verbose: true
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+          cache: "pip"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Set git version tag
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "Release version $VERSION" --force
+          echo "Created tag v$VERSION on current commit"
+          git describe --tags
+
+      - name: Build package
+        env:
+          PACKAGE_VERSION: ${{ needs.check-version.outputs.version }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          echo "Building version $PACKAGE_VERSION"
+          python -m build
+
+          # Verify the built version matches expected version
+          BUILT_VERSION=$(ls dist/*.whl | grep -oP 'frscript-\K[^-]+' | head -1)
+          echo "Built version: $BUILT_VERSION"
+          echo "Expected version: $PACKAGE_VERSION"
+
+          if [[ "$BUILT_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "::error::Version mismatch! Built: $BUILT_VERSION, Expected: $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          verbose: true

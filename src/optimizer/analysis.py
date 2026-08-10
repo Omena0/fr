@@ -6,15 +6,22 @@ Provides:
 - Loop detection (natural loops via back edges)
 - Def-use chains (already implicit in Value.uses)
 """
+
 from __future__ import annotations
 from collections import defaultdict
 from optimizer.ir import (
-    Module, Function, BasicBlock, Instruction, Value, Op,
-    TERMINATOR_OPS, SIDE_EFFECT_OPS,
+    Module,
+    Function,
+    BasicBlock,
+    Instruction,
+    Value,
+    Op,
+    TERMINATOR_OPS,
+    SIDE_EFFECT_OPS,
 )
 
-
 # ── Dominator Tree ──────────────────────────────────────────────
+
 
 class DomTree:
     """Dominator tree for a function's CFG.
@@ -111,6 +118,7 @@ class DomTree:
 
 # ── Liveness Analysis ───────────────────────────────────────────
 
+
 class LivenessInfo:
     """Backward liveness analysis.
 
@@ -176,10 +184,19 @@ class LivenessInfo:
 
 # ── Live Intervals (for register allocation) ───────────────────
 
+
 class LiveInterval:
     """Live interval for a single SSA value."""
-    __slots__ = ('value', 'start', 'end', 'reg', 'spill_slot', 'crosses_call',
-                 'forbidden_regs')
+
+    __slots__ = (
+        "value",
+        "start",
+        "end",
+        "reg",
+        "spill_slot",
+        "crosses_call",
+        "forbidden_regs",
+    )
 
     def __init__(self, value: Value, start: int, end: int):
         self.value = value
@@ -194,9 +211,9 @@ class LiveInterval:
         return self.start < other.end and other.start < self.end
 
     def __repr__(self):
-        reg = f' -> {self.reg}' if self.reg else ''
-        spill = f' [spill:{self.spill_slot}]' if self.spill_slot is not None else ''
-        return f'Interval({self.value}, [{self.start}, {self.end}){reg}{spill})'
+        reg = f" -> {self.reg}" if self.reg else ""
+        spill = f" [spill:{self.spill_slot}]" if self.spill_slot is not None else ""
+        return f"Interval({self.value}, [{self.start}, {self.end}){reg}{spill})"
 
 
 def compute_live_intervals(func: Function) -> list[LiveInterval]:
@@ -221,23 +238,44 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
         block_start[block.label] = inst_num
         for inst in block.instructions:
             # Track call instruction positions — includes ALL ops that emit runtime calls
-            if inst.op in (Op.CALL, Op.CALL_EXTERN, Op.CALL_BUILTIN,
-                           Op.PRINT, Op.PRINTLN, Op.INPUT,
-                           Op.ALLOC_LIST, Op.LIST_GET, Op.LIST_SET,
-                           Op.LIST_APPEND, Op.LIST_LEN,
-                           Op.ALLOC_STRUCT, Op.STR_CONCAT, Op.TO_STR,
-                           Op.TO_BOOL,
-                           Op.SQRT, Op.SIN, Op.COS, Op.TAN, Op.ABS,
-                           Op.FLOOR, Op.CEIL, Op.ROUND, Op.POW,
-                           Op.MIN, Op.MAX,
-                           Op.TRY_BEGIN, Op.TRY_END, Op.RAISE):
+            if inst.op in (
+                Op.CALL,
+                Op.CALL_EXTERN,
+                Op.CALL_BUILTIN,
+                Op.PRINT,
+                Op.PRINTLN,
+                Op.INPUT,
+                Op.ALLOC_LIST,
+                Op.LIST_GET,
+                Op.LIST_SET,
+                Op.LIST_APPEND,
+                Op.LIST_LEN,
+                Op.ALLOC_STRUCT,
+                Op.STR_CONCAT,
+                Op.TO_STR,
+                Op.TO_BOOL,
+                Op.SQRT,
+                Op.SIN,
+                Op.COS,
+                Op.TAN,
+                Op.ABS,
+                Op.FLOOR,
+                Op.CEIL,
+                Op.ROUND,
+                Op.POW,
+                Op.MIN,
+                Op.MAX,
+                Op.TRY_BEGIN,
+                Op.TRY_END,
+                Op.RAISE,
+            ):
                 call_points.append(inst_num)
 
             # Track implicit register clobbers
             if inst.op in (Op.DIV, Op.MOD):
-                clobber_points.append((inst_num, {'rax', 'rdx'}))
+                clobber_points.append((inst_num, {"rax", "rdx"}))
             elif inst.op in (Op.SHL, Op.SHR):
-                clobber_points.append((inst_num, {'rcx'}))
+                clobber_points.append((inst_num, {"rcx"}))
 
             # Record definition point
             if inst.result is not None:
@@ -258,7 +296,10 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
     # through the entire loop (to the end of the tail block).
     for block in func.blocks:
         for succ in block.successors:
-            if succ.label in block_start and block_start[succ.label] < block_start[block.label]:
+            if (
+                succ.label in block_start
+                and block_start[succ.label] < block_start[block.label]
+            ):
                 # Back edge: block → succ (succ is the loop header)
                 tail_end = block_end[block.label]
                 header_start = block_start[succ.label]
@@ -301,9 +342,11 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
 
 # ── Loop Detection ──────────────────────────────────────────────
 
+
 class Loop:
     """A natural loop in the CFG."""
-    __slots__ = ('header', 'blocks', 'back_edges', 'exits', 'depth')
+
+    __slots__ = ("header", "blocks", "back_edges", "exits", "depth")
 
     def __init__(self, header: BasicBlock):
         self.header = header
@@ -316,7 +359,7 @@ class Loop:
         return block in self.blocks
 
     def __repr__(self):
-        return f'Loop(header={self.header.label}, depth={self.depth}, blocks={len(self.blocks)})'
+        return f"Loop(header={self.header.label}, depth={self.depth}, blocks={len(self.blocks)})"
 
 
 class LoopInfo:
@@ -401,10 +444,11 @@ class LoopInfo:
 
 # ── Alias Analysis (simple) ─────────────────────────────────────
 
+
 class AliasResult:
-    NO_ALIAS = 0       # Definitely different memory
-    MAY_ALIAS = 1      # Unknown
-    MUST_ALIAS = 2     # Definitely same memory
+    NO_ALIAS = 0  # Definitely different memory
+    MAY_ALIAS = 1  # Unknown
+    MUST_ALIAS = 2  # Definitely same memory
 
 
 def alias_query(a: Instruction, b: Instruction) -> int:
@@ -414,8 +458,10 @@ def alias_query(a: Instruction, b: Instruction) -> int:
     very precise: fields of different struct types never alias.
     """
     # Different operations entirely
-    if a.op not in (Op.LOAD_FIELD, Op.STORE_FIELD) or \
-       b.op not in (Op.LOAD_FIELD, Op.STORE_FIELD):
+    if a.op not in (Op.LOAD_FIELD, Op.STORE_FIELD) or b.op not in (
+        Op.LOAD_FIELD,
+        Op.STORE_FIELD,
+    ):
         return AliasResult.NO_ALIAS
 
     # Different base structs → no alias
@@ -443,6 +489,7 @@ def alias_query(a: Instruction, b: Instruction) -> int:
 
 
 # ── Combined analysis runner ────────────────────────────────────
+
 
 class FunctionAnalysis:
     """Run all analyses for a function."""

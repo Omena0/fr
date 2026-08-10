@@ -4,7 +4,7 @@
 # Re-export BytecodeOptimizer so existing `from optimizer import BytecodeOptimizer` works
 from .bytecode_opt import BytecodeOptimizer
 
-__all__ = ['BytecodeOptimizer', 'compile_native_ssa']
+__all__ = ["BytecodeOptimizer", "compile_native_ssa"]
 
 
 def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
@@ -37,6 +37,7 @@ def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
     if opt_level >= 3:
         try:
             from .synthesis import synthesis_pass
+
             synthesis_pass(module)
         except ImportError:
             pass  # z3 not installed, skip
