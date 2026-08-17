@@ -527,9 +527,11 @@ a RETURN instruction will return to this point with a value on the stack.
 
 Call a function.
 
-**Syntax:** `CALL <function_name>`
+**Syntax:** `CALL <function_name> <arg_count> [<type_sig>]`
 
 **Stack:** `arg1 arg2 ... -> return_value`
+
+**Description:** Calls a function with `<arg_count>` arguments on the stack. For C functions, an optional `<type_sig>` specifies parameter and return types (e.g., `"ii|i"` for two int params returning int).
 
 ### RETURN
 
@@ -669,8 +671,58 @@ Pop the last element from a list.
 
 **Stack:** `list -> value`
 
----
 
+### LIST_NEW_I64
+
+Create a new list pre-populated with integer values.
+
+**Syntax:** `LIST_NEW_I64 <count> <val1> <val2> ...`
+
+**Stack:** `-> list`
+
+**Description:** Creates a list containing `<count>` integer values. This is more efficient than creating an empty list and appending values one by one.
+
+### LIST_NEW_F64
+
+Create a new list pre-populated with float values.
+
+**Syntax:** `LIST_NEW_F64 <count> <val1> <val2> ...`
+
+**Stack:** `-> list`
+
+**Description:** Creates a list containing `<count>` float values.
+
+### LIST_NEW_STR
+
+Create a new list pre-populated with string values.
+
+**Syntax:** `LIST_NEW_STR <count> "<val1>" "<val2>" ...`
+
+**Stack:** `-> list`
+
+**Description:** Creates a list containing `<count>` string values.
+
+### LIST_NEW_BOOL
+
+Create a new list pre-populated with boolean values.
+
+**Syntax:** `LIST_NEW_BOOL <count> <val1> <val2> ...`
+
+**Stack:** `-> list`
+
+**Description:** Creates a list containing `<count>` boolean values.
+
+### LIST_NEW_STACK
+
+Create a new list from values currently on the stack.
+
+**Syntax:** `LIST_NEW_STACK <count>`
+
+**Stack:** `value1 value2 ... -> list`
+
+**Description:** Pops `<count>` values from the stack and creates a list containing them in order (bottom of stack becomes first element).
+
+---
 ## Set Operations
 
 ### SET_NEW
@@ -1207,10 +1259,18 @@ Exit the program with a specific exit code.
 
 - `code`: Exit code (int, 0 means success, non-zero indicates error)
 
-**Note:** This terminates the program immediately.
+
+### GETPID
+
+Get the current process ID.
+
+**Syntax:** `GETPID`
+
+**Stack:** `-> pid`
+
+**Returns:** The process ID of the current process as an integer.
 
 ---
-
 ## Socket Operations
 
 ### SOCKET_CREATE
@@ -1551,6 +1611,94 @@ Bitwise XOR with a constant.
 
 **Stack:** `int64 -> int64`
 
+### ADD_CONST_I64_MULTI
+
+Add multiple integer constants to the top of the stack in sequence.
+
+**Syntax:** `ADD_CONST_I64_MULTI <val1> <val2> ...`
+
+**Stack:** `int64 -> int64`
+
+### ADD_CONST_F64
+
+Add a float constant to the top of the stack.
+
+**Syntax:** `ADD_CONST_F64 <constant>`
+
+**Stack:** `float64 -> float64`
+
+### SUB_CONST_F64
+
+Subtract a float constant from the top of the stack.
+
+**Syntax:** `SUB_CONST_F64 <constant>`
+
+**Stack:** `float64 -> float64`
+
+### MUL_CONST_F64
+
+Multiply the top of the stack by a float constant.
+
+**Syntax:** `MUL_CONST_F64 <constant>`
+
+**Stack:** `float64 -> float64`
+
+### DIV_CONST_F64
+
+Divide the top of the stack by a float constant.
+
+**Syntax:** `DIV_CONST_F64 <constant>`
+
+**Stack:** `float64 -> float64`
+
+### CMP_LT_CONST_F64
+
+Compare the top of the stack with a float constant (less than).
+
+**Syntax:** `CMP_LT_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
+### CMP_GT_CONST_F64
+
+Compare the top of the stack with a float constant (greater than).
+
+**Syntax:** `CMP_GT_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
+### CMP_LE_CONST_F64
+
+Compare the top of the stack with a float constant (less than or equal).
+
+**Syntax:** `CMP_LE_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
+### CMP_GE_CONST_F64
+
+Compare the top of the stack with a float constant (greater than or equal).
+
+**Syntax:** `CMP_GE_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
+### CMP_EQ_CONST_F64
+
+Compare the top of the stack with a float constant (equal).
+
+**Syntax:** `CMP_EQ_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
+### CMP_NE_CONST_F64
+
+Compare the top of the stack with a float constant (not equal).
+
+**Syntax:** `CMP_NE_CONST_F64 <constant>`
+
+**Stack:** `float64 -> bool`
+
 ### LOAD2_ADD_I64
 
 Fused load two variables and add them (combines LOAD, LOAD, ADD_I64).
@@ -1590,6 +1738,38 @@ Fused load two variables and multiply them as floats (combines LOAD, LOAD, MUL_F
 **Syntax:** `LOAD2_MUL_F64 <var1> <var2>`
 
 **Stack:** `-> float64`
+
+### LOAD2_ADD_F64
+
+Fused load two variables and add them as floats (combines LOAD, LOAD, ADD_F64).
+
+**Syntax:** `LOAD2_ADD_F64 <var1> <var2>`
+
+**Stack:** `-> float64`
+
+### LOAD2_SUB_F64
+
+Fused load two variables and subtract them as floats (combines LOAD, LOAD, SUB_F64).
+
+**Syntax:** `LOAD2_SUB_F64 <var1> <var2>`
+
+**Stack:** `-> float64`
+
+### LOAD2_DIV_F64
+
+Fused load two variables and divide them as floats (combines LOAD, LOAD, DIV_F64).
+
+**Syntax:** `LOAD2_DIV_F64 <var1> <var2>`
+
+**Stack:** `-> float64`
+
+### LOAD2_DIV_I64
+
+Fused load two variables and divide them (combines LOAD, LOAD, DIV_I64).
+
+**Syntax:** `LOAD2_DIV_I64 <var1> <var2>`
+
+**Stack:** `-> int64`
 
 ### LOAD2_CMP_LT
 
@@ -1641,6 +1821,21 @@ Fused load two variables and compare inequality (combines LOAD, LOAD, CMP_NE).
 
 ---
 
+
+---
+## Switch Instructions
+
+### SWITCH_JUMP_TABLE
+
+Jump table for dense integer switch statements. Provides O(1) dispatch for switch cases with integer values.
+
+**Syntax:** `SWITCH_JUMP_TABLE <min> <max> <label1> <label2> ... <labelN> <default_label>`
+
+**Stack:** `int64 ->`
+
+**Description:** Pops an integer value from the stack and jumps to the corresponding case label if the value is within the range `[min, max]`. If the value is outside the range, jumps to the default label. The labels are resolved at load time.
+
+---
 ## Directives
 
 These are not executable instructions but are used during bytecode parsing to define program structure.

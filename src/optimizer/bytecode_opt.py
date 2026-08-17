@@ -63,6 +63,9 @@ class BytecodeOptimizer:
         # Pass 12: Constant folding
         lines = self._apply_pass_preserve_lines(lines, self.constant_folding)
 
+        # Pass 12.5: Optimize NOT + conditional jump patterns
+        lines = self._apply_pass_with_lines(lines, self.optimize_not_jumps)
+
         # Pass 13: Fuse repeated arithmetic+store blocks with differing operands
         lines = self._apply_pass_preserve_lines(lines, self.fuse_repeated_arith_store)
 
@@ -103,9 +106,7 @@ class BytecodeOptimizer:
                 return True
             if op in {'TRY_BEGIN', 'TRY_END', 'RAISE'}:
                 return True
-            if op.startswith('SWITCH_'):
-                return True
-            return False
+            return bool(op.startswith('SWITCH_'))
 
         result: List[str] = []
         pending_line: Optional[str] = None
@@ -709,8 +710,7 @@ class BytecodeOptimizer:
                     var2 = next_line.split()[1]
                     if var1 == var2:
                         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
-                        result.append(f"{indent}DUP")
-                        result.append(lines[i])
+                        result.extend((f"{indent}DUP", lines[i]))
                         i += 2
                         continue
 
@@ -1605,6 +1605,37 @@ class BytecodeOptimizer:
                 result.append(f"{indent}LOAD2_CMP_EQ {args}")
                 i += 2
                 continue
+
+            result.append(lines[i])
+            i += 1
+
+        return result
+
+    def optimize_not_jumps(self, lines: List[str]) -> List[str]:
+        """Convert NOT + conditional jump to the opposite conditional jump.
+
+        NOT; JUMP_IF_FALSE L  ->  JUMP_IF_TRUE L
+        NOT; JUMP_IF_TRUE L   ->  JUMP_IF_FALSE L
+        """
+        result: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
+
+            if line == 'NOT' and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line.startswith('JUMP_IF_FALSE '):
+                    label = next_line.split()[1]
+                    result.append(f"{indent}JUMP_IF_TRUE {label}")
+                    i += 2
+                    continue
+                elif next_line.startswith('JUMP_IF_TRUE '):
+                    label = next_line.split()[1]
+                    result.append(f"{indent}JUMP_IF_FALSE {label}")
+                    i += 2
+                    continue
 
             result.append(lines[i])
             i += 1

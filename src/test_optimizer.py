@@ -255,6 +255,36 @@ def test_fuse_get_store_load_single_not_fused():
     assert len(fused) == 0, f"Single pair should not be fused: {result}"
 
 
+def test_optimize_not_jumps():
+    """NOT + JUMP_IF_FALSE should become JUMP_IF_TRUE and vice versa."""
+    optimizer = BytecodeOptimizer()
+
+    lines = [
+        "  NOT",
+        "  JUMP_IF_FALSE L1",
+        "  CONST_I64 1",
+    ]
+    result = optimizer.optimize_not_jumps(lines)
+    assert result[0].strip() == "JUMP_IF_TRUE L1", f"Expected JUMP_IF_TRUE, got {result[0]}"
+    assert "NOT" not in [l.strip() for l in result], "NOT should be removed"
+
+    lines2 = [
+        "  NOT",
+        "  JUMP_IF_TRUE L1",
+        "  CONST_I64 1",
+    ]
+    result2 = optimizer.optimize_not_jumps(lines2)
+    assert result2[0].strip() == "JUMP_IF_FALSE L1", f"Expected JUMP_IF_FALSE, got {result2[0]}"
+
+    lines3 = [
+        "  NOT",
+        "  JUMP L1",
+    ]
+    result3 = optimizer.optimize_not_jumps(lines3)
+    assert result3[0].strip() == "NOT", "NOT should be preserved for non-conditional jumps"
+    assert result3[1].strip() == "JUMP L1", "JUMP should be preserved"
+
+
 # ============================================================
 # Run all tests
 # ============================================================

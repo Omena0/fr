@@ -659,8 +659,7 @@ def wasm_cmd(args):
                 # Print WAT content around error line
                 try:
                     import re
-                    match = re.search(r':(\d+):(\d+):', result.stderr)
-                    if match:
+                    if match := re.search(r':(\d+):(\d+):', result.stderr):
                         line_num = int(match.group(1))
                         with open(wat_path, 'r') as f:
                             lines = f.readlines()
@@ -753,9 +752,10 @@ def main():
         print("Fr - Fast bytecode-compiled language")
         print()
         print("Usage:")
-        print("  fr <.fr|.bc|.bin|.wasm> [-c] [-py|--python]")
+        print("  fr <.fr|.bc|.bin|.wasm> [-c] [-py|--python] [-O]")
         print("                                    -c: Force C runtime")
         print("                                   -py: Force Python runtime")
+        print("                                    -O: Enable bytecode optimization")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file> [-o out.bc] - Compile to bytecode")
         print("  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary")
