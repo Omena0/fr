@@ -10,3 +10,28 @@ Fixed WASM compiler SWITCH_JUMP_TABLE type inference crashes.
 Fixed Python runtime division-by-zero behavior so try/except "ZeroDivisionError" works and errors format consistently in tests.
 Fixed native exception and runtime-error calls to use aligned external calls, including setjmp, list bounds checks, and zero-division slow paths.
 Implemented new optimizer and IR pipeline
+
+Native no-libc runtime implementation:
+- Created runtime/syscall.S with assembly wrappers for Linux syscalls (syscall1, syscall3, syscall6)
+- Created runtime/fr_rt.c as a minimal runtime replacing libc with direct syscalls (write, exit, mmap)
+- Added init_heap using mmap for bump allocation
+- Implemented basic string/memory functions: strlen, memcpy, memset, memcmp, strcpy, strcat, strchr, strstr
+- Implemented I/O: fr_putchar, fr_puts, fr_fputs, fr_fflush, fr_printf (minimal), fr_exit
+- Implemented math: fabs, sqrt, floor
+- Added malloc/free wrappers around mmap heap
+- Implemented runtime_error_at, runtime_exception_raise_at with ?line,0:message format
+- Implemented runtime_list_get_int_at and runtime_list_set_int_at with Python-style negative index support and bounds checking
+- Implemented runtime_list_from_array for list literals
+- Implemented runtime_assert for assert statements
+- Fixed int64_to_str to copy result from temp buffer to output buffer
+- Fixed SIDE_EFFECT_OPS in optimizer/ir.py to include ALLOC_LIST, LIST_GET, LIST_LEN so DCE doesn't remove them
+- Updated codegen.py LIST_GET/LIST_SET to emit direct calls to runtime_list_get_int_at/runtime_list_set_int_at with line numbers instead of using generic runtime_list_get_int
+- Updated src/cli.py to compile syscall.S to object file and link it with fr_rt.c
+- Added -nostartfiles to linker flags in cli.py
+- Updated src/run_single_test.py to use fr_rt.c + syscall.S instead of runtime_lib.c, with matching flags
+- Removed 'static' from all inline functions in fr_rt.c so they are visible to assembly callers
+
+Results:
+- Hello world binary: 222 bytes (down from 16,224 bytes with libc)
+- Index error runtime test now passes for native (?line,0:message format)
+- Native test pass rate: 141/247 (up from 36/247)

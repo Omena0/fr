@@ -1,6 +1,4 @@
 {
-  "python.analysis.typeCheckingMode": "standard",
-  "python.analysis.exclude": ["**/*.fr", "**/examples/**", "**/cases/**"],
   "C_Cpp.errorSquiggles": "disabled",
   "python.defaultInterpreterPath": "/home/omena0/Github/frscript/.venv/bin/python",
   "files.associations": {
