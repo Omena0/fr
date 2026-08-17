@@ -8,14 +8,22 @@ Uses all available registers:
 Assigns registers to SSA values based on live intervals, spilling to stack
 when registers are exhausted. Respects the System V AMD64 calling convention.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from optimizer.ir import (
-    Function, BasicBlock, Instruction, Value, Param, Op, IRType,
-    StructType, ListType, ValueType,
+    Function,
+    BasicBlock,
+    Instruction,
+    Value,
+    Param,
+    Op,
+    IRType,
+    StructType,
+    ListType,
+    ValueType,
 )
 from optimizer.analysis import LiveInterval, compute_live_intervals
-
 
 # ── Register definitions ────────────────────────────────────────
 
@@ -24,19 +32,19 @@ from optimizer.analysis import LiveInterval, compute_live_intervals
 # Callee-saved: rbx, r12-r15
 # Reserved: rsp (stack), rbp (frame)
 
-CALLER_SAVED_GPRS = ['rax', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11']
-CALLEE_SAVED_GPRS = ['rbx', 'r12', 'r13', 'r14', 'r15']
+CALLER_SAVED_GPRS = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]
+CALLEE_SAVED_GPRS = ["rbx", "r12", "r13", "r14", "r15"]
 ALL_GPRS = CALLER_SAVED_GPRS + CALLEE_SAVED_GPRS
 
 # ABI: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9
-ARG_REGS = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+ARG_REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
 # ABI: return value in rax
-RETURN_REG = 'rax'
+RETURN_REG = "rax"
 
 # Float registers
-ALL_XMMS = [f'xmm{i}' for i in range(16)]
-FLOAT_ARG_REGS = [f'xmm{i}' for i in range(8)]  # xmm0-xmm7 for float args
-FLOAT_RETURN_REG = 'xmm0'
+ALL_XMMS = [f"xmm{i}" for i in range(16)]
+FLOAT_ARG_REGS = [f"xmm{i}" for i in range(8)]  # xmm0-xmm7 for float args
+FLOAT_RETURN_REG = "xmm0"
 
 
 def is_float_type(t: ValueType) -> bool:
@@ -46,6 +54,7 @@ def is_float_type(t: ValueType) -> bool:
 @dataclass
 class RegAllocation:
     """Result of register allocation for a function."""
+
     # Value ID → register name
     reg_map: dict[int, str] = field(default_factory=dict)
     # Value ID → spill slot offset (from rbp)
@@ -75,8 +84,8 @@ class RegAllocation:
             return reg
         slot = self.spill_map.get(value.id)
         if slot is not None:
-            return f'[rbp - {slot}]'
-        return '???'
+            return f"[rbp - {slot}]"
+        return "???"
 
 
 class LinearScanAllocator:
@@ -198,7 +207,7 @@ class LinearScanAllocator:
                 # Free the register
                 reg = interval.reg
                 if reg:
-                    if reg.startswith('xmm'):
+                    if reg.startswith("xmm"):
                         self._free_xmms.append(reg)
                     else:
                         self._free_gprs.append(reg)
@@ -223,11 +232,13 @@ class LinearScanAllocator:
         """Spill either the current interval or the one ending latest."""
         # Find the active interval ending latest
         if is_float:
-            candidates = [iv for iv in self._active
-                          if iv.reg and iv.reg.startswith('xmm')]
+            candidates = [
+                iv for iv in self._active if iv.reg and iv.reg.startswith("xmm")
+            ]
         else:
-            candidates = [iv for iv in self._active
-                          if iv.reg and not iv.reg.startswith('xmm')]
+            candidates = [
+                iv for iv in self._active if iv.reg and not iv.reg.startswith("xmm")
+            ]
 
         if candidates:
             spill_candidate = max(candidates, key=lambda iv: iv.end)

@@ -5,9 +5,10 @@ __pycache__
 .venv
 extension/*
 extension
-changes.txt
 plan.md
 src/_version.py
+.tools
+.trunk
 
 # Build artifacts
 build/

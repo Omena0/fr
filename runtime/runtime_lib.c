@@ -9,9 +9,34 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/mman.h>
+
+#ifdef _WIN32
+    // The native code generator emits System V (Linux) x86_64 calling convention.
+    // On Windows, we compile the runtime entrypoints with sysv_abi so generated
+    // assembly can call them correctly when linked with MinGW.
+    #define FR_SYSV __attribute__((sysv_abi))
+#else
+    #define FR_SYSV
+#endif
+
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <process.h>
+#else
+    #include <unistd.h>
+    #include <sys/wait.h>
+    #include <sys/mman.h>
+#endif
+
+#ifdef _WIN32
+// Simple process table for fork/wait emulation on Windows.
+// pid values returned by runtime_fork() are 1-based indices into this array.
+static HANDLE fr_child_processes[256] = {0};
+static int fr_child_process_count = 0;
+#endif
 
 // Global state for error formatting
 static int runtime_test_mode = -1;  // -1 = uninitialized, 0 = user mode, 1 = test mode
@@ -37,7 +62,7 @@ static int is_test_mode() {
 }
 
 // Set source file information for error reporting
-void runtime_set_source_info(const char* filename, const char* source) {
+FR_SYSV void runtime_set_source_info(const char* filename, const char* source) {
     runtime_source_file = filename;
 
     // Count lines
@@ -72,21 +97,21 @@ void runtime_set_source_info(const char* filename, const char* source) {
 // Basic I/O
 // ============================================================================
 
-void runtime_print_int(int64_t value) {
+FR_SYSV void runtime_print_int(int64_t value) {
     printf("%ld", value);
     fflush(stdout);
 }
 
-void runtime_println_int(int64_t value) {
+FR_SYSV void runtime_println_int(int64_t value) {
     printf("%ld\n", value);
 }
 
-void runtime_print_float(double value) {
+FR_SYSV void runtime_print_float(double value) {
     printf("%f", value);
     fflush(stdout);
 }
 
-void runtime_println_float(double value) {
+FR_SYSV void runtime_println_float(double value) {
     // Format float to match Python's str() behavior: show at least 1 decimal place
     // If value is whole number, show .0; otherwise show up to 6 significant digits
     if (value == (long long)value && value >= -1e15 && value < 1e15) {
@@ -98,30 +123,44 @@ void runtime_println_float(double value) {
     }
 }
 
-void runtime_print_str(const char* str) {
+FR_SYSV void runtime_print_str(const char* str) {
     printf("%s", str);
     fflush(stdout);
 }
 
-void runtime_println_str(const char* str) {
+FR_SYSV void runtime_println_str(const char* str) {
     printf("%s\n", str);
 }
 
-void runtime_print(int64_t value) {
-    // Integer print - no longer uses pointer heuristic
-    runtime_print_int(value);
+FR_SYSV void runtime_print(int64_t value) {
+    // Smart print that handles multiple types
+    // Check if value looks like a pointer (is in a valid memory range)
+    if (value > 0x100000) {
+        // Likely a pointer to a string
+        runtime_print_str((const char*)value);
+    } else {
+        // Likely a regular integer
+        runtime_print_int(value);
+    }
 }
 
-void runtime_println(int64_t value) {
-    // Integer println - no longer uses pointer heuristic
-    runtime_println_int(value);
+FR_SYSV void runtime_println(int64_t value) {
+    // Smart println that handles multiple types
+    // Check if value looks like a pointer (is in a valid memory range)
+    if (value > 0x100000) {
+        // Likely a pointer to a string
+        runtime_println_str((const char*)value);
+    } else {
+        // Likely a regular integer
+        runtime_println_int(value);
+    }
 }
 
 // ============================================================================
 // String Operations
 // ============================================================================
 
-char* runtime_str_concat(const char* a, const char* b) {
+FR_SYSV char* runtime_str_concat(const char* a, const char* b) {
     size_t len_a = strlen(a);
     size_t len_b = strlen(b);
     char* result = malloc(len_a + len_b + 1);
@@ -135,7 +174,7 @@ char* runtime_str_concat(const char* a, const char* b) {
 }
 
 // Checked wrapper that validates pointers before calling runtime_str_concat.
-char* runtime_str_concat_checked(const char* a, const char* b) {
+FR_SYSV char* runtime_str_concat_checked(const char* a, const char* b) {
     if (!a || !b) {
         fprintf(stderr, "runtime_str_concat_checked: invalid args a=%p b=%p\n", (void*)a, (void*)b);
         // Provide more debugging context, then abort to surface the issue
@@ -144,11 +183,11 @@ char* runtime_str_concat_checked(const char* a, const char* b) {
     return runtime_str_concat(a, b);
 }
 
-int64_t runtime_str_len(const char* str) {
+FR_SYSV int64_t runtime_str_len(const char* str) {
     return (int64_t)strlen(str);
 }
 
-char* runtime_str_get_char(const char* str, int64_t index) {
+FR_SYSV char* runtime_str_get_char(const char* str, int64_t index) {
     int64_t len = (int64_t)strlen(str);
 
     // Handle negative indices
@@ -171,7 +210,7 @@ char* runtime_str_get_char(const char* str, int64_t index) {
     return result;
 }
 
-char* runtime_str_upper(const char* str) {
+FR_SYSV char* runtime_str_upper(const char* str) {
     size_t len = strlen(str);
     char* result = malloc(len + 1);
     if (!result) {
@@ -185,7 +224,7 @@ char* runtime_str_upper(const char* str) {
     return result;
 }
 
-char* runtime_str_lower(const char* str) {
+FR_SYSV char* runtime_str_lower(const char* str) {
     size_t len = strlen(str);
     char* result = malloc(len + 1);
     if (!result) {
@@ -199,7 +238,7 @@ char* runtime_str_lower(const char* str) {
     return result;
 }
 
-char* runtime_int_to_str(int64_t value) {
+FR_SYSV char* runtime_int_to_str(int64_t value) {
     char* result = malloc(32);  // Enough for any int64
     if (!result) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -241,7 +280,7 @@ char* runtime_int_to_str(int64_t value) {
     return result;
 }
 
-char* runtime_float_to_str(double value) {
+FR_SYSV char* runtime_float_to_str(double value) {
     char* result = malloc(64);  // Enough for most floats
     if (!result) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -259,7 +298,7 @@ char* runtime_float_to_str(double value) {
     return result;
 }
 
-char* runtime_bool_to_str(int64_t value) {
+FR_SYSV char* runtime_bool_to_str(int64_t value) {
     // Convert boolean to "true" or "false"
     // Any non-zero value is true, zero is false
     char* result = malloc(6);  // Enough for "true" or "false"
@@ -275,20 +314,14 @@ char* runtime_bool_to_str(int64_t value) {
     return result;
 }
 
-int64_t runtime_str_contains(const char* haystack, const char* needle) {
+FR_SYSV int64_t runtime_str_contains(const char* haystack, const char* needle) {
     // Check if haystack contains needle substring
     // Returns 1 (true) if found, 0 (false) otherwise
     if (!haystack || !needle) return 0;
     return strstr(haystack, needle) != NULL ? 1 : 0;
 }
 
-int64_t runtime_str_eq(const char* a, const char* b) {
-    if (a == b) return 1;
-    if (!a || !b) return 0;
-    return strcmp(a, b) == 0 ? 1 : 0;
-}
-
-char* runtime_str_strip(const char* str) {
+FR_SYSV char* runtime_str_strip(const char* str) {
     // Find start (skip leading whitespace)
     while (*str && isspace(*str)) str++;
     if (*str == '\0') {
@@ -311,7 +344,7 @@ char* runtime_str_strip(const char* str) {
     return result;
 }
 
-RuntimeList* runtime_str_split(const char* str, const char* delim) {
+FR_SYSV RuntimeList* runtime_str_split(const char* str, const char* delim) {
     RuntimeList* list = runtime_list_new();
     char* str_copy = strdup(str);
     char* token = strtok(str_copy, delim);
@@ -327,7 +360,7 @@ RuntimeList* runtime_str_split(const char* str, const char* delim) {
     return list;
 }
 
-char* runtime_str_join(RuntimeList* list, const char* delim) {
+FR_SYSV char* runtime_str_join(RuntimeList* list, const char* delim) {
     if (list->length == 0) {
         return strdup("");
     }
@@ -362,7 +395,7 @@ char* runtime_str_join(RuntimeList* list, const char* delim) {
     return result;
 }
 
-char* runtime_str_replace(const char* str, const char* old, const char* new) {
+FR_SYSV char* runtime_str_replace(const char* str, const char* old, const char* new) {
     if (!old || !new || strlen(old) == 0) {
         return strdup(str);
     }
@@ -405,17 +438,17 @@ char* runtime_str_replace(const char* str, const char* old, const char* new) {
     return result;
 }
 
-char* runtime_str_encode(const char* str) {
+FR_SYSV char* runtime_str_encode(const char* str) {
     // For now, just duplicate the string (UTF-8 is default)
     return strdup(str);
 }
 
-char* runtime_str_decode(const char* bytes) {
+FR_SYSV char* runtime_str_decode(const char* bytes) {
     // For now, just duplicate the string (UTF-8 is default)
     return strdup(bytes);
 }
 
-int64_t runtime_str_to_int(const char* str) {
+FR_SYSV int64_t runtime_str_to_int(const char* str) {
     // Convert string to integer
     char* endptr;
     long long value = strtoll(str, &endptr, 10);
@@ -429,7 +462,7 @@ int64_t runtime_str_to_int(const char* str) {
     return (int64_t)value;
 }
 
-double runtime_str_to_float(const char* str) {
+FR_SYSV double runtime_str_to_float(const char* str) {
     // Convert string to float
     char* endptr;
     double value = strtod(str, &endptr);
@@ -447,42 +480,26 @@ double runtime_str_to_float(const char* str) {
 // List Operations
 // ============================================================================
 
-RuntimeList* runtime_list_new_capacity(int64_t capacity, int elem_type, int is_static) {
+FR_SYSV RuntimeList* runtime_list_new() {
     RuntimeList* list = malloc(sizeof(RuntimeList));
     if (!list) {
         fprintf(stderr, "Runtime error: out of memory\n");
         exit(1);
     }
-    if (capacity < 0) {
-        capacity = 0;
-    }
-    list->capacity = capacity;
+    list->capacity = 8;
     list->length = 0;
-    list->elem_type = elem_type;
-    list->is_static = is_static;
-    if (capacity > 0) {
-        list->items = malloc(list->capacity * sizeof(int64_t));
-        if (!list->items) {
-            fprintf(stderr, "Runtime error: out of memory\n");
-            exit(1);
-        }
-    } else {
-        list->items = NULL;
+    list->elem_type = -1; // Unknown type initially
+    list->items = malloc(list->capacity * sizeof(int64_t));
+    if (!list->items) {
+        fprintf(stderr, "Runtime error: out of memory\n");
+        exit(1);
     }
     return list;
 }
 
-RuntimeList* runtime_list_new() {
-    return runtime_list_new_capacity(8, -1, 0);
-}
-
-void runtime_list_append_int(RuntimeList* list, int64_t value) {
+FR_SYSV void runtime_list_append_int(RuntimeList* list, int64_t value) {
     if (list->length >= list->capacity) {
-        if (list->is_static) {
-            fprintf(stderr, "Runtime error: cannot append beyond static list capacity\n");
-            exit(1);
-        }
-        list->capacity = list->capacity > 0 ? list->capacity * 2 : 8;
+        list->capacity *= 2;
         list->items = realloc(list->items, list->capacity * sizeof(int64_t));
         if (!list->items) {
             fprintf(stderr, "Runtime error: out of memory\n");
@@ -492,7 +509,7 @@ void runtime_list_append_int(RuntimeList* list, int64_t value) {
     list->items[list->length++] = value;
 }
 
-int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
+FR_SYSV int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
     // Handle negative indices (Python-style)
     if (index < 0) {
         index = list->length + index;
@@ -536,7 +553,7 @@ static void int64_to_str(int64_t value, char* buffer) {
     buffer[j] = '\0';
 }
 
-int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line) {
+FR_SYSV int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line) {
     // Validate list pointer
     if (!list) {
         runtime_error_at("Index error: null list pointer", line);
@@ -568,17 +585,10 @@ int64_t runtime_list_get_int_at(RuntimeList* list, int64_t index, int line) {
     return list->items[index];
 }
 
-void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
+FR_SYSV void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     // Handle negative indices (Python-style)
     if (index < 0) {
         index = list->length + index;
-    }
-
-    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity) {
-        for (int64_t i = list->length; i < index; i++) {
-            list->items[i] = 0;
-        }
-        list->length = index + 1;
     }
 
     if (index < 0 || index >= list->length) {
@@ -588,18 +598,11 @@ void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     list->items[index] = value;
 }
 
-void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, int line) {
+FR_SYSV void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, int line) {
     // Handle negative indices (Python-style)
     int64_t original_index = index;
     if (index < 0) {
         index = list->length + index;
-    }
-
-    if (index >= list->length && list->is_static && index >= 0 && index < list->capacity) {
-        for (int64_t i = list->length; i < index; i++) {
-            list->items[i] = 0;
-        }
-        list->length = index + 1;
     }
 
     if (index < 0 || index >= list->length) {
@@ -622,11 +625,11 @@ void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value, in
     list->items[index] = value;
 }
 
-int64_t runtime_list_len(RuntimeList* list) {
+FR_SYSV int64_t runtime_list_len(RuntimeList* list) {
     return list->length;
 }
 
-int64_t runtime_list_pop(RuntimeList* list) {
+FR_SYSV int64_t runtime_list_pop(RuntimeList* list) {
     if (list->length == 0) {
         fprintf(stderr, "Runtime error: pop from empty list\n");
         exit(1);
@@ -634,7 +637,7 @@ int64_t runtime_list_pop(RuntimeList* list) {
     return list->items[--list->length];
 }
 
-RuntimeList* runtime_list_new_i64(int64_t* values, int64_t count) {
+FR_SYSV RuntimeList* runtime_list_new_i64(int64_t* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
     list->elem_type = 0; // Integer type
     for (int64_t i = 0; i < count; i++) {
@@ -643,7 +646,7 @@ RuntimeList* runtime_list_new_i64(int64_t* values, int64_t count) {
     return list;
 }
 
-RuntimeList* runtime_list_new_f64(double* values, int64_t count) {
+FR_SYSV RuntimeList* runtime_list_new_f64(double* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
     list->elem_type = 2; // Float type
     for (int64_t i = 0; i < count; i++) {
@@ -653,7 +656,7 @@ RuntimeList* runtime_list_new_f64(double* values, int64_t count) {
     return list;
 }
 
-RuntimeList* runtime_list_new_str(char** values, int64_t count) {
+FR_SYSV RuntimeList* runtime_list_new_str(char** values, int64_t count) {
     RuntimeList* list = runtime_list_new();
     list->elem_type = 1; // String type
     for (int64_t i = 0; i < count; i++) {
@@ -662,7 +665,7 @@ RuntimeList* runtime_list_new_str(char** values, int64_t count) {
     return list;
 }
 
-RuntimeList* runtime_list_new_bool(bool* values, int64_t count) {
+FR_SYSV RuntimeList* runtime_list_new_bool(bool* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
     list->elem_type = 3; // Bool type
     for (int64_t i = 0; i < count; i++) {
@@ -671,7 +674,7 @@ RuntimeList* runtime_list_new_bool(bool* values, int64_t count) {
     return list;
 }
 
-bool runtime_contains(RuntimeList* list, int64_t value) {
+FR_SYSV bool runtime_contains(RuntimeList* list, int64_t value) {
     for (int64_t i = 0; i < list->length; i++) {
         if (list->items[i] == value) {
             return true;
@@ -680,7 +683,7 @@ bool runtime_contains(RuntimeList* list, int64_t value) {
     return false;
 }
 
-void runtime_list_free(RuntimeList* list) {
+FR_SYSV void runtime_list_free(RuntimeList* list) {
     if (list) {
         free(list->items);
         free(list);
@@ -691,7 +694,7 @@ void runtime_list_free(RuntimeList* list) {
 // Set Operations
 // ============================================================================
 
-RuntimeSet* runtime_set_new() {
+FR_SYSV RuntimeSet* runtime_set_new() {
     RuntimeSet* set = malloc(sizeof(RuntimeSet));
     if (!set) {
         fprintf(stderr, "Runtime error: out of memory\n");
@@ -708,93 +711,7 @@ RuntimeSet* runtime_set_new() {
     return set;
 }
 
-// ============================================================================
-// Dict Operations (simple linear search)
-// ============================================================================
-
-static int runtime_dict_key_equals(RuntimeDictEntry entry, int64_t key, int key_type) {
-    if (entry.key_type != key_type) {
-        return 0;
-    }
-    if (key_type == 1) {
-        const char* a = (const char*)entry.key;
-        const char* b = (const char*)key;
-        if (!a || !b) {
-            return a == b;
-        }
-        return strcmp(a, b) == 0;
-    }
-    return entry.key == key;
-}
-
-RuntimeDict* runtime_dict_new() {
-    RuntimeDict* dict = malloc(sizeof(RuntimeDict));
-    if (!dict) {
-        fprintf(stderr, "Runtime error: out of memory\n");
-        exit(1);
-    }
-    dict->capacity = 8;
-    dict->length = 0;
-    dict->entries = malloc(sizeof(RuntimeDictEntry) * dict->capacity);
-    if (!dict->entries) {
-        fprintf(stderr, "Runtime error: out of memory\n");
-        exit(1);
-    }
-    return dict;
-}
-
-int64_t runtime_dict_get(RuntimeDict* dict, int64_t key, int key_type) {
-    if (!dict) {
-        fprintf(stderr, "Runtime error: null dict pointer\n");
-        exit(1);
-    }
-    for (int64_t i = 0; i < dict->length; i++) {
-        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
-            return dict->entries[i].value;
-        }
-    }
-    fprintf(stderr, "Runtime error: key error\n");
-    exit(1);
-}
-
-void runtime_dict_set(RuntimeDict* dict, int64_t key, int key_type, int64_t value) {
-    if (!dict) {
-        fprintf(stderr, "Runtime error: null dict pointer\n");
-        exit(1);
-    }
-    for (int64_t i = 0; i < dict->length; i++) {
-        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
-            dict->entries[i].value = value;
-            return;
-        }
-    }
-    if (dict->length >= dict->capacity) {
-        dict->capacity *= 2;
-        dict->entries = realloc(dict->entries, sizeof(RuntimeDictEntry) * dict->capacity);
-        if (!dict->entries) {
-            fprintf(stderr, "Runtime error: out of memory\n");
-            exit(1);
-        }
-    }
-    dict->entries[dict->length].key = key;
-    dict->entries[dict->length].value = value;
-    dict->entries[dict->length].key_type = key_type;
-    dict->length++;
-}
-
-int runtime_dict_contains(RuntimeDict* dict, int64_t key, int key_type) {
-    if (!dict) {
-        return 0;
-    }
-    for (int64_t i = 0; i < dict->length; i++) {
-        if (runtime_dict_key_equals(dict->entries[i], key, key_type)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void runtime_set_add(RuntimeSet* set, int64_t value) {
+FR_SYSV void runtime_set_add(RuntimeSet* set, int64_t value) {
     // Detect type on first add
     if (set->elem_type == -1) {
         if (value > 0x100000) {
@@ -824,7 +741,7 @@ void runtime_set_add(RuntimeSet* set, int64_t value) {
     set->items[set->length++] = value;
 }
 
-void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
+FR_SYSV void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
     // Set the element type if not already set
     if (set->elem_type == -1) {
         set->elem_type = elem_type;
@@ -850,7 +767,7 @@ void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
     set->items[set->length++] = value;
 }
 
-void runtime_set_remove(RuntimeSet* set, int64_t value) {
+FR_SYSV void runtime_set_remove(RuntimeSet* set, int64_t value) {
     for (int64_t i = 0; i < set->length; i++) {
         if (set->items[i] == value) {
             // Shift remaining elements
@@ -863,7 +780,7 @@ void runtime_set_remove(RuntimeSet* set, int64_t value) {
     }
 }
 
-bool runtime_set_contains(RuntimeSet* set, int64_t value) {
+FR_SYSV bool runtime_set_contains(RuntimeSet* set, int64_t value) {
     for (int64_t i = 0; i < set->length; i++) {
         if (set->items[i] == value) {
             return true;
@@ -872,11 +789,11 @@ bool runtime_set_contains(RuntimeSet* set, int64_t value) {
     return false;
 }
 
-int64_t runtime_set_len(RuntimeSet* set) {
+FR_SYSV int64_t runtime_set_len(RuntimeSet* set) {
     return set->length;
 }
 
-void runtime_set_free(RuntimeSet* set) {
+FR_SYSV void runtime_set_free(RuntimeSet* set) {
     if (set) {
         free(set->items);
         free(set);
@@ -887,27 +804,27 @@ void runtime_set_free(RuntimeSet* set) {
 // Math Operations
 // ============================================================================
 
-int64_t runtime_abs_int(int64_t value) {
+FR_SYSV int64_t runtime_abs_int(int64_t value) {
     return value < 0 ? -value : value;
 }
 
-double runtime_abs_float(double value) {
+FR_SYSV double runtime_abs_float(double value) {
     return fabs(value);
 }
 
-double runtime_pow(double base, double exp) {
+FR_SYSV double runtime_pow(double base, double exp) {
     return pow(base, exp);
 }
 
-double runtime_sqrt(double value) {
+FR_SYSV double runtime_sqrt(double value) {
     return sqrt(value);
 }
 
-double runtime_floor(double value) {
+FR_SYSV double runtime_floor(double value) {
     return floor(value);
 }
 
-double runtime_ceil(double value) {
+FR_SYSV double runtime_ceil(double value) {
     return ceil(value);
 }
 
@@ -919,20 +836,20 @@ struct RuntimePyObject {
     void* ptr;  // Placeholder
 };
 
-RuntimePyObject* runtime_py_import(const char* module_name) {
+FR_SYSV RuntimePyObject* runtime_py_import(const char* module_name) {
     fprintf(stderr, "Runtime error: Python interop not yet implemented\n");
     exit(1);
     return NULL;
 }
 
-int64_t runtime_py_call_int(RuntimePyObject* module, const char* func_name,
+FR_SYSV int64_t runtime_py_call_int(RuntimePyObject* module, const char* func_name,
                              int argc, int64_t* args) {
     fprintf(stderr, "Runtime error: Python interop not yet implemented\n");
     exit(1);
     return 0;
 }
 
-RuntimePyObject* runtime_py_getattr(RuntimePyObject* obj, const char* attr_name) {
+FR_SYSV RuntimePyObject* runtime_py_getattr(RuntimePyObject* obj, const char* attr_name) {
     fprintf(stderr, "Runtime error: Python interop not yet implemented\n");
     exit(1);
     return NULL;
@@ -942,35 +859,35 @@ RuntimePyObject* runtime_py_getattr(RuntimePyObject* obj, const char* attr_name)
 // Additional Math Operations
 // ============================================================================
 
-int64_t runtime_min_int(int64_t a, int64_t b) {
+FR_SYSV int64_t runtime_min_int(int64_t a, int64_t b) {
     return (a < b) ? a : b;
 }
 
-int64_t runtime_max_int(int64_t a, int64_t b) {
+FR_SYSV int64_t runtime_max_int(int64_t a, int64_t b) {
     return (a > b) ? a : b;
 }
 
-double runtime_min_float(double a, double b) {
+FR_SYSV double runtime_min_float(double a, double b) {
     return (a < b) ? a : b;
 }
 
-double runtime_max_float(double a, double b) {
+FR_SYSV double runtime_max_float(double a, double b) {
     return (a > b) ? a : b;
 }
 
-double runtime_sin(double x) {
+FR_SYSV double runtime_sin(double x) {
     return sin(x);
 }
 
-double runtime_cos(double x) {
+FR_SYSV double runtime_cos(double x) {
     return cos(x);
 }
 
-double runtime_tan(double x) {
+FR_SYSV double runtime_tan(double x) {
     return tan(x);
 }
 
-double runtime_round(double x) {
+FR_SYSV double runtime_round(double x) {
     return round(x);
 }
 
@@ -978,11 +895,11 @@ double runtime_round(double x) {
 // Builtin Functions
 // ============================================================================
 
-void runtime_exit(int64_t status) {
+FR_SYSV void runtime_exit(int64_t status) {
     exit((int)status);
 }
 
-void runtime_sleep(double seconds) {
+FR_SYSV void runtime_sleep(double seconds) {
     // Use nanosleep for sub-second precision
     #ifdef _WIN32
         Sleep((DWORD)(seconds * 1000));
@@ -996,7 +913,7 @@ void runtime_sleep(double seconds) {
     #endif
 }
 
-void runtime_assert(bool condition, const char* message) {
+FR_SYSV void runtime_assert(bool condition, const char* message) {
     if (!condition) {
         if (message && message[0] != '\0') {
             // If message is provided, just print it
@@ -1018,11 +935,11 @@ void runtime_assert(bool condition, const char* message) {
 static RuntimeExceptionHandler exception_handlers[MAX_EXCEPTION_HANDLERS];
 static int exception_handler_count = 0;
 
-void runtime_exception_init() {
+FR_SYSV void runtime_exception_init() {
     exception_handler_count = 0;
 }
 
-int runtime_exception_push(const char* exc_type) {
+FR_SYSV int runtime_exception_push(const char* exc_type) {
     if (exception_handler_count >= MAX_EXCEPTION_HANDLERS) {
         fprintf(stderr, "Error: Maximum exception handler depth exceeded\n");
         exit(1);
@@ -1034,14 +951,14 @@ int runtime_exception_push(const char* exc_type) {
     return exception_handler_count++;
 }
 
-jmp_buf* runtime_exception_get_jump_buffer() {
+FR_SYSV jmp_buf* runtime_exception_get_jump_buffer() {
     if (exception_handler_count == 0) {
         return NULL;
     }
     return &exception_handlers[exception_handler_count - 1].jump_buffer;
 }
 
-void runtime_exception_pop() {
+FR_SYSV void runtime_exception_pop() {
     if (exception_handler_count > 0) {
         exception_handler_count--;
     }
@@ -1052,7 +969,7 @@ void runtime_exception_pop() {
 // We use -fno-omit-frame-pointer and disable inline optimizations.
 __attribute__((optimize("no-omit-frame-pointer")))
 __attribute__((noinline))
-void runtime_exception_raise(const char* exc_type, const char* message) {
+FR_SYSV void runtime_exception_raise(const char* exc_type, const char* message) {
     // Search for matching exception handler (from most recent to oldest)
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
@@ -1073,7 +990,7 @@ void runtime_exception_raise(const char* exc_type, const char* message) {
 
 __attribute__((optimize("no-omit-frame-pointer")))
 __attribute__((noinline))
-void runtime_exception_raise_at(const char* exc_type, const char* message, int line) {
+FR_SYSV void runtime_exception_raise_at(const char* exc_type, const char* message, int line) {
     // Search for matching exception handler (from most recent to oldest)
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
@@ -1113,7 +1030,7 @@ void runtime_exception_raise_at(const char* exc_type, const char* message, int l
 
 __attribute__((optimize("no-omit-frame-pointer")))
 __attribute__((noinline))
-void runtime_error_at(const char* message, int line) {
+FR_SYSV void runtime_error_at(const char* message, int line) {
     // Search for matching exception handler using "RuntimeError" as type
     for (int i = exception_handler_count - 1; i >= 0; i--) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
@@ -1185,25 +1102,25 @@ void runtime_error_at(const char* message, int line) {
     exit(1);
 }
 
-void runtime_check_div_zero_i64(int64_t divisor) {
+FR_SYSV void runtime_check_div_zero_i64(int64_t divisor) {
     if (divisor == 0) {
         runtime_exception_raise("ZeroDivisionError", "integer division by zero");
     }
 }
 
-void runtime_check_div_zero_i64_at(int64_t divisor, int line) {
+FR_SYSV void runtime_check_div_zero_i64_at(int64_t divisor, int line) {
     if (divisor == 0) {
         runtime_error_at("integer division by zero", line);
     }
 }
 
-void runtime_check_div_zero_f64(double divisor) {
+FR_SYSV void runtime_check_div_zero_f64(double divisor) {
     if (divisor == 0.0) {
         runtime_exception_raise("ZeroDivisionError", "float division by zero");
     }
 }
 
-void runtime_check_div_zero_f64_at(double divisor, int line) {
+FR_SYSV void runtime_check_div_zero_f64_at(double divisor, int line) {
     if (divisor == 0.0) {
         runtime_error_at("float division by zero", line);
     }
@@ -1213,19 +1130,28 @@ void runtime_check_div_zero_f64_at(double divisor, int line) {
 // Memory Management
 // ============================================================================
 
-void runtime_init() {
+FR_SYSV void runtime_init() {
     // Initialize exception handling
     runtime_exception_init();
     
     // Allocate struct heap using mmap if not already allocated
     if (struct_heap_base == 0) {
         // Allocate 64MB for struct heap
-        void* heap = mmap(NULL, STRUCT_HEAP_SIZE, PROT_READ | PROT_WRITE, 
-                          MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (heap == MAP_FAILED) {
-            fprintf(stderr, "Runtime error: failed to allocate struct heap\n");
-            exit(1);
-        }
+        void* heap = NULL;
+        #ifdef _WIN32
+            heap = VirtualAlloc(NULL, (SIZE_T)STRUCT_HEAP_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (!heap) {
+                fprintf(stderr, "Runtime error: failed to allocate struct heap\n");
+                exit(1);
+            }
+        #else
+            heap = mmap(NULL, STRUCT_HEAP_SIZE, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (heap == MAP_FAILED) {
+                fprintf(stderr, "Runtime error: failed to allocate struct heap\n");
+                exit(1);
+            }
+        #endif
         
         // Store the base pointer for use in compiled code
         struct_heap_base = (uint64_t)heap;
@@ -1233,7 +1159,7 @@ void runtime_init() {
     }
 }
 
-void runtime_cleanup() {
+FR_SYSV void runtime_cleanup() {
     // Cleanup any global state here
 }
 
@@ -1241,11 +1167,11 @@ void runtime_cleanup() {
 // String Conversion for Complex Types
 // ============================================================================
 
-char* runtime_list_to_str(RuntimeList* list) {
+FR_SYSV char* runtime_list_to_str(RuntimeList* list) {
     return runtime_list_repr(list);
 }
 
-char* runtime_set_to_str(RuntimeSet* set) {
+FR_SYSV char* runtime_set_to_str(RuntimeSet* set) {
     return runtime_set_repr(set);
 }
 
@@ -1253,7 +1179,7 @@ char* runtime_set_to_str(RuntimeSet* set) {
 // List and Set String Representations
 // ============================================================================
 
-char* runtime_list_repr(RuntimeList* list) {
+FR_SYSV char* runtime_list_repr(RuntimeList* list) {
     if (!list) return strdup("[]");
 
     // Add compiler barrier to prevent aggressive optimization of list pointer
@@ -1265,78 +1191,57 @@ char* runtime_list_repr(RuntimeList* list) {
         return strdup("[corrupted]");
     }
 
-    size_t buf_size = 256;
-    char* result = malloc(buf_size);
+    char* result = malloc(4096);
     if (!result) return NULL;
 
-    size_t offset = 0;
-    offset += snprintf(result + offset, buf_size - offset, "[");
+    strcpy(result, "[");
     for (int64_t i = 0; i < list->length; i++) {
-        if (i > 0) {
-            if (offset + 3 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            offset += snprintf(result + offset, buf_size - offset, ", ");
-        }
+        if (i > 0) strcat(result, ", ");
 
-        char tmp[64];
+        // Use type information to format correctly
         if (list->elem_type == 1) {
+            // String type
             const char* str = (const char*)list->items[i];
-            size_t slen = strlen(str);
-            while (offset + slen + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            memcpy(result + offset, str, slen);
-            offset += slen;
-            result[offset] = '\0';
+            strcat(result, str);
         } else if (list->elem_type == 2) {
+            // Float type - use union for type-safe punning
             union { int64_t i; double d; } pun;
             pun.i = list->items[i];
-            int n = snprintf(tmp, sizeof(tmp), "%g", pun.d);
-            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            memcpy(result + offset, tmp, n);
-            offset += n;
-            result[offset] = '\0';
+            char tmp[32];
+            snprintf(tmp, 32, "%g", pun.d);
+            strcat(result, tmp);
         } else {
-            int n = snprintf(tmp, sizeof(tmp), "%ld", list->items[i]);
-            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            memcpy(result + offset, tmp, n);
-            offset += n;
-            result[offset] = '\0';
+            // Integer type (or unknown)
+            char tmp[32];
+            snprintf(tmp, 32, "%ld", list->items[i]);
+            strcat(result, tmp);
         }
     }
-    if (offset + 2 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-    offset += snprintf(result + offset, buf_size - offset, "]");
+    strcat(result, "]");
     return result;
 }
 
-char* runtime_set_repr(RuntimeSet* set) {
-    size_t buf_size = 256;
-    char* result = malloc(buf_size);
+FR_SYSV char* runtime_set_repr(RuntimeSet* set) {
+    char* result = malloc(4096);
     if (!result) return NULL;
 
-    size_t offset = 0;
-    offset += snprintf(result + offset, buf_size - offset, "{");
+    strcpy(result, "{");
     for (int64_t i = 0; i < set->length; i++) {
-        if (i > 0) {
-            if (offset + 3 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            offset += snprintf(result + offset, buf_size - offset, ", ");
-        }
+        if (i > 0) strcat(result, ", ");
 
-        char tmp[64];
+        // Use type information to format correctly
         if (set->elem_type == 1) {
+            // String type
             const char* str = (const char*)set->items[i];
-            size_t slen = strlen(str);
-            while (offset + slen + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            memcpy(result + offset, str, slen);
-            offset += slen;
-            result[offset] = '\0';
+            strcat(result, str);
         } else {
-            int n = snprintf(tmp, sizeof(tmp), "%ld", set->items[i]);
-            while (offset + (size_t)n + 4 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-            memcpy(result + offset, tmp, n);
-            offset += n;
-            result[offset] = '\0';
+            // Integer type (or unknown)
+            char tmp[32];
+            snprintf(tmp, 32, "%ld", set->items[i]);
+            strcat(result, tmp);
         }
     }
-    if (offset + 2 >= buf_size) { buf_size *= 2; result = realloc(result, buf_size); }
-    offset += snprintf(result + offset, buf_size - offset, "}");
+    strcat(result, "}");
     return result;
 }
 
@@ -1344,28 +1249,103 @@ char* runtime_set_repr(RuntimeSet* set) {
 // Process Management
 // ============================================================================
 
-int64_t runtime_fork() {
-    pid_t pid = fork();
-    if (pid == -1) {
-        fprintf(stderr, "Runtime error: fork failed\n");
-        exit(1);
-    }
-    return (int64_t)pid;
+FR_SYSV int64_t runtime_fork() {
+    #ifdef _WIN32
+        const char* is_child = getenv("FR_FORK_CHILD");
+        if (is_child && strcmp(is_child, "1") == 0) {
+            _putenv("FR_FORK_CHILD=");
+            return 0;
+        }
+
+        if (fr_child_process_count >= 256) {
+            fprintf(stderr, "Runtime error: too many forked processes\n");
+            exit(1);
+        }
+
+        LPWSTR cmdline = GetCommandLineW();
+        if (!cmdline) {
+            fprintf(stderr, "Runtime error: GetCommandLineW failed\n");
+            exit(1);
+        }
+        wchar_t* cmd_copy = _wcsdup(cmdline);
+        if (!cmd_copy) {
+            fprintf(stderr, "Runtime error: out of memory\n");
+            exit(1);
+        }
+
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        ZeroMemory(&pi, sizeof(pi));
+        si.cb = sizeof(si);
+
+        SetEnvironmentVariableW(L"FR_FORK_CHILD", L"1");
+        BOOL ok = CreateProcessW(
+            NULL,
+            cmd_copy,
+            NULL,
+            NULL,
+            FALSE,
+            0,
+            NULL,
+            NULL,
+            &si,
+            &pi
+        );
+        SetEnvironmentVariableW(L"FR_FORK_CHILD", NULL);
+        free(cmd_copy);
+
+        if (!ok) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            exit(1);
+        }
+
+        CloseHandle(pi.hThread);
+        fr_child_processes[fr_child_process_count] = pi.hProcess;
+        fr_child_process_count++;
+        return (int64_t)fr_child_process_count;
+    #else
+        pid_t pid = fork();
+        if (pid == -1) {
+            fprintf(stderr, "Runtime error: fork failed\n");
+            exit(1);
+        }
+        return (int64_t)pid;
+    #endif
 }
 
-int64_t runtime_wait(int64_t pid) {
-    int status;
-    pid_t result = waitpid((pid_t)pid, &status, 0);
-    if (result == -1) {
-        fprintf(stderr, "Runtime error: waitpid failed\n");
-        exit(1);
-    }
-    // Return the exit status
-    // Extract the actual exit code (bits 8-15)
-    if (WIFEXITED(status)) {
-        return (int64_t)WEXITSTATUS(status);
-    }
-    return status;
+FR_SYSV int64_t runtime_wait(int64_t pid) {
+    #ifdef _WIN32
+        if (pid <= 0 || pid > 256) {
+            fprintf(stderr, "Runtime error: waitpid failed\n");
+            exit(1);
+        }
+        HANDLE h = fr_child_processes[pid - 1];
+        if (!h) {
+            fprintf(stderr, "Runtime error: waitpid failed\n");
+            exit(1);
+        }
+        WaitForSingleObject(h, INFINITE);
+        DWORD exit_code = 0;
+        if (!GetExitCodeProcess(h, &exit_code)) {
+            fprintf(stderr, "Runtime error: waitpid failed\n");
+            exit(1);
+        }
+        CloseHandle(h);
+        fr_child_processes[pid - 1] = NULL;
+        return (int64_t)exit_code;
+    #else
+        int status;
+        pid_t result = waitpid((pid_t)pid, &status, 0);
+        if (result == -1) {
+            fprintf(stderr, "Runtime error: waitpid failed\n");
+            exit(1);
+        }
+        if (WIFEXITED(status)) {
+            return (int64_t)WEXITSTATUS(status);
+        }
+        return status;
+    #endif
 }
 
 // ============================================================================
@@ -1378,21 +1358,10 @@ int64_t runtime_wait(int64_t pid) {
 static FILE* fd_table[MAX_FDS] = {0};
 static int fd_counter = 0;
 
-int64_t runtime_fopen(const char* path, const char* mode) {
-    // Try to reuse a closed slot first
-    int slot = -1;
-    for (int i = 0; i < fd_counter; i++) {
-        if (fd_table[i] == NULL) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot == -1) {
-        if (fd_counter >= MAX_FDS) {
-            fprintf(stderr, "Runtime error: too many open files\n");
-            return -1;
-        }
-        slot = fd_counter++;
+FR_SYSV int64_t runtime_fopen(const char* path, const char* mode) {
+    if (fd_counter >= MAX_FDS) {
+        fprintf(stderr, "Runtime error: too many open files\n");
+        return -1;
     }
     FILE* fp = fopen(path, mode);
     if (!fp) {
@@ -1400,11 +1369,11 @@ int64_t runtime_fopen(const char* path, const char* mode) {
         return -1;
     }
     int64_t handle = (int64_t)fp;
-    fd_table[slot] = fp;
+    fd_table[fd_counter++] = fp;
     return handle;
 }
 
-int64_t runtime_fwrite(int64_t fd, const char* data) {
+FR_SYSV int64_t runtime_fwrite(int64_t fd, const char* data) {
     FILE* fp = (FILE*)fd;
     if (!fp) {
         fprintf(stderr, "Runtime error: invalid file descriptor\n");
@@ -1416,11 +1385,11 @@ int64_t runtime_fwrite(int64_t fd, const char* data) {
     return (int64_t)written;
 }
 
-char* runtime_fread(int64_t fd, int64_t size) {
+FR_SYSV char* runtime_fread(int64_t fd, int64_t size) {
     FILE* fp = (FILE*)fd;
     if (!fp) {
         fprintf(stderr, "Runtime error: invalid file descriptor\n");
-        return strdup("");
+        return "";
     }
 
     // If size is -1, read entire file
@@ -1435,7 +1404,7 @@ char* runtime_fread(int64_t fd, int64_t size) {
         char* buffer = malloc(file_size + 1);
         if (!buffer) {
             fprintf(stderr, "Runtime error: out of memory\n");
-            return strdup("");
+            return "";
         }
 
         size_t read = fread(buffer, 1, file_size, fp);
@@ -1446,14 +1415,14 @@ char* runtime_fread(int64_t fd, int64_t size) {
     char* buffer = malloc(size + 1);
     if (!buffer) {
         fprintf(stderr, "Runtime error: out of memory\n");
-        return strdup("");
+        return "";
     }
     size_t read = fread(buffer, 1, size, fp);
     buffer[read] = '\0';
     return buffer;
 }
 
-void runtime_fclose(int64_t fd) {
+FR_SYSV void runtime_fclose(int64_t fd) {
     FILE* fp = (FILE*)fd;
     if (fp) {
         fclose(fp);
@@ -1467,28 +1436,3 @@ void runtime_fclose(int64_t fd) {
     }
 }
 
-RuntimeList* runtime_list_from_array(int64_t* values, int64_t count) {
-    RuntimeList* list = malloc(sizeof(RuntimeList));
-    if (!list) {
-        fprintf(stderr, "Runtime error: out of memory\n");
-        exit(1);
-    }
-    
-    // Allocate exact capacity needed
-    list->capacity = count > 8 ? count : 8;
-    list->length = count;
-    list->elem_type = -1; // Unknown type
-    
-    list->items = malloc(list->capacity * sizeof(int64_t));
-    if (!list->items) {
-        fprintf(stderr, "Runtime error: out of memory\n");
-        exit(1);
-    }
-    
-    // Copy values
-    if (count > 0) {
-        memcpy(list->items, values, count * sizeof(int64_t));
-    }
-    
-    return list;
-}

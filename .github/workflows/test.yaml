@@ -2,27 +2,27 @@ name: Tests
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [main, dev]
     paths:
-      - 'src/**'
-      - 'cases/**'
-      - 'runtime/**'
-      - 'requirements.txt'
-      - 'setup.py'
-      - '.github/workflows/test.yaml'
+      - "src/**"
+      - "cases/**"
+      - "runtime/**"
+      - "requirements.txt"
+      - "setup.py"
+      - ".github/workflows/test.yaml"
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - 'src/**'
-      - 'cases/**'
-      - 'runtime/**'
-      - 'requirements.txt'
-      - 'setup.py'
-      - '.github/workflows/test.yaml'
+      - "src/**"
+      - "cases/**"
+      - "runtime/**"
+      - "requirements.txt"
+      - "setup.py"
+      - ".github/workflows/test.yaml"
   workflow_dispatch:
     inputs:
       reason:
-        description: 'Reason for manual run'
+        description: "Reason for manual run"
         required: false
         type: string
 
@@ -32,26 +32,26 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13.7'
-        cache: 'pip'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Build C runtime
-      run: |
-        cd runtime
-        make
-    
-    - name: Run tests
-      run: python src/tests.py
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build C runtime
+        run: |
+          cd runtime
+          make
+
+      - name: Run tests
+        run: python src/tests.py

@@ -23,27 +23,45 @@ _eval_timeout_funcs: set[str] = set()
 _runtime_call_funcs: set[str] = set()
 _eval_deadline: float | None = None
 
-I64_MIN = -(2 ** 63)
-I64_MAX = (2 ** 63) - 1
+I64_MIN = -(2**63)
+I64_MAX = (2**63) - 1
+
 
 def _fits_i64(value: int) -> bool:
     return I64_MIN <= value <= I64_MAX
 
-def _is_large_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and not _fits_i64(value)
 
-types = ['bool', 'int', 'float', 'string', 'str', 'bytes', 'set', 'list', 'dict', 'pyobject', 'pyobj', 'any']
+def _is_large_int(value: Any) -> bool:
+    return (
+        isinstance(value, int) and not isinstance(value, bool) and not _fits_i64(value)
+    )
+
+
+types = [
+    "bool",
+    "int",
+    "float",
+    "string",
+    "str",
+    "bytes",
+    "set",
+    "list",
+    "dict",
+    "pyobject",
+    "pyobj",
+    "any",
+]
 
 # Const: Value will not change and cannot be changed
 # If the parser cannot eval the value then an exception is thrown.
-modifiers = ['const']
+modifiers = ["const"]
 
-current_func = '<module>'
+current_func = "<module>"
 
 # Track loop depth for break/continue validation
 loop_depth = 0
 
-vars:VarType = {}
+vars: VarType = {}
 
 # Save the initial builtin function NAMES to restore on each parse
 # This prevents user-defined functions from contaminating subsequent parses
@@ -57,19 +75,22 @@ disable_eval: bool = False
 # Parse-time evaluation timeout (seconds)
 eval_timeout_seconds: float = 0.5
 
-def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    with open(c_file, 'r') as f:
+
+def _parse_c_signatures(
+    c_file: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    with open(c_file, "r") as f:
         content = f.read()
 
     # Remove comments
-    content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)  # Single-line comments
-    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)  # Multi-line comments
+    content = re.sub(r"//.*?$", "", content, flags=re.MULTILINE)  # Single-line comments
+    content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)  # Multi-line comments
 
     # Parse typedef struct definitions
     # Matches: typedef struct [optional_tag] { fields... } TypeName;
     struct_pattern = re.compile(
-        r'typedef\s+struct\s+(?:\w+\s*)?\{([^}]+)\}\s*(\w+)\s*;',
-        re.MULTILINE | re.DOTALL
+        r"typedef\s+struct\s+(?:\w+\s*)?\{([^}]+)\}\s*(\w+)\s*;",
+        re.MULTILINE | re.DOTALL,
     )
 
     structs = {}
@@ -79,7 +100,7 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
         struct_name = match.group(2).strip()
 
         fields = []
-        for line in fields_str.split(';'):
+        for line in fields_str.split(";"):
             line = line.strip()
             if not line:
                 continue
@@ -95,13 +116,25 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
             # Extract the type part (everything up to the first identifier or pointer)
             field_type_parts = []
             type_keywords = {
-                'void', 'int', 'float', 'double', 'char', 'bool',
-                'unsigned', 'signed', 'long', 'short', 'struct',
-                'const', 'volatile', 'restrict', 'static',
+                "void",
+                "int",
+                "float",
+                "double",
+                "char",
+                "bool",
+                "unsigned",
+                "signed",
+                "long",
+                "short",
+                "struct",
+                "const",
+                "volatile",
+                "restrict",
+                "static",
             }
             for token in tokens:
                 # Stop at first non-type-keyword identifier
-                if re.match(r'[*\w]+,?', token) and token not in type_keywords:
+                if re.match(r"[*\w]+,?", token) and token not in type_keywords:
                     break
                 field_type_parts.append(token)
 
@@ -109,34 +142,33 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
                 field_type_parts.append(tokens[0])
 
             # Determine base type (handles things like "unsigned char" or "const float*")
-            field_type = ' '.join(field_type_parts).strip()
+            field_type = " ".join(field_type_parts).strip()
 
             # Extract all names (handles comma-separated variables)
-            name_part = line[len(field_type):].strip()
-            name_part = name_part.rstrip(';')
+            name_part = line[len(field_type) :].strip()
+            name_part = name_part.rstrip(";")
             # Remove the type prefix from name_part
             # Split by commas, and remove array brackets
-            for name in re.split(r',\s*', name_part):
+            for name in re.split(r",\s*", name_part):
                 name = name.strip()
                 if not name:
                     continue
-                name = name.split('[')[0].strip()
+                name = name.split("[")[0].strip()
                 # Skip if it looks like a duplicate type fragment
-                if re.match(r'^[A-Za-z_]\w*$', name):
-                    fields.append({'name': name, 'type': field_type})
+                if re.match(r"^[A-Za-z_]\w*$", name):
+                    fields.append({"name": name, "type": field_type})
 
         if fields:  # Only add if we found fields
             structs[struct_name] = {
-                'type': 'c_struct_def',
-                'fields': fields,
-                'is_c_struct': True
+                "type": "c_struct_def",
+                "fields": fields,
+                "is_c_struct": True,
             }
 
     # Also parse regular struct definitions (not typedef)
     # Matches: struct Name { fields... };
     struct_pattern2 = re.compile(
-        r'struct\s+(\w+)\s*\{([^}]+)\}\s*;',
-        re.MULTILINE | re.DOTALL
+        r"struct\s+(\w+)\s*\{([^}]+)\}\s*;", re.MULTILINE | re.DOTALL
     )
 
     for match in struct_pattern2.finditer(content):
@@ -149,7 +181,7 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
 
         # Parse fields (same as above)
         fields = []
-        for line in fields_str.split(';'):
+        for line in fields_str.split(";"):
             line = line.strip()
             if not line:
                 continue
@@ -157,26 +189,23 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
             parts = line.rsplit(None, 1)
             if len(parts) == 2:
                 field_type, field_name = parts
-                field_name = field_name.split('[')[0].strip()
-                fields.append({
-                    'name': field_name,
-                    'type': field_type.strip()
-                })
+                field_name = field_name.split("[")[0].strip()
+                fields.append({"name": field_name, "type": field_type.strip()})
 
         if fields:
             structs[struct_name] = {
-                'type': 'c_struct_def',
-                'fields': fields,
-                'is_c_struct': True
+                "type": "c_struct_def",
+                "fields": fields,
+                "is_c_struct": True,
             }
 
     # Pattern to match function declarations/definitions
     # Matches: return_type function_name(param_type param_name, ...)
     func_pattern = re.compile(
-        r'\b(void|int|float|double|char|long|short|unsigned\s+\w+|\w+\s*\*|\w+)\s+'  # return type (including custom types)
-        r'(\w+)\s*'  # function name
-        r'\(([^)]*)\)',  # parameters
-        re.MULTILINE
+        r"\b(void|int|float|double|char|long|short|unsigned\s+\w+|\w+\s*\*|\w+)\s+"  # return type (including custom types)
+        r"(\w+)\s*"  # function name
+        r"\(([^)]*)\)",  # parameters
+        re.MULTILINE,
     )
 
     functions = {}
@@ -187,51 +216,60 @@ def _parse_c_signatures(c_file: str) -> tuple[dict[str, dict[str, Any]], dict[st
         params_str = match.group(3).strip()
 
         # Skip if it looks like a macro or declaration (ends with semicolon in next few chars)
-        rest = content[match.end():match.end()+10]
-        if ';' in rest.split('{')[0]:
+        rest = content[match.end() : match.end() + 10]
+        if ";" in rest.split("{")[0]:
             # This is just a declaration, but we still want it
             pass
 
         # Parse parameters
         params = []
-        if params_str and params_str != 'void':
-            for param in params_str.split(','):
+        if params_str and params_str != "void":
+            for param in params_str.split(","):
                 param = param.strip()
                 if not param:
                     continue
 
                 # Parse "type name" or just "type"
-                parts = param.rsplit(None, 1)  # Split from right to get last word as name
+                parts = param.rsplit(
+                    None, 1
+                )  # Split from right to get last word as name
                 if len(parts) == 2:
                     param_type, param_name = parts
                 elif len(parts) == 1:
                     param_type = parts[0]
-                    param_name = f'arg{len(params)}'
+                    param_name = f"arg{len(params)}"
                 else:
                     continue
 
-                params.append({
-                    'name': param_name.strip('*'),  # Remove pointer markers from name
-                    'type': param_type.strip()
-                })
+                params.append(
+                    {
+                        "name": param_name.strip(
+                            "*"
+                        ),  # Remove pointer markers from name
+                        "type": param_type.strip(),
+                    }
+                )
 
         functions[func_name] = {
-            'type': 'c_function',
-            'return_type': return_type,
-            'params': params,
-            'param_count': len(params)
+            "type": "c_function",
+            "return_type": return_type,
+            "params": params,
+            "param_count": len(params),
         }
 
     return functions, structs
 
+
 class SkipNode: ...
+
 
 def make_node(stream: InputStream, **kwargs) -> dict[str, Any]:
     """Create an AST node with line number information"""
     node = dict(kwargs)
-    if 'line' not in node:
-        node['line'] = stream.line
+    if "line" not in node:
+        node["line"] = stream.line
     return node
+
 
 def is_literal(value):
     if not isinstance(value, dict):
@@ -244,10 +282,12 @@ def is_literal(value):
     if not isinstance(value, dict):
         return True
 
-    return 'const' in value.get('mods', [])
+    return "const" in value.get("mods", [])
 
-def get_type(value:Any) -> str:
+
+def get_type(value: Any) -> str:
     return type(value).__name__
+
 
 def parse_fstring(content: str) -> dict[str, Any]:
     """Parse an f-string and return a string concatenation expression.
@@ -260,13 +300,10 @@ def parse_fstring(content: str) -> dict[str, Any]:
     i = 0
 
     while i < len(content):
-        if content[i] == '{':
+        if content[i] == "{":
             # Save the current literal part if any
             if current:
-                parts.append({
-                    "type": "string",
-                    "value": current
-                })
+                parts.append({"type": "string", "value": current})
                 current = ""
 
             # Find the matching closing brace
@@ -274,9 +311,9 @@ def parse_fstring(content: str) -> dict[str, Any]:
             j = i + 1
             expr_str = ""
             while j < len(content) and depth > 0:
-                if content[j] == '{':
+                if content[j] == "{":
                     depth += 1
-                elif content[j] == '}':
+                elif content[j] == "}":
                     depth -= 1
                     if depth == 0:
                         break
@@ -290,11 +327,7 @@ def parse_fstring(content: str) -> dict[str, Any]:
             expr_result = parse_expr(expr_str.strip())
 
             # Wrap the expression in str() conversion
-            str_call = {
-                "type": "call",
-                "name": "str",
-                "args": [expr_result]
-            }
+            str_call = {"type": "call", "name": "str", "args": [expr_result]}
             parts.append(str_call)
 
             i = j + 1
@@ -304,35 +337,26 @@ def parse_fstring(content: str) -> dict[str, Any]:
 
     # Add any remaining literal part
     if current:
-        parts.append({
-            "type": "string",
-            "value": current
-        })
+        parts.append({"type": "string", "value": current})
 
     # If only one part, return it directly
     if not parts:
-        return {
-            "type": "string",
-            "value": ""
-        }
+        return {"type": "string", "value": ""}
     elif len(parts) == 1:
         return parts[0]
 
     # Build a chain of concatenations
     result = parts[0]
     for part in parts[1:]:
-        result = {
-            "type": "binop",
-            "op": "+",
-            "left": result,
-            "right": part
-        }
+        result = {"type": "binop", "op": "+", "left": result, "right": part}
 
     return result
 
+
 def _extract_value(elem: Any) -> Any:
     """Extract the actual value from a parsed element (dict with 'value' key or raw value)."""
-    return elem['value'] if isinstance(elem, dict) and 'value' in elem else elem
+    return elem["value"] if isinstance(elem, dict) and "value" in elem else elem
+
 
 def _parse_list_elements(list_content: str) -> list[Any]:
     """Parse comma-separated list elements, respecting nesting depth."""
@@ -341,13 +365,13 @@ def _parse_list_elements(list_content: str) -> list[Any]:
     current = ""
 
     for char in list_content:
-        if char in '([{':
+        if char in "([{":
             depth += 1
             current += char
-        elif char in ')]}':
+        elif char in ")]}":
             depth -= 1
             current += char
-        elif char == ',' and depth == 0:
+        elif char == "," and depth == 0:
             if current.strip():
                 elem = parse_literal(current.strip())
                 elements.append(_extract_value(elem))
@@ -362,6 +386,7 @@ def _parse_list_elements(list_content: str) -> list[Any]:
 
     return elements
 
+
 def _has_operators_outside_context(text: str) -> bool:
     """Check if text has operators outside of strings/parentheses (i.e., is an expression)."""
     in_string = False
@@ -373,45 +398,46 @@ def _has_operators_outside_context(text: str) -> bool:
             escape_next = False
             continue
 
-        if c == '\\':
+        if c == "\\":
             escape_next = True
             continue
 
         if c == '"':
             in_string = not in_string
         elif not in_string:
-            if c == '(':
+            if c == "(":
                 paren_depth += 1
-            elif c == ')':
+            elif c == ")":
                 paren_depth -= 1
             elif paren_depth == 0:
                 # Check for operators (including '.' for field/method access)
-                if c in {'+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '.'}:
+                if c in {"+", "-", "*", "/", "%", "<", ">", "=", "!", "&", "|", "."}:
                     return True
 
     return False
 
-def parse_literal(text: str) -> dict[str, str|Any] | Any:
+
+def parse_literal(text: str) -> dict[str, str | Any] | Any:
     """Parse a literal value (string, number, bool, list, set) or return text if it's a variable/expression."""
     if not isinstance(text, str):
         return text
-    
+
     text = text.strip()
 
     # Set literal: {1, 2, 3} - must check before list to distinguish from dict
-    if text.startswith('{') and text.endswith('}'):
+    if text.startswith("{") and text.endswith("}"):
         set_content = text[1:-1].strip()
         if not set_content:
             return {"type": "set", "value": []}
 
         # Check if it's a dict (has ':') or a set (no ':')
         # For now, we only support sets
-        if ':' not in set_content:
+        if ":" not in set_content:
             elements = _parse_list_elements(set_content)
             return {"type": "set", "value": elements}
 
     # List literal: [1, 2, 3]
-    if text.startswith('[') and text.endswith(']'):
+    if text.startswith("[") and text.endswith("]"):
         list_content = text[1:-1].strip()
         if not list_content:
             return {"type": "list", "value": []}
@@ -436,23 +462,23 @@ def parse_literal(text: str) -> dict[str, str|Any] | Any:
         return {"type": "string", "value": text[1:-1]}
 
     # Integer: 123
-    if text.isdigit() or (text.startswith('-') and text[1:].isdigit()):
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
         return {"type": "int", "value": int(text)}
 
     # Float: 123.456
-    if '.' in text:
+    if "." in text:
         try:
             return {"type": "float", "value": float(text)}
         except ValueError:
             pass  # Not a valid float, continue to other checks
 
     # Boolean: true/false
-    if text in {'true', 'false'}:
+    if text in {"true", "false"}:
         return {"type": "bool", "value": text}
 
     # Function call: func(args)
-    if text.endswith(')') and '(' in text:
-        potential_name = text.split('(')[0]
+    if text.endswith(")") and "(" in text:
+        potential_name = text.split("(")[0]
         if potential_name in funcs:
             func_stream = InputStream(text)
             name = func_stream.consume_word()
@@ -461,25 +487,40 @@ def parse_literal(text: str) -> dict[str, str|Any] | Any:
     # Variable name or unparseable text
     return text
 
-def _try_parse_as_function_call(value_str: str, parent_stream: InputStream | None) -> dict | None:
+
+def _try_parse_as_function_call(
+    value_str: str, parent_stream: InputStream | None
+) -> dict | None:
     """Try to parse a string as a function call. Returns dict node or None if not a function call."""
-    func_stream = InputStream(value_str, parent_stream=parent_stream, offset_in_parent=0) if parent_stream else InputStream(value_str)
+    func_stream = (
+        InputStream(value_str, parent_stream=parent_stream, offset_in_parent=0)
+        if parent_stream
+        else InputStream(value_str)
+    )
     if parent_stream:
         func_stream.file_path = parent_stream.get_root_stream().file_path
 
     name = func_stream.consume_word()
-    if func_stream.peek_char(1) != '(':
+    if func_stream.peek_char(1) != "(":
         return None
 
     if name not in funcs:
-        error_msg = (parent_stream.format_error(f'Function {name}() is not defined.')
-                    if parent_stream
-                    else func_stream.format_error(f'Function {name}() is not defined.'))
+        error_msg = (
+            parent_stream.format_error(f"Function {name}() is not defined.")
+            if parent_stream
+            else func_stream.format_error(f"Function {name}() is not defined.")
+        )
         raise SyntaxError(error_msg)
 
     return parse_func_call(func_stream, name)
 
-def parse_as_type(value: Any, target_type: str, can_be_func: bool = True, parent_stream: InputStream | None = None):
+
+def parse_as_type(
+    value: Any,
+    target_type: str,
+    can_be_func: bool = True,
+    parent_stream: InputStream | None = None,
+):
     """Convert a value to the specified type, handling expressions, function calls, and type casting."""
     # If value is already a dict (expression node), return it as-is
     if isinstance(value, dict):
@@ -497,23 +538,26 @@ def parse_as_type(value: Any, target_type: str, can_be_func: bool = True, parent
 
     # Try to cast to the requested type
     try:
-        if target_type == 'string':
+        if target_type == "string":
             # Strip quotes if present
             if isinstance(value, str) and value.startswith('"') and value.endswith('"'):
                 value = value[1:-1]
             return str(value)
-        elif target_type == 'int':
+        elif target_type == "int":
             return int(value)
-        elif target_type == 'float':
+        elif target_type == "float":
             return float(value)
-        elif target_type == 'bool':
+        elif target_type == "bool":
             return bool(value)
         else:
             # Unknown type, return as-is
             return value
     except (ValueError, TypeError) as e:
         value_type_name = value.__class__.__name__
-        raise SyntaxError(f'Could not cast {value_type_name} -> {target_type}. [{value}]') from e
+        raise SyntaxError(
+            f"Could not cast {value_type_name} -> {target_type}. [{value}]"
+        ) from e
+
 
 def _split_args(args_text: str) -> list[str]:
     """Split comma-separated arguments, respecting parentheses and string literals."""
@@ -521,12 +565,15 @@ def _split_args(args_text: str) -> list[str]:
         return []
 
     # Use the split function from utils which handles strings and parentheses
-    args = split(args_text, ',')
+    args = split(args_text, ",")
 
     # Strip whitespace from each argument
     return [arg.strip() for arg in args if arg.strip()]
 
-def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int) -> tuple[str, str | None]:
+
+def _parse_typed_arg(
+    arg: str, check_comma: bool, stream: InputStream, line: int
+) -> tuple[str, str | None]:
     """Parse a single argument which may have a type annotation.
 
     Returns (name, type) where type is None if untyped.
@@ -534,7 +581,7 @@ def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int
     """
     import re
 
-    if varargs_match := re.match(r'^(\w+)\s+(\*\*?)(\w+)$', arg):
+    if varargs_match := re.match(r"^(\w+)\s+(\*\*?)(\w+)$", arg):
         arg_type = varargs_match[1]
         if arg_type in types:
             varargs_marker = varargs_match[2]
@@ -560,7 +607,10 @@ def _parse_typed_arg(arg: str, check_comma: bool, stream: InputStream, line: int
         else:
             raise SyntaxError(f'Invalid argument "{arg}".')
 
-def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool = False) -> list[tuple[str, str | None, Any]]:
+
+def parse_args(
+    stream: InputStream, check_comma: bool = True, parse_types: bool = False
+) -> list[tuple[str, str | None, Any]]:
     """Parse function arguments.
 
     Args:
@@ -572,26 +622,28 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
         List of tuples: (name, type) where type is None if untyped or parse_types=False
     """
     stream.strip()
-    if not stream.consume('('):
-        raise SyntaxError(stream.format_error(f'Expected "(" but got "{stream.peek(10)}"'))
+    if not stream.consume("("):
+        raise SyntaxError(
+            stream.format_error(f'Expected "(" but got "{stream.peek(10)}"')
+        )
 
     line = stream.line
 
     # Read until matching closing parenthesis
-    args_text = ''
+    args_text = ""
     depth = 1
     new_arg = True
 
     while depth > 0 and stream.text:
         chr = stream.seek(1)
 
-        if chr == '(':
+        if chr == "(":
             depth += 1
-        elif chr == ')':
+        elif chr == ")":
             depth -= 1
             if depth == 0:
                 break
-        elif chr == ',':
+        elif chr == ",":
             new_arg = True
         else:
             new_arg = False
@@ -620,25 +672,33 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
         default_value: Any | None = None
         arg_decl = arg
 
-        if '=' in arg:
+        if "=" in arg:
             # Split only on the first top-level '=' to allow it inside strings
-            parts = split(arg, '=', maxsplit=1)
+            parts = split(arg, "=", maxsplit=1)
             arg_decl = parts[0].strip()
-            default_text = parts[1].strip() if len(parts) > 1 else ''
+            default_text = parts[1].strip() if len(parts) > 1 else ""
 
             if not default_text:
-                raise SyntaxError(stream.format_error('Expected default value after "="'))
+                raise SyntaxError(
+                    stream.format_error('Expected default value after "="')
+                )
 
             default_value = parse_literal(default_text)
             seen_default = True
         elif seen_default:
-            raise SyntaxError(stream.format_error('Non-default argument follows default argument'))
+            raise SyntaxError(
+                stream.format_error("Non-default argument follows default argument")
+            )
 
         name, arg_type = _parse_typed_arg(arg_decl, check_comma, stream, line)
 
         if default_value is not None:
-            if isinstance(arg_type, str) and (arg_type.endswith('*') or arg_type.endswith('**')):
-                raise SyntaxError(stream.format_error('Varargs parameters cannot have default values'))
+            if isinstance(arg_type, str) and (
+                arg_type.endswith("*") or arg_type.endswith("**")
+            ):
+                raise SyntaxError(
+                    stream.format_error("Varargs parameters cannot have default values")
+                )
             if arg_type is not None:
                 default_value = cast_value(default_value, arg_type)
 
@@ -646,20 +706,23 @@ def parse_args(stream: InputStream, check_comma: bool = True, parse_types: bool 
 
     return parsed_args
 
+
 def _normalize_operators(text: str) -> str:
     """Normalize custom operators to Python equivalents."""
     # Replace bitwise operators with logical operators
     # Note: This changes semantics but matches the language's intent
     # First replace double operators, then single ones
-    result = text.replace('&&', ' and ').replace('||', ' or ')
+    result = text.replace("&&", " and ").replace("||", " or ")
     # Replace negation operator with 'not'
     # Handle cases like "!1" -> "not 1"
     import re
-    result = re.sub(r'!(\w+|\()', r'not \1', result)
+
+    result = re.sub(r"!(\w+|\()", r"not \1", result)
     # Replace remaining single operators
-    result = result.replace('&', ' and ').replace('|', ' or ')
-    result = result.replace('\n', ' ')
+    result = result.replace("&", " and ").replace("|", " or ")
+    result = result.replace("\n", " ")
     return result
+
 
 def _ast_to_dict(node):
     """Convert AST node to dictionary representation."""
@@ -683,9 +746,11 @@ def _ast_to_dict(node):
 
     # Check if this is a method call on a variable (x.method(args))
     # We want to convert it to method(x, args) if method is a builtin function
-    if (isinstance(node, ast.Call) and
-        isinstance(node.func, ast.Attribute) and
-        isinstance(node.func.value, ast.Name)):
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+    ):
 
         # Get the method name
         method_name = node.func.attr
@@ -700,10 +765,14 @@ def _ast_to_dict(node):
 
             # Check if this function has varargs and pack them
             func_info = funcs[method_name]
-            func_args = func_info.get('args')
+            func_args = func_info.get("args")
             if func_args and isinstance(func_args, list) and func_args:
                 last_param_name, last_param_type = func_args[-1]
-                if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                if (
+                    last_param_type
+                    and last_param_type.endswith("*")
+                    and not last_param_type.endswith("**")
+                ):
                     # Has varargs - pack converted_args (NOT including the object)
                     # The function signature is: func(obj, fixed_param1, ..., varargs)
                     # num_fixed is how many fixed params (excluding the varargs)
@@ -712,54 +781,51 @@ def _ast_to_dict(node):
                     num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
                     fixed_args = converted_args[:num_fixed_args]
                     varargs = converted_args[num_fixed_args:]
-                    varargs_list = {
-                        'type': 'list',
-                        'value': varargs
-                    }
+                    varargs_list = {"type": "list", "value": varargs}
                     return {
-                        'func': {'id': method_name},
-                        'args': [{'id': obj_name}] + fixed_args + [varargs_list]
+                        "func": {"id": method_name},
+                        "args": [{"id": obj_name}] + fixed_args + [varargs_list],
                     }
 
             # Create new function call: method(x, ...)
             return {
-                'func': {'id': method_name},
-                'args': [{'id': obj_name}] + converted_args
+                "func": {"id": method_name},
+                "args": [{"id": obj_name}] + converted_args,
             }
 
     # Check if this is a method call on an expression (expr.method(args))
     # These are kept as-is but we need to transform varargs
-    if (isinstance(node, ast.Call) and
-        isinstance(node.func, ast.Attribute)):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
 
         method_name = node.func.attr
 
         # Check if this is a known function with varargs
         if method_name in funcs:
             func_info = funcs[method_name]
-            func_args = func_info.get('args')
+            func_args = func_info.get("args")
             if func_args and isinstance(func_args, list) and func_args:
                 last_param_name, last_param_type = func_args[-1]
-                if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                if (
+                    last_param_type
+                    and last_param_type.endswith("*")
+                    and not last_param_type.endswith("**")
+                ):
                     # Has varargs - transform the call node to pack varargs
                     # Convert the object expression
                     obj_expr = _ast_to_dict(node.func.value)
                     # Convert args
                     converted_args = [_ast_to_dict(arg) for arg in node.args]
-                    
+
                     # Pack varargs
                     num_fixed = len(func_args) - 1
                     num_fixed_args = num_fixed - 1 if num_fixed > 0 else 0
                     fixed_args = converted_args[:num_fixed_args]
                     varargs = converted_args[num_fixed_args:]
-                    varargs_list = {
-                        'type': 'list',
-                        'value': varargs
-                    }
-                    
+                    varargs_list = {"type": "list", "value": varargs}
+
                     return {
-                        'func': {'id': method_name},
-                        'args': [obj_expr] + fixed_args + [varargs_list]
+                        "func": {"id": method_name},
+                        "args": [obj_expr] + fixed_args + [varargs_list],
                     }
 
     # Handle varargs parameter packing for regular function calls
@@ -767,71 +833,79 @@ def _ast_to_dict(node):
     # into func(a, b, [c, d])
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         func_name = node.func.id
-        
+
         if func_name in funcs:
             func_info = funcs[func_name]
-            
+
             # Check if function has varargs - handle different formats
             has_varargs = False
             num_fixed = 0
-            
+
             # Format 1: regular functions with 'args' key as list of tuples
-            if 'args' in func_info:
-                func_args = func_info['args']
+            if "args" in func_info:
+                func_args = func_info["args"]
                 # Check if it's a list (regular functions) vs dict (builtin functions)
                 if isinstance(func_args, list) and func_args:
                     last_param_name, last_param_type = func_args[-1]
-                    if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                    if (
+                        last_param_type
+                        and last_param_type.endswith("*")
+                        and not last_param_type.endswith("**")
+                    ):
                         has_varargs = True
                         num_fixed = len(func_args) - 1
                 elif isinstance(func_args, dict):
                     # Builtin functions use dict format - check last value
                     param_types = list(func_args.values())
-                    if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
+                    if (
+                        param_types
+                        and param_types[-1].endswith("*")
+                        and not param_types[-1].endswith("**")
+                    ):
                         has_varargs = True
                         num_fixed = len(param_types) - 1
-            
+
             # Format 2: C functions with 'params' key (list of dicts)
-            elif 'params' in func_info:
-                params = func_info['params']
+            elif "params" in func_info:
+                params = func_info["params"]
                 params_list = params if isinstance(params, list) else []
                 if params_list:
                     last_param = params_list[-1]
-                    last_param_type = last_param.get('type', '') if isinstance(last_param, dict) else ''
-                    if last_param_type.endswith('*') and not last_param_type.endswith('**'):
+                    last_param_type = (
+                        last_param.get("type", "")
+                        if isinstance(last_param, dict)
+                        else ""
+                    )
+                    if last_param_type.endswith("*") and not last_param_type.endswith(
+                        "**"
+                    ):
                         has_varargs = True
                         num_fixed = len(params_list) - 1
-            
+
             if has_varargs:
                 # Convert all args to dict representation
                 converted_args = [_ast_to_dict(arg) for arg in node.args]
-                
+
                 # Split into fixed and varargs
                 fixed_args = converted_args[:num_fixed]
                 varargs = converted_args[num_fixed:]
-                
+
                 # Create a list literal for the varargs
-                varargs_list = {
-                    'type': 'list',
-                    'value': varargs
-                }
-                
+                varargs_list = {"type": "list", "value": varargs}
+
                 # Return function call with fixed args + varargs list
-                return {
-                    'func': {'id': func_name},
-                    'args': fixed_args + [varargs_list]
-                }
+                return {"func": {"id": func_name}, "args": fixed_args + [varargs_list]}
 
     result = {}
     for field in node._fields:
         # Skip "ctx" field as it's not needed for execution
-        if field == 'ctx':
+        if field == "ctx":
             continue
 
         value = getattr(node, field)
 
         # Recursively convert AST nodes
-        if hasattr(value, '_fields'):
+        if hasattr(value, "_fields"):
             value = _ast_to_dict(value)
         elif isinstance(value, list):
             value = [_ast_to_dict(item) for item in value]
@@ -841,39 +915,52 @@ def _ast_to_dict(node):
 
     return result
 
+
 def _validate_function_calls(node):
     """Recursively validate all function calls in the expression tree."""
     if not isinstance(node, dict):
         return node
 
     # Validate this node if it's a function call
-    if 'func' in node and 'args' in node:
-        func_ref = node['func']
-        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+    if "func" in node and "args" in node:
+        func_ref = node["func"]
+        func_name = func_ref.get("id") if isinstance(func_ref, dict) else None
 
         if func_name and func_name in funcs:
             func_info = funcs[func_name]
 
             # Apply defaults for non-C functions when args are missing
-            if func_info.get('type') != 'c_function':
-                node['args'] = _apply_default_args(func_info, list(node.get('args', [])), None, func_name)
+            if func_info.get("type") != "c_function":
+                node["args"] = _apply_default_args(
+                    func_info, list(node.get("args", [])), None, func_name
+                )
 
             # Validate argument count for C functions (skip if function has varargs)
-            if func_info.get('type') == 'c_function':
-                params = func_info.get('params', [])
+            if func_info.get("type") == "c_function":
+                params = func_info.get("params", [])
                 params_list = params if isinstance(params, list) else []
                 has_varargs = any(
-                    isinstance(p, dict) and isinstance(p.get('type', ''), str) and
-                    (p.get('type', '').endswith('*') or p.get('type', '').endswith('**'))
+                    isinstance(p, dict)
+                    and isinstance(p.get("type", ""), str)
+                    and (
+                        p.get("type", "").endswith("*")
+                        or p.get("type", "").endswith("**")
+                    )
                     for p in params_list
                 )
                 if not has_varargs:
-                    expected = func_info.get('param_count', 0)
-                    actual = len(node.get('args', []))
+                    expected = func_info.get("param_count", 0)
+                    actual = len(node.get("args", []))
                     if actual != expected:
-                        param_names = ', '.join(
-                            f"{p.get('type', '')} {p.get('name', '')}" for p in params_list if isinstance(p, dict)
-                        ) if params_list else 'void'
+                        param_names = (
+                            ", ".join(
+                                f"{p.get('type', '')} {p.get('name', '')}"
+                                for p in params_list
+                                if isinstance(p, dict)
+                            )
+                            if params_list
+                            else "void"
+                        )
                         raise SyntaxError(
                             f"Function '{func_name}' expects {expected} argument{'s' if expected != 1 else ''} "
                             f"({param_names}), got {actual}"
@@ -888,6 +975,7 @@ def _validate_function_calls(node):
                 _validate_function_calls(item)
 
     return node
+
 
 def _replace_const_calls(node):
     """Recursively replace const function calls with their evaluated values."""
@@ -905,31 +993,33 @@ def _replace_const_calls(node):
             result[key] = value
 
     # Now check if THIS node is a const function call that can be evaluated
-    if 'func' in result and 'args' in result:
-        func_ref = result['func']
-        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+    if "func" in result and "args" in result:
+        func_ref = result["func"]
+        func_name = func_ref.get("id") if isinstance(func_ref, dict) else None
 
         if func_name and func_name in funcs:
             func = funcs[func_name]
-            func_mods = func.get('mods', [])
+            func_mods = func.get("mods", [])
 
             # Check if this is a const function
-            if isinstance(func_mods, list) and 'const' in func_mods:
+            if isinstance(func_mods, list) and "const" in func_mods:
                 # Try to evaluate the const function call
                 try:
                     # Extract literal values from argument nodes
-                    arg_values = result.get('args', [])
+                    arg_values = result.get("args", [])
 
                     # Check if all args are literals (have 'value' key with non-dict value, or are primitives)
                     all_literal = True
                     for arg in arg_values:
                         if isinstance(arg, dict):
-                            if 'value' not in arg:
+                            if "value" not in arg:
                                 all_literal = False
                                 break
                             # Check if the value is itself a dict (complex expression)
-                            val = arg.get('value')
-                            if isinstance(val, dict) and ('op' in val or 'func' in val or 'id' in val):
+                            val = arg.get("value")
+                            if isinstance(val, dict) and (
+                                "op" in val or "func" in val or "id" in val
+                            ):
                                 all_literal = False
                                 break
 
@@ -940,14 +1030,22 @@ def _replace_const_calls(node):
                             if _is_large_int(cached_value):
                                 _runtime_call_funcs.add(func_name)
                                 return result
-                            return {'value': cached_value, 'type': get_type(cached_value)}
+                            return {
+                                "value": cached_value,
+                                "type": get_type(cached_value),
+                            }
 
-                        if func_name not in _eval_timeout_funcs and cache_key not in _eval_failed_cache:
+                        if (
+                            func_name not in _eval_timeout_funcs
+                            and cache_key not in _eval_failed_cache
+                        ):
                             # Evaluate the const function at parse time with timeout
                             with _with_eval_timeout(eval_timeout_seconds):
                                 _check_eval_timeout()
                                 _warmup_const_cache(func_name, func, arg_values)
-                                evaluated = _eval_func_at_parse_time(func_name, func, arg_values)
+                                evaluated = _eval_func_at_parse_time(
+                                    func_name, func, arg_values
+                                )
                                 _check_eval_timeout()
                             if _is_large_int(evaluated):
                                 _runtime_call_funcs.add(func_name)
@@ -955,27 +1053,32 @@ def _replace_const_calls(node):
                                 return result
                             _eval_cache[cache_key] = evaluated
                             # Return the evaluated value as a literal node
-                            return {'value': evaluated, 'type': get_type(evaluated)}
+                            return {"value": evaluated, "type": get_type(evaluated)}
                 except _ParseEvalTimeout:
                     _eval_timeout_funcs.add(func_name)
                     _runtime_call_funcs.add(func_name)
-                    _eval_failed_cache.add(_eval_cache_key(func_name, result.get('args', [])))
+                    _eval_failed_cache.add(
+                        _eval_cache_key(func_name, result.get("args", []))
+                    )
                 except Exception:
-                    _eval_failed_cache.add(_eval_cache_key(func_name, result.get('args', [])))
+                    _eval_failed_cache.add(
+                        _eval_cache_key(func_name, result.get("args", []))
+                    )
 
     return result
+
 
 def _contains_variable_refs(node):
     """Recursively check if a node contains any variable references ('id' key)."""
     if not isinstance(node, dict):
         return False
 
-    if 'id' in node and 'func' not in node:  # Variable reference (not a function name)
+    if "id" in node and "func" not in node:  # Variable reference (not a function name)
         return True
 
     # Recursively check nested structures
     for key, value in node.items():
-        if key == 'func':  # Skip function names
+        if key == "func":  # Skip function names
             continue
         if isinstance(value, dict):
             if _contains_variable_refs(value):
@@ -986,24 +1089,22 @@ def _contains_variable_refs(node):
                     return True
     return False
 
+
 def parse_expr(text: str):
     """Parse an expression using Python's AST parser and optionally evaluate constants."""
-    from runtime import eval_expr # type: ignore
+    from runtime import eval_expr  # type: ignore
     import runtime as runtime_module
 
     # Save and restore parse-time mode
-    old_runtime = runtime_module.runtime # type: ignore
-    runtime_module.runtime = False # type: ignore
+    old_runtime = runtime_module.runtime  # type: ignore
+    runtime_module.runtime = False  # type: ignore
 
     try:
         # Handle goto expressions: "goto label"
         text_stripped = text.strip()
-        if text_stripped.startswith('goto '):
+        if text_stripped.startswith("goto "):
             label = text_stripped[5:].strip()
-            return {
-                'type': 'goto',
-                'label': label
-            }
+            return {"type": "goto", "label": label}
 
         # Handle bytes literals before normalizing operators
         # Since Python's ast.parse doesn't support our b"..." syntax
@@ -1012,15 +1113,14 @@ def parse_expr(text: str):
 
         text = _normalize_operators(text)
         try:
-            expr = ast.parse(text, mode='eval').body
+            expr = ast.parse(text, mode="eval").body
         except SyntaxError as e:
             # Convert Python's SyntaxError to expected format
             error_msg = str(e)
-            if 'unterminated string literal' in error_msg:
-                raise SyntaxError('Expected \'"\'')
+            if "unterminated string literal" in error_msg:
+                raise SyntaxError("Expected '\"'")
             # Re-raise other syntax errors as-is
             raise
-
 
         expr_dict = _ast_to_dict(expr)
 
@@ -1037,26 +1137,29 @@ def parse_expr(text: str):
                 return expr_dict
 
             # Don't evaluate if it contains variable references (unless it's a set/list literal)
-            is_set_or_list_literal = expr_dict.get('type') in ('set', 'list')
+            is_set_or_list_literal = expr_dict.get("type") in ("set", "list")
             if not is_set_or_list_literal and _contains_variable_refs(expr_dict):
                 return expr_dict
 
             # Don't evaluate struct constructors at parse time
-            if 'func' in expr_dict:
-                func_name = expr_dict['func'].get('id') if isinstance(expr_dict['func'], dict) else None # type: ignore
+            if "func" in expr_dict:
+                func_name = expr_dict["func"].get("id") if isinstance(expr_dict["func"], dict) else None  # type: ignore
                 if func_name:
                     # Check if it's a direct struct constructor
-                    if func_name in vars and vars[func_name].get('type') == 'struct_def':
+                    if (
+                        func_name in vars
+                        and vars[func_name].get("type") == "struct_def"
+                    ):
                         return expr_dict
 
                     # Check if it's a function that returns a struct type
                     if func_name in funcs:
-                        return_type = funcs[func_name].get('return_type')
-                        if return_type and return_type in vars and vars[return_type].get('type') == 'struct_def': # type: ignore
+                        return_type = funcs[func_name].get("return_type")
+                        if return_type and return_type in vars and vars[return_type].get("type") == "struct_def":  # type: ignore
                             return expr_dict
 
             # Don't evaluate set literals at parse time
-            if expr_dict.get('type') == 'set':
+            if expr_dict.get("type") == "set":
                 return expr_dict
 
             with _with_eval_timeout(eval_timeout_seconds):
@@ -1069,10 +1172,12 @@ def parse_expr(text: str):
             # Only use evaluated result if it's a proper constant (not a variable name)
             # and the expression doesn't contain operators (already constant)
             # Don't evaluate if it's just a variable reference ('id' key indicates a Name node)
-            if (evaluated is not None
+            if (
+                evaluated is not None
                 and not isinstance(evaluated, str)
-                and 'ops' not in expr_dict
-                and 'id' not in expr_dict):  # Variable reference - keep as expr_dict
+                and "ops" not in expr_dict
+                and "id" not in expr_dict
+            ):  # Variable reference - keep as expr_dict
                 if _is_large_int(evaluated):
                     return expr_dict
                 return evaluated
@@ -1082,23 +1187,27 @@ def parse_expr(text: str):
 
         return expr_dict
     finally:
-        setattr(runtime_module, 'runtime', old_runtime)
+        setattr(runtime_module, "runtime", old_runtime)
+
 
 def parse_scope(stream: InputStream, level: int = 0) -> AstType:
     """Parse a code block enclosed in braces { }."""
     stream.strip()
-    if not stream.consume('{'):
+    if not stream.consume("{"):
         raise SyntaxError(stream.format_error('Expected "{"'))
 
-    ast = parse(stream, level=level+1)
+    ast = parse(stream, level=level + 1)
 
     stream.strip()
-    if not stream.consume('}'):
+    if not stream.consume("}"):
         raise SyntaxError(stream.format_error('Expected "}".'))
 
     return ast
 
-def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str, str|Any] | type[SkipNode]:
+
+def parse_func(
+    stream: InputStream, name: str, type: str, mods: list = []
+) -> dict[str, str | Any] | type[SkipNode]:
     # sourcery skip: default-mutable-arg
     global current_func
     current_func = name
@@ -1114,23 +1223,26 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
         defaults.append(default_value)
         args.append((arg_name, arg_type))
 
-        vars[arg_name] = {
-            "type": arg_type or "none",
-            "value": None
-        }
+        vars[arg_name] = {"type": arg_type or "none", "value": None}
 
     scope = parse_scope(stream)
     stream.strip()
 
     # Check if this is a const function with non-evaluable builtins or bytecode blocks
-    if 'const' in mods:
+    if "const" in mods:
         has_non_eval, builtin_name = _has_non_evaluable_builtins(scope)
         has_non_eval = has_non_eval or _scope_has_non_evaluable_nodes(scope, {name})
         if has_non_eval:
-            warning_detail = f"builtin '{builtin_name}()'" if builtin_name else 'non-evaluable bytecode'
-            print(f"Warning: const function '{name}' contains {warning_detail}. Treating as regular function.")
+            warning_detail = (
+                f"builtin '{builtin_name}()'"
+                if builtin_name
+                else "non-evaluable bytecode"
+            )
+            print(
+                f"Warning: const function '{name}' contains {warning_detail}. Treating as regular function."
+            )
             # Remove 'const' from mods to treat it as a regular function
-            mods = [m for m in mods if m != 'const']
+            mods = [m for m in mods if m != "const"]
 
     funcs[name] = {
         "type": "func",
@@ -1138,17 +1250,19 @@ def parse_func(stream:InputStream, name:str, type:str, mods:list=[]) -> dict[str
         "defaults": defaults,
         "func": scope,
         "mods": mods,
-        "return_type": type
+        "return_type": type,
     }
 
-    return make_node(stream,
+    return make_node(
+        stream,
         type="function",
         name=name,
         **{"return": type},
         args=args,
         scope=scope,
-        mods=mods
+        mods=mods,
     )
+
 
 def _consume_expression(stream: InputStream) -> str:
     """Consume an expression, handling multiline constructs inside (), [], {}."""
@@ -1156,12 +1270,12 @@ def _consume_expression(stream: InputStream) -> str:
     depth = 0
     in_string = False
     quote_char = None
-    
+
     while stream.text:
         char = stream.peek(1)
-        
+
         if in_string:
-            if char == '\\':
+            if char == "\\":
                 # Escape sequence
                 stream.consume(char)
                 expr += char
@@ -1174,23 +1288,24 @@ def _consume_expression(stream: InputStream) -> str:
                 in_string = False
                 quote_char = None
         else:
-            if char in '"\'':
+            if char in "\"'":
                 in_string = True
                 quote_char = char
-            elif char in '([{':
+            elif char in "([{":
                 depth += 1
-            elif char in ')]}':
+            elif char in ")]}":
                 if depth == 0:
                     break
                 depth -= 1
-            elif char == '\n':
+            elif char == "\n":
                 if depth == 0:
                     break
-        
+
         stream.consume(char)
         expr += char
-        
+
     return expr
+
 
 def parse_var(
     stream: InputStream,
@@ -1198,7 +1313,7 @@ def parse_var(
     name: str,
     mods: list = [],
     list_capacity: int | None = None,
-    list_elem_type: str | None = None
+    list_elem_type: str | None = None,
 ) -> dict[str, Any] | type[SkipNode]:
     """Parse a variable declaration or assignment.
 
@@ -1213,28 +1328,24 @@ def parse_var(
     """
     stream.strip()
 
-    if not stream.consume('='):
+    if not stream.consume("="):
         raise SyntaxError(stream.format_error('Expected "=".'))
 
     # Save line number before consuming the value
     value_line = stream.line
 
     # Parse the value expression
-    value_text = _consume_expression(stream).strip().rstrip(';')
+    value_text = _consume_expression(stream).strip().rstrip(";")
     value = parse_expr(value_text)
 
     if var_type is None:
-        var_type = vars[name].get('type', 'any') if name in vars else 'any'
+        var_type = vars[name].get("type", "any") if name in vars else "any"
     # Type check/cast for non-dict values (var_type is guaranteed to be str here)
     if not isinstance(value, dict):
-        value = parse_as_type(value, var_type, parent_stream=stream) # type: ignore
+        value = parse_as_type(value, var_type, parent_stream=stream)  # type: ignore
 
     # Build the variable info dict
-    var_info = {
-        "type": var_type,
-        "value": value,
-        "mods": mods
-    }
+    var_info = {"type": var_type, "value": value, "mods": mods}
 
     if list_capacity is not None or list_elem_type is not None:
         var_info["list_capacity"] = list_capacity
@@ -1245,45 +1356,43 @@ def parse_var(
     vars[name] = var_info
 
     # Const variables are compile-time only
-    if 'const' in mods:
+    if "const" in mods:
         return SkipNode
 
     # Return AST node for runtime with correct line number
-    node = make_node(stream,
-        type="var",
-        name=name,
-        value_type=var_type,
-        value=value,
-        mods=mods
+    node = make_node(
+        stream, type="var", name=name, value_type=var_type, value=value, mods=mods
     )
     if list_capacity is not None or list_elem_type is not None:
         node["list_capacity"] = list_capacity
         node["list_elem_type"] = list_elem_type
         node["list_static"] = True
     # Override with the line where the value starts
-    node['line'] = value_line
+    node["line"] = value_line
     return node
+
 
 def _is_runtime_expression(value: dict) -> bool:
     """Check if a dict represents an expression that must be evaluated at runtime."""
     # Subscript expressions (indexing): arr[i]
-    if 'slice' in value:
+    if "slice" in value:
         return True
 
     # Field access: obj.field
-    if 'attr' in value:
+    if "attr" in value:
         return True
 
     # F-strings or other complex expressions
-    if 'values' in value and 'value' not in value:
+    if "values" in value and "value" not in value:
         return True
 
     # Function calls that can't be evaluated at compile time
-    if value.get('type') == 'call':
-        func_name = value.get('name', '')
-        return not funcs.get(func_name, {}).get('can_eval', False)
+    if value.get("type") == "call":
+        func_name = value.get("name", "")
+        return not funcs.get(func_name, {}).get("can_eval", False)
 
     return False
+
 
 def cast_value(value: Any, required_type: str):
     """Cast a value to the required type, handling variables, expressions, and function calls."""
@@ -1295,7 +1404,7 @@ def cast_value(value: Any, required_type: str):
             # Can't substitute non-literal variables
             return var_info if is_literal(value) else parse_expr(value)
         # Function call
-        if '(' in value:
+        if "(" in value:
             func_stream = InputStream(value)
             func_name = func_stream.consume_word()
             try:
@@ -1314,7 +1423,7 @@ def cast_value(value: Any, required_type: str):
         if actual_type != required_type:
             new_value = parse_as_type(value, required_type, can_be_func=False)
             if new_value is None:
-                raise SyntaxError(f'Cannot cast {actual_type} -> {required_type}')
+                raise SyntaxError(f"Cannot cast {actual_type} -> {required_type}")
             return {"type": required_type, "value": new_value}
         return value
 
@@ -1323,15 +1432,15 @@ def cast_value(value: Any, required_type: str):
         return value
 
     # Accept any type if required type is 'any'
-    if required_type == 'any':
+    if required_type == "any":
         return value
 
     # Extract type and value from dict
-    value_type = value.get('type')
-    actual_value = value.get('value')
+    value_type = value.get("type")
+    actual_value = value.get("value")
 
     # If no value key, return as-is (complex expression)
-    if 'value' not in value:
+    if "value" not in value:
         return value
 
     # Type matches, return as-is
@@ -1341,13 +1450,14 @@ def cast_value(value: Any, required_type: str):
     # Try to cast
     new_value = parse_as_type(actual_value, required_type, can_be_func=False)
     if new_value is None:
-        raise SyntaxError(f'Cannot cast {value_type} -> {required_type}')
+        raise SyntaxError(f"Cannot cast {value_type} -> {required_type}")
 
     return {"type": required_type, "value": new_value}
 
+
 def cast_args(args: list, func: dict) -> list:
     """Cast function arguments to match the function's expected types."""
-    func_args = func.get('args', [])
+    func_args = func.get("args", [])
 
     # Handle both dict and list formats for function args
     if isinstance(func_args, dict):
@@ -1368,7 +1478,7 @@ def cast_args(args: list, func: dict) -> list:
             continue  # No type requirement
 
         # Skip casting for varargs parameters - they're already packed as lists
-        if required_type.endswith('*') and not required_type.endswith('**'):
+        if required_type.endswith("*") and not required_type.endswith("**"):
             continue
 
         casted = cast_value(arg, required_type)
@@ -1376,6 +1486,7 @@ def cast_args(args: list, func: dict) -> list:
             args[i] = casted
 
     return args
+
 
 def _has_varargs_definition(func_args: list) -> bool:
     """Return True if the last argument is marked as varargs (type ending with * or **)."""
@@ -1385,17 +1496,22 @@ def _has_varargs_definition(func_args: list) -> bool:
     last_arg = func_args[-1]
     if isinstance(last_arg, (list, tuple)) and len(last_arg) >= 2:
         last_type = last_arg[1]
-        return isinstance(last_type, str) and (last_type.endswith('*') or last_type.endswith('**'))
+        return isinstance(last_type, str) and (
+            last_type.endswith("*") or last_type.endswith("**")
+        )
 
     return False
 
-def _apply_default_args(func: dict, provided_args: list, stream: InputStream | None, name: str) -> list:
+
+def _apply_default_args(
+    func: dict, provided_args: list, stream: InputStream | None, name: str
+) -> list:
     """Insert default argument values for missing parameters based on the function signature."""
-    func_args = func.get('args', [])
+    func_args = func.get("args", [])
     if not isinstance(func_args, list) or not func_args:
         return provided_args
 
-    defaults = func.get('defaults', [])
+    defaults = func.get("defaults", [])
     defaults = defaults if isinstance(defaults, list) else []
 
     # Varargs (type ending with * or **) are optional and should not require defaults
@@ -1405,9 +1521,7 @@ def _apply_default_args(func: dict, provided_args: list, stream: InputStream | N
         for idx in range(len(provided_args), required_args):
             default_val = defaults[idx] if idx < len(defaults) else None
             if default_val is None:
-                message = (
-                    f"Function '{name}' expects at least {required_args} argument{'s' if required_args != 1 else ''}, got {len(provided_args)}"
-                )
+                message = f"Function '{name}' expects at least {required_args} argument{'s' if required_args != 1 else ''}, got {len(provided_args)}"
                 if stream is not None:
                     raise SyntaxError(stream.format_error(message))
                 raise SyntaxError(message)
@@ -1415,28 +1529,30 @@ def _apply_default_args(func: dict, provided_args: list, stream: InputStream | N
 
     return provided_args
 
+
 def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
     """Check if a function body contains builtin calls that cannot be evaluated at parse time.
     Returns (has_non_evaluable, first_builtin_name)"""
+
     def check_node(node):
         if not isinstance(node, dict):
             return False, None
 
         # Check if this is a builtin function call (type='call')
-        if node.get('type') == 'call':
-            func_name = node.get('name')
+        if node.get("type") == "call":
+            func_name = node.get("name")
             if func_name and func_name in funcs:
                 func = funcs[func_name]
-                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                if func.get("type") == "builtin" and not func.get("can_eval", True):
                     return True, func_name
 
         # Check if this is a function call in expression format (has 'func' key)
-        if 'func' in node and 'args' in node:
-            func_ref = node['func']
-            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+        if "func" in node and "args" in node:
+            func_ref = node["func"]
+            func_name = func_ref.get("id") if isinstance(func_ref, dict) else None
             if func_name and func_name in funcs:
                 func = funcs[func_name]
-                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                if func.get("type") == "builtin" and not func.get("can_eval", True):
                     return True, func_name
 
         # Recursively check nested structures
@@ -1460,11 +1576,12 @@ def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
 
     return False, None
 
+
 def _eval_cache_key(name: str, arg_values: list) -> tuple[str, tuple[Any, ...]]:
     def to_key(value: Any):
         if isinstance(value, dict):
-            if 'value' in value:
-                return to_key(value['value'])
+            if "value" in value:
+                return to_key(value["value"])
             return repr(value)
         if isinstance(value, list):
             return tuple(to_key(v) for v in value)
@@ -1476,8 +1593,10 @@ def _eval_cache_key(name: str, arg_values: list) -> tuple[str, tuple[Any, ...]]:
 
     return name, tuple(to_key(arg) for arg in arg_values)
 
+
 class _ParseEvalTimeout(Exception):
     """Raised when parse-time evaluation exceeds time budget."""
+
 
 def _check_eval_timeout():
     """Raise if parse-time evaluation exceeded the deadline."""
@@ -1485,15 +1604,17 @@ def _check_eval_timeout():
         # Parse-time eval timeout - handled silently
         raise _ParseEvalTimeout()
 
+
 def _with_eval_timeout(seconds: float):
     """Context manager to enforce a time limit on parse-time evaluation."""
+
     class _TimeoutCtx:
         def __enter__(self):
             import runtime as runtime_module
 
             self._runtime_module = runtime_module
-            self._old_checker = getattr(runtime_module, 'eval_timeout_checker', None)
-            setattr(runtime_module, 'eval_timeout_checker', _check_eval_timeout)
+            self._old_checker = getattr(runtime_module, "eval_timeout_checker", None)
+            setattr(runtime_module, "eval_timeout_checker", _check_eval_timeout)
 
             global _eval_deadline
             _eval_deadline = time.monotonic() + max(0.0, seconds)
@@ -1501,8 +1622,10 @@ def _with_eval_timeout(seconds: float):
             self._signal_installed = False
             try:
                 if threading.current_thread() is threading.main_thread():
+
                     def _handler(_signum, _frame):
                         raise _ParseEvalTimeout()
+
                     self._old_handler = signal.signal(signal.SIGALRM, _handler)
                     signal.setitimer(signal.ITIMER_REAL, seconds)
                     self._signal_installed = True
@@ -1515,57 +1638,63 @@ def _with_eval_timeout(seconds: float):
                 signal.setitimer(signal.ITIMER_REAL, 0)
                 signal.signal(signal.SIGALRM, self._old_handler)
 
-            setattr(self._runtime_module, 'eval_timeout_checker', self._old_checker)
+            setattr(self._runtime_module, "eval_timeout_checker", self._old_checker)
             global _eval_deadline
             _eval_deadline = None
             return False
 
     return _TimeoutCtx()
 
+
 def _scope_has_non_evaluable_nodes(scope: list, visited_funcs: set[str]) -> bool:
     """Recursively check for nodes that cannot be evaluated at parse time."""
+
     def check_node(node: Any) -> bool:
         if not isinstance(node, dict):
             return False
 
-        node_type = node.get('type')
-        if node_type in {'bytecode_block', 'import', 'c_import', 'py_import'}:
+        node_type = node.get("type")
+        if node_type in {"bytecode_block", "import", "c_import", "py_import"}:
             return True
 
         # Direct call node
-        if node_type == 'call':
-            func_name = node.get('name')
+        if node_type == "call":
+            func_name = node.get("name")
             if func_name in funcs:
                 func = funcs[func_name]
-                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                if func.get("type") == "builtin" and not func.get("can_eval", True):
                     return True
-                if func.get('type') == 'c_function':
+                if func.get("type") == "c_function":
                     return True
-                if func.get('type') == 'func':
+                if func.get("type") == "func":
                     if func_name in visited_funcs:
                         return False
                     visited_funcs.add(func_name)
-                    func_body = func.get('func')
-                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(func_body, visited_funcs):
+                    func_body = func.get("func")
+                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(
+                        func_body, visited_funcs
+                    ):
                         return True
                     visited_funcs.remove(func_name)
 
         # Expression call node
-        if 'func' in node and 'args' in node:
-            func_ref = node.get('func')
-            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+        if "func" in node and "args" in node:
+            func_ref = node.get("func")
+            func_name = func_ref.get("id") if isinstance(func_ref, dict) else None
             if func_name in funcs:
                 func = funcs[func_name]
-                if func.get('type') == 'builtin' and not func.get('can_eval', True):
+                if func.get("type") == "builtin" and not func.get("can_eval", True):
                     return True
-                if func.get('type') == 'c_function':
+                if func.get("type") == "c_function":
                     return True
-                if func.get('type') == 'func':
+                if func.get("type") == "func":
                     if func_name in visited_funcs:
                         return False
                     visited_funcs.add(func_name)
-                    func_body = func.get('func')
-                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(func_body, visited_funcs):
+                    func_body = func.get("func")
+                    if isinstance(func_body, list) and _scope_has_non_evaluable_nodes(
+                        func_body, visited_funcs
+                    ):
                         return True
                     visited_funcs.remove(func_name)
 
@@ -1580,17 +1709,18 @@ def _scope_has_non_evaluable_nodes(scope: list, visited_funcs: set[str]) -> bool
 
     return any(check_node(statement) for statement in scope)
 
+
 def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
     """Check if a function call can be evaluated at parse time."""
     if disable_eval:
         return False
 
     # C functions cannot be evaluated at parse time
-    if func.get('type') == 'c_function':
+    if func.get("type") == "c_function":
         return False
 
-    func_mods = func.get('mods', [])
-    is_const = isinstance(func_mods, list) and 'const' in func_mods
+    func_mods = func.get("mods", [])
+    is_const = isinstance(func_mods, list) and "const" in func_mods
 
     # Const functions are always evaluated at parse time
     if is_const:
@@ -1598,33 +1728,39 @@ def _can_eval_at_parse_time(func: dict, arg_values: list) -> bool:
 
     # Don't evaluate functions that return struct types at parse time
     # (C VM needs runtime calls for struct constructors)
-    return_type = func.get('return_type', 'none')
-    if isinstance(return_type, str) and return_type in vars and vars[return_type].get('type') == 'struct_def':
+    return_type = func.get("return_type", "none")
+    if (
+        isinstance(return_type, str)
+        and return_type in vars
+        and vars[return_type].get("type") == "struct_def"
+    ):
         return False
 
     # Skip functions with non-evaluable nodes (bytecode blocks or non-evaluable builtins)
-    if func.get('type') == 'func' and _scope_has_non_evaluable_nodes(func.get('func', []), set()):
+    if func.get("type") == "func" and _scope_has_non_evaluable_nodes(
+        func.get("func", []), set()
+    ):
         return False
 
     # Function must allow evaluation and all args must be literals
-    return (func.get('can_eval', True) and
-            all(is_literal(arg) for arg in arg_values))
+    return func.get("can_eval", True) and all(is_literal(arg) for arg in arg_values)
+
 
 def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
     """Evaluate a function call at parse time (compile time)."""
-    func_type = func['type']
+    func_type = func["type"]
 
     # Extract actual values from argument nodes
     func_args = []
     for arg in arg_values:
         if isinstance(arg, dict):
-            func_args.append(arg.get('value', arg))
+            func_args.append(arg.get("value", arg))
         else:
             func_args.append(arg)
 
     # Evaluate builtin function
-    if func_type == 'builtin':
-        func_callable = func.get('func')
+    if func_type == "builtin":
+        func_callable = func.get("func")
         if not callable(func_callable):
             raise SyntaxError(f"Function {name} is not callable")
         return func_callable(*func_args)
@@ -1634,24 +1770,22 @@ def _eval_func_at_parse_time(name: str, func: dict, arg_values: list) -> Any:
     import runtime as runtime_module
 
     # Set up function arguments in vars
-    func_arg_names = func.get('args', [])
+    func_arg_names = func.get("args", [])
     if isinstance(func_arg_names, list):
         for (arg_name, _), arg_value in zip(func_arg_names, func_args):
             if isinstance(arg_name, str):
-                vars[arg_name] = {
-                    "type": get_type(arg_value),
-                    "value": arg_value
-                }
+                vars[arg_name] = {"type": get_type(arg_value), "value": arg_value}
 
     # Execute function body
-    setattr(runtime_module, 'vars', vars)
-    setattr(runtime_module, 'runtime', False)
+    setattr(runtime_module, "vars", vars)
+    setattr(runtime_module, "runtime", False)
 
-    func_body = func.get('func')
+    func_body = func.get("func")
     if not isinstance(func_body, list):
         raise SyntaxError(f"Function {name} has invalid body")
 
     return run_scope(cast(AstType, func_body))
+
 
 def _warmup_const_cache(func_name: str, func: dict, arg_values: list):
     """Best-effort warmup to populate parse-time cache within the current time budget."""
@@ -1663,7 +1797,7 @@ def _warmup_const_cache(func_name: str, func: dict, arg_values: list):
         return
 
     arg0 = arg_values[0]
-    arg_val = arg0.get('value') if isinstance(arg0, dict) else arg0
+    arg_val = arg0.get("value") if isinstance(arg0, dict) else arg0
     if not isinstance(arg_val, int) or arg_val < 0:
         return
 
@@ -1678,6 +1812,7 @@ def _warmup_const_cache(func_name: str, func: dict, arg_values: list):
             break
         except Exception:
             break
+
 
 def parse_func_call(stream: InputStream, name: str) -> dict:
     """Parse a function call and optionally evaluate it at compile time."""
@@ -1708,48 +1843,49 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
     arg_values = _apply_default_args(func, arg_values, stream, name)
 
     # Transform varargs calls: if function has type* param, pack extra args into list
-    func_args = func.get('args')
-    func_params = func.get('params')
-    
+    func_args = func.get("args")
+    func_params = func.get("params")
+
     if func_args:  # Regular or builtin functions
         if isinstance(func_args, list) and func_args:
             # Regular functions: list of tuples
             last_param_name, last_param_type = func_args[-1]
-            if last_param_type and last_param_type.endswith('*') and not last_param_type.endswith('**'):
+            if (
+                last_param_type
+                and last_param_type.endswith("*")
+                and not last_param_type.endswith("**")
+            ):
                 # Has varargs - pack extra args into list
                 num_fixed = len(func_args) - 1
                 fixed_args = arg_values[:num_fixed]
                 varargs = arg_values[num_fixed:]
-                varargs_list = {
-                    'type': 'list',
-                    'value': varargs
-                }
+                varargs_list = {"type": "list", "value": varargs}
                 arg_values = fixed_args + [varargs_list]
         elif isinstance(func_args, dict):
             # Builtin functions: dict of param_name -> type
             param_types = list(func_args.values())
-            if param_types and param_types[-1].endswith('*') and not param_types[-1].endswith('**'):
+            if (
+                param_types
+                and param_types[-1].endswith("*")
+                and not param_types[-1].endswith("**")
+            ):
                 num_fixed = len(param_types) - 1
                 fixed_args = arg_values[:num_fixed]
                 varargs = arg_values[num_fixed:]
-                varargs_list = {
-                    'type': 'list',
-                    'value': varargs
-                }
+                varargs_list = {"type": "list", "value": varargs}
                 arg_values = fixed_args + [varargs_list]
     elif func_params:  # C functions
         params_list = func_params if isinstance(func_params, list) else []
         if params_list:
             last_param = params_list[-1]
-            last_param_type = last_param.get('type', '') if isinstance(last_param, dict) else ''
-            if last_param_type.endswith('*') and not last_param_type.endswith('**'):
+            last_param_type = (
+                last_param.get("type", "") if isinstance(last_param, dict) else ""
+            )
+            if last_param_type.endswith("*") and not last_param_type.endswith("**"):
                 num_fixed = len(params_list) - 1
                 fixed_args = arg_values[:num_fixed]
                 varargs = arg_values[num_fixed:]
-                varargs_list = {
-                    'type': 'list',
-                    'value': varargs
-                }
+                varargs_list = {"type": "list", "value": varargs}
                 arg_values = fixed_args + [varargs_list]
 
     # Type-cast arguments to match function signature
@@ -1760,43 +1896,37 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
         cache_key = _eval_cache_key(name, arg_values)
         if cache_key in _eval_cache:
             cached_value = _eval_cache[cache_key]
-            if cached_value is None and func.get('return_type') == 'void':
-                node = make_node(stream,
-                    type="call",
-                    name=name,
-                    args=arg_values,
-                    return_type="void"
+            if cached_value is None and func.get("return_type") == "void":
+                node = make_node(
+                    stream, type="call", name=name, args=arg_values, return_type="void"
                 )
             else:
-                node = make_node(stream,
-                    type=get_type(cached_value),
-                    value=cached_value
+                node = make_node(
+                    stream, type=get_type(cached_value), value=cached_value
                 )
-            node['line'] = call_line
+            node["line"] = call_line
             return node
 
         if name not in _eval_timeout_funcs and cache_key not in _eval_failed_cache:
             try:
                 with _with_eval_timeout(eval_timeout_seconds):
                     # Warm up cache for const calls before full eval
-                    func_mods = func.get('mods', []) if isinstance(func, dict) else []
-                    if isinstance(func_mods, list) and 'const' in func_mods:
+                    func_mods = func.get("mods", []) if isinstance(func, dict) else []
+                    if isinstance(func_mods, list) and "const" in func_mods:
                         _warmup_const_cache(name, func, arg_values)
                     value = _eval_func_at_parse_time(name, func, arg_values)
                 _eval_cache[cache_key] = value
-                if value is None and func.get('return_type') == 'void':
-                    node = make_node(stream,
+                if value is None and func.get("return_type") == "void":
+                    node = make_node(
+                        stream,
                         type="call",
                         name=name,
                         args=arg_values,
-                        return_type="void"
+                        return_type="void",
                     )
                 else:
-                    node = make_node(stream,
-                        type=get_type(value),
-                        value=value
-                    )
-                node['line'] = call_line
+                    node = make_node(stream, type=get_type(value), value=value)
+                node["line"] = call_line
                 return node
             except _ParseEvalTimeout:
                 _eval_timeout_funcs.add(name)
@@ -1807,25 +1937,27 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
 
     # Return runtime function call node
     _runtime_call_funcs.add(name)
-    node = make_node(stream,
+    node = make_node(
+        stream,
         type="call",
         name=name,
         args=arg_values,
-        return_type=str(func.get('return_type', 'none'))
+        return_type=str(func.get("return_type", "none")),
     )
-    node['line'] = call_line
+    node["line"] = call_line
     return node
+
 
 def _try_unroll_for_loop(loop_node: dict, max_iterations: int = 10) -> dict | None:
     """Try to unroll a for loop if bounds are constant and iteration count is small.
     Returns a scope node containing unrolled statements, or None if can't unroll."""
 
     # Extract loop components
-    var_name = loop_node.get('var')
-    start_node = loop_node.get('start')
-    end_node = loop_node.get('end')
-    step_node = loop_node.get('step', 1)
-    scope = loop_node.get('scope', [])
+    var_name = loop_node.get("var")
+    start_node = loop_node.get("start")
+    end_node = loop_node.get("end")
+    step_node = loop_node.get("step", 1)
+    scope = loop_node.get("scope", [])
 
     # Try to evaluate bounds as constants
     start_val = _eval_const_node(start_node)
@@ -1853,7 +1985,7 @@ def _try_unroll_for_loop(loop_node: dict, max_iterations: int = 10) -> dict | No
             "name": var_name,
             "value_type": "int",
             "value": i,
-            "mods": []
+            "mods": [],
         }
         unrolled_stmts.append(var_stmt)
 
@@ -1861,10 +1993,8 @@ def _try_unroll_for_loop(loop_node: dict, max_iterations: int = 10) -> dict | No
         # (they can reference the loop variable)
         unrolled_stmts.extend(iter(scope))
     # Return a special "unrolled" marker node that will be flattened into the parent scope
-    return {
-        "type": "unrolled_loop",
-        "statements": unrolled_stmts
-    }
+    return {"type": "unrolled_loop", "statements": unrolled_stmts}
+
 
 def _eval_const_node(node: Any) -> Any:
     """Evaluate a node to a constant value if possible."""
@@ -1874,31 +2004,32 @@ def _eval_const_node(node: Any) -> Any:
         return node
 
     # Direct value
-    if 'value' in node and 'left' not in node and 'op' not in node:
-        return node['value']
+    if "value" in node and "left" not in node and "op" not in node:
+        return node["value"]
 
     # Simple operations
-    if 'left' in node and 'op' in node and 'right' in node:
-        left = _eval_const_node(node['left'])
-        right = _eval_const_node(node['right'])
+    if "left" in node and "op" in node and "right" in node:
+        left = _eval_const_node(node["left"])
+        right = _eval_const_node(node["right"])
 
         if left is not None and right is not None:
-            op = node['op']
+            op = node["op"]
             try:
-                if op == 'Add':
+                if op == "Add":
                     return left + right
-                elif op == 'Sub':
+                elif op == "Sub":
                     return left - right
-                elif op == 'Mult':
+                elif op == "Mult":
                     return left * right
-                elif op == 'Div':
+                elif op == "Div":
                     return left // right if isinstance(left, int) else left / right
             except:
                 return None
 
     return None
 
-def parse_switch_body(stream:InputStream, level:int) -> AstType:
+
+def parse_switch_body(stream: InputStream, level: int) -> AstType:
     """Parse statements in a switch case/default body until we hit case/default/}"""
     body = []
     while True:
@@ -1907,9 +2038,9 @@ def parse_switch_body(stream:InputStream, level:int) -> AstType:
         # Peek ahead to see if we're at the end of this case body
         next_word = stream.peek_word()
         # Check if next_word STARTS with case or default (since peek_word includes :)
-        if next_word.startswith('case') or next_word.startswith('default'):
+        if next_word.startswith("case") or next_word.startswith("default"):
             break
-        if stream.peek(1) == '}':
+        if stream.peek(1) == "}":
             break
 
         # Check if there's any text left
@@ -1922,18 +2053,21 @@ def parse_switch_body(stream:InputStream, level:int) -> AstType:
 
     return body
 
-def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[SkipNode]:
+
+def parse_any(
+    stream: InputStream, level: int = 0
+) -> dict[str, Any] | None | type[SkipNode]:
     global loop_depth
     stream.strip()
 
     # Handle pragma directives (they're already processed in parse(), just skip them here)
-    if stream.peek(1) == '#' and stream.text.lstrip().startswith('#pragma'):
+    if stream.peek(1) == "#" and stream.text.lstrip().startswith("#pragma"):
         # Consume the entire pragma line
-        while stream.text and stream.text[0] not in '\n':
+        while stream.text and stream.text[0] not in "\n":
             stream.consume(stream.text[0])
         # Skip the newline too
-        if stream.text and stream.text[0] == '\n':
-            stream.consume('\n')
+        if stream.text and stream.text[0] == "\n":
+            stream.consume("\n")
         return SkipNode
 
     # Either a variable or a function def
@@ -1950,9 +2084,13 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             stream.strip()
 
             # Expect py_import keyword
-            if stream.peek_word() != 'py_import':
-                raise SyntaxError(stream.format_error(f'Expected "py_import" after "from {module_name}"'))
-            stream.consume('py_import')
+            if stream.peek_word() != "py_import":
+                raise SyntaxError(
+                    stream.format_error(
+                        f'Expected "py_import" after "from {module_name}"'
+                    )
+                )
+            stream.consume("py_import")
             stream.strip()
 
             # Get the specific name to import
@@ -1961,18 +2099,19 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             # Optional: check for 'as' alias
             alias = None
-            if stream.peek_word() == 'as':
-                stream.consume('as')
+            if stream.peek_word() == "as":
+                stream.consume("as")
                 stream.strip()
                 alias = stream.consume_word()
 
-            node = make_node(stream,
-                type='py_import',
+            node = make_node(
+                stream,
+                type="py_import",
                 module=module_name,
                 name=import_name,
-                alias=alias
+                alias=alias,
             )
-            node['line'] = decl_line
+            node["line"] = decl_line
             return node
 
         # Check for "py_import <module>" or "py_import <module> as <alias>" statement
@@ -1985,17 +2124,13 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             # Check for 'as' alias
             alias = None
-            if stream.peek_word() == 'as':
-                stream.consume('as')
+            if stream.peek_word() == "as":
+                stream.consume("as")
                 stream.strip()
                 alias = stream.consume_word()
 
-            node = make_node(stream,
-                type='py_import',
-                module=module_name,
-                alias=alias
-            )
-            node['line'] = decl_line
+            node = make_node(stream, type="py_import", module=module_name, alias=alias)
+            node["line"] = decl_line
             return node
 
         # Check for struct definition first
@@ -2007,7 +2142,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             # Expect opening brace
             stream.strip()
-            if not stream.consume('{'):
+            if not stream.consume("{"):
                 raise SyntaxError(stream.format_error('Expected "{" after struct name'))
 
             # Parse struct fields
@@ -2016,48 +2151,38 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 stream.strip()
 
                 # Check for closing brace
-                if stream.peek(1) == '}':
-                    stream.consume('}')
+                if stream.peek(1) == "}":
+                    stream.consume("}")
                     break
 
                 # Parse field type (may be multi-word like "unsigned char")
                 field_type = stream.consume_word()
                 stream.strip()
-                
+
                 # Check if this is a multi-word type (unsigned/signed modifier)
-                if field_type in ('unsigned', 'signed'):
+                if field_type in ("unsigned", "signed"):
                     # Read the next word as part of the type
                     next_word = stream.consume_word()
                     field_type = f"{field_type} {next_word}"
                     stream.strip()
-                
+
                 if field_type not in types and field_type not in vars:
                     # It might be another struct type - that's ok
                     pass
 
                 field_name = stream.consume_word()
 
-                fields.append({
-                    'name': field_name,
-                    'type': field_type
-                })
+                fields.append({"name": field_name, "type": field_type})
 
             # Register the struct as a type
             if struct_name not in types:
                 types.append(struct_name)
 
             # Store struct definition in vars so it can be used
-            vars[struct_name] = {
-                'type': 'struct_def',
-                'fields': fields
-            }
+            vars[struct_name] = {"type": "struct_def", "fields": fields}
 
-            node = make_node(stream,
-                type='struct_def',
-                name=struct_name,
-                fields=fields
-            )
-            node['line'] = decl_line
+            node = make_node(stream, type="struct_def", name=struct_name, fields=fields)
+            node["line"] = decl_line
             return node
 
         elif stream.consume("import"):
@@ -2075,8 +2200,8 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 base_dir = os.path.dirname(stream.file_path)
                 candidate = os.path.join(base_dir, filename)
                 # Only add .fr extension if not already present
-                if not candidate.endswith('.fr'):
-                    candidate += '.fr'
+                if not candidate.endswith(".fr"):
+                    candidate += ".fr"
                 if os.path.exists(candidate):
                     file_path = os.path.abspath(candidate)
 
@@ -2084,37 +2209,37 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             if file_path is None:
                 candidate = os.path.join(os.getcwd(), filename)
                 # Only add .fr extension if not already present
-                if not candidate.endswith('.fr'):
-                    candidate += '.fr'
+                if not candidate.endswith(".fr"):
+                    candidate += ".fr"
                 if os.path.exists(candidate):
                     file_path = os.path.abspath(candidate)
 
             # If still not found, raise error
             if file_path is None:
-                raise SyntaxError(stream.format_error(f'Import file not found: {filename}'))
+                raise SyntaxError(
+                    stream.format_error(f"Import file not found: {filename}")
+                )
 
             # Check for circular imports
             if file_path in _imported_files:
-                raise SyntaxError(stream.format_error(f'Circular import detected: {filename}'))
+                raise SyntaxError(
+                    stream.format_error(f"Circular import detected: {filename}")
+                )
 
             # Mark as imported before parsing to prevent circular imports
             _imported_files.add(file_path)
 
             try:
                 # Read and parse the imported file
-                with open(file_path, 'r') as f:
+                with open(file_path, "r") as f:
                     import_content = f.read()
 
                 # Parse the imported file (this will recursively handle any imports in it)
                 imported_ast = parse(import_content, level=0, file=file_path)
 
                 # Return a special node that contains the imported AST
-                node = make_node(stream,
-                    type='import',
-                    file=filename,
-                    ast=imported_ast
-                )
-                node['line'] = decl_line
+                node = make_node(stream, type="import", file=filename, ast=imported_ast)
+                node["line"] = decl_line
                 return node
             finally:
                 # Remove from imported files set after parsing completes
@@ -2151,7 +2276,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             # If still not found, raise error
             if file_path is None:
-                raise SyntaxError(stream.format_error(f'C import file not found: {c_file}'))
+                raise SyntaxError(
+                    stream.format_error(f"C import file not found: {c_file}")
+                )
 
             # Parse C file to extract function signatures and struct definitions
             c_functions, c_structs = _parse_c_signatures(file_path)
@@ -2185,20 +2312,24 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
                 # Also register as a callable (struct constructor)
                 if struct_name not in funcs:
-                    funcs[struct_name] = cast(Any, {
-                        'type': 'c_struct_constructor',
-                        'return_type': struct_name,
-                        'params': struct_info['fields'],
-                        'param_count': len(struct_info['fields'])
-                    })
+                    funcs[struct_name] = cast(
+                        Any,
+                        {
+                            "type": "c_struct_constructor",
+                            "return_type": struct_name,
+                            "params": struct_info["fields"],
+                            "param_count": len(struct_info["fields"]),
+                        },
+                    )
 
-            node = make_node(stream,
-                type='c_import',
+            node = make_node(
+                stream,
+                type="c_import",
                 file=file_path,  # Store the full resolved path
                 functions=c_functions,  # Store parsed function signatures
-                structs=c_structs  # Store parsed struct definitions
+                structs=c_structs,  # Store parsed struct definitions
             )
-            node['line'] = decl_line
+            node["line"] = decl_line
             return node
 
         # c_link library_name (e.g., c_link -lraylib)
@@ -2206,12 +2337,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             stream.strip()
             # Consume the rest of the line as the link flag
             link_flag = ""
-            while stream.text and stream.peek(1) not in '\n\r':
+            while stream.text and stream.peek(1) not in "\n\r":
                 link_flag += stream.seek(1)
             link_flag = link_flag.strip()
 
             if not link_flag:
-                raise SyntaxError(stream.format_error('Expected library name after c_link'))
+                raise SyntaxError(
+                    stream.format_error("Expected library name after c_link")
+                )
 
             # Resolve file paths in link flags to absolute paths
             # This handles cases like "./lib/libraylib.a" followed by -l flags
@@ -2221,7 +2354,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             for token in tokens:
                 # Check if it looks like a file path (contains / and doesn't start with -)
-                if '/' in token and not token.startswith('-'):
+                if "/" in token and not token.startswith("-"):
                     resolved_path = token
 
                     # Try to resolve relative to the importing file first
@@ -2238,7 +2371,9 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                             resolved_path = os.path.abspath(candidate)
 
                     # If not found and still relative, try relative to cwd
-                    if not os.path.isabs(resolved_path) and not os.path.exists(resolved_path):
+                    if not os.path.isabs(resolved_path) and not os.path.exists(
+                        resolved_path
+                    ):
                         candidate = os.path.join(os.getcwd(), token)
                         if os.path.exists(candidate):
                             resolved_path = os.path.abspath(candidate)
@@ -2248,25 +2383,24 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     # Keep flags and library names as-is
                     resolved_tokens.append(token)
 
-            resolved_flag = ' '.join(resolved_tokens)
+            resolved_flag = " ".join(resolved_tokens)
 
-            node = make_node(stream,
-                type='c_link',
-                library=resolved_flag
-            )
-            node['line'] = decl_line
+            node = make_node(stream, type="c_link", library=resolved_flag)
+            node["line"] = decl_line
             return node
 
         # Check for #bytecode block at top level
-        if stream.peek(1) == '#':
-            stream.consume('#')
+        if stream.peek(1) == "#":
+            stream.consume("#")
             directive = stream.consume_word()
 
-            if directive == 'bytecode':
+            if directive == "bytecode":
                 # #bytecode { ... }
                 stream.strip()
-                if not stream.consume('{'):
-                    raise SyntaxError(stream.format_error('Expected "{" after #bytecode'))
+                if not stream.consume("{"):
+                    raise SyntaxError(
+                        stream.format_error('Expected "{" after #bytecode')
+                    )
 
                 # Consume everything until matching }
                 bytecode_lines = []
@@ -2274,16 +2408,16 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 current_line = ""
                 while depth > 0 and stream.text:
                     ch = stream.seek(1)
-                    if ch == '{':
+                    if ch == "{":
                         depth += 1
                         current_line += ch
-                    elif ch == '}':
+                    elif ch == "}":
                         depth -= 1
                         if depth > 0:
                             current_line += ch
                         elif current_line.strip():
                             bytecode_lines.append(current_line.strip())
-                    elif ch == '\n':
+                    elif ch == "\n":
                         if current_line.strip():
                             bytecode_lines.append(current_line.strip())
                         current_line = ""
@@ -2291,17 +2425,16 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                         current_line += ch
 
                 if depth != 0:
-                    raise SyntaxError(stream.format_error('Unclosed #bytecode block'))
+                    raise SyntaxError(stream.format_error("Unclosed #bytecode block"))
 
-                node = make_node(stream,
-                    type='bytecode_block',
-                    bytecode=bytecode_lines
-                )
-                node['line'] = decl_line
+                node = make_node(stream, type="bytecode_block", bytecode=bytecode_lines)
+                node["line"] = decl_line
                 return node
 
             else:
-                raise SyntaxError(stream.format_error(f'Unknown directive at top level: #{directive}'))
+                raise SyntaxError(
+                    stream.format_error(f"Unknown directive at top level: #{directive}")
+                )
 
         # Get type and name
         type = stream.consume_word()
@@ -2317,96 +2450,118 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
         # Static list declaration: list name[capacity:type]
         stream.strip()
-        if type == 'list' and stream.peek(1) == '[':
-            stream.consume('[')
-            spec_text = stream.consume_until(']')
-            if not stream.consume(']'):
-                raise SyntaxError(stream.format_error('Expected "]" after list capacity spec'))
+        if type == "list" and stream.peek(1) == "[":
+            stream.consume("[")
+            spec_text = stream.consume_until("]")
+            if not stream.consume("]"):
+                raise SyntaxError(
+                    stream.format_error('Expected "]" after list capacity spec')
+                )
 
             spec_text = spec_text.strip()
-            if ':' not in spec_text:
-                raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+            if ":" not in spec_text:
+                raise SyntaxError(
+                    stream.format_error("Expected list capacity spec like [3:int]")
+                )
 
-            size_text, elem_type = [part.strip() for part in spec_text.split(':', 1)]
+            size_text, elem_type = [part.strip() for part in spec_text.split(":", 1)]
             if not size_text or not elem_type:
-                raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+                raise SyntaxError(
+                    stream.format_error("Expected list capacity spec like [3:int]")
+                )
 
             size_node = parse_expr(size_text)
             size_value = _eval_const_node(size_node)
             if not isinstance(size_value, int):
-                raise SyntaxError(stream.format_error('List capacity must be an integer constant'))
+                raise SyntaxError(
+                    stream.format_error("List capacity must be an integer constant")
+                )
             if size_value < 0:
-                raise SyntaxError(stream.format_error('List capacity must be >= 0'))
+                raise SyntaxError(stream.format_error("List capacity must be >= 0"))
 
             if elem_type not in types and elem_type not in vars:
-                raise SyntaxError(stream.format_error(f'Unknown list element type: {elem_type}'))
+                raise SyntaxError(
+                    stream.format_error(f"Unknown list element type: {elem_type}")
+                )
 
             list_capacity = size_value
             list_elem_type = elem_type
 
         if not (type and name):
             # Check if this is a function with missing name: "void () {"
-            if type and not name and stream.peek(1) == '(':
-                raise SyntaxError('Expected function name')
+            if type and not name and stream.peek(1) == "(":
+                raise SyntaxError("Expected function name")
             return
 
         # Is func
-        if stream.peek(1) == '(':
+        if stream.peek(1) == "(":
             node = parse_func(stream, name, type, mods)
             if node is not SkipNode and isinstance(node, dict):
-                node['line'] = decl_line
+                node["line"] = decl_line
             return node
 
         # Is var
-        elif stream.peek(1) == '=':
+        elif stream.peek(1) == "=":
             node = parse_var(stream, type, name, mods, list_capacity, list_elem_type)
             if node is not SkipNode and isinstance(node, dict):
-                node['line'] = decl_line
+                node["line"] = decl_line
             return node
 
         # Augmented assignment with type - this is an error
-        elif stream.peek_char(2) in ['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='] or stream.peek_char(3) in ['<<=', '>>=']:
+        elif stream.peek_char(2) in [
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "&=",
+            "|=",
+            "^=",
+        ] or stream.peek_char(3) in ["<<=", ">>="]:
             # Strip to get to the operator
             stream.strip()
-            aug_op = stream.peek(3) if stream.peek(3) in ['<<=', '>>='] else stream.peek(2)
-            raise SyntaxError(stream.format_error(
-                f'Cannot use augmented assignment operator "{aug_op}" with type declaration. '
-                f'Either declare the variable first with "{type} {name} = ...", or if it already exists, '
-                f'use "{name} {aug_op} ..." without the type.'
-            ))
+            aug_op = (
+                stream.peek(3) if stream.peek(3) in ["<<=", ">>="] else stream.peek(2)
+            )
+            raise SyntaxError(
+                stream.format_error(
+                    f'Cannot use augmented assignment operator "{aug_op}" with type declaration. '
+                    f'Either declare the variable first with "{type} {name} = ...", or if it already exists, '
+                    f'use "{name} {aug_op} ..." without the type.'
+                )
+            )
 
-        elif type == '//':
-            stream.consume_until('\n')
+        elif type == "//":
+            stream.consume_until("\n")
             return parse_any(stream, level)
 
         else:
-            raise SyntaxError(f'Invalid syntax: {stream.orig_line(stream.line-1)}')
+            raise SyntaxError(f"Invalid syntax: {stream.orig_line(stream.line-1)}")
 
     else:
         # Save line before consuming the first word
         stmt_line = stream.line
 
         # Check for # directives before consuming a word
-        if stream.peek(1) == '#':
-            stream.consume('#')
+        if stream.peek(1) == "#":
+            stream.consume("#")
             directive = stream.consume_word()
 
-            if directive == 'label':
+            if directive == "label":
                 # #label name
                 stream.strip()
                 label_name = stream.consume_word()
-                node = make_node(stream,
-                    type='label',
-                    name=label_name
-                )
-                node['line'] = stmt_line
+                node = make_node(stream, type="label", name=label_name)
+                node["line"] = stmt_line
                 return node
 
-            elif directive == 'bytecode':
+            elif directive == "bytecode":
                 # #bytecode { ... }
                 stream.strip()
-                if not stream.consume('{'):
-                    raise SyntaxError(stream.format_error('Expected "{" after #bytecode'))
+                if not stream.consume("{"):
+                    raise SyntaxError(
+                        stream.format_error('Expected "{" after #bytecode')
+                    )
 
                 # Consume everything until matching }
                 bytecode_lines = []
@@ -2414,16 +2569,16 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 current_line = ""
                 while depth > 0 and stream.text:
                     ch = stream.seek(1)
-                    if ch == '{':
+                    if ch == "{":
                         depth += 1
                         current_line += ch
-                    elif ch == '}':
+                    elif ch == "}":
                         depth -= 1
                         if depth > 0:
                             current_line += ch
                         elif current_line.strip():
                             bytecode_lines.append(current_line.strip())
-                    elif ch == '\n':
+                    elif ch == "\n":
                         if current_line.strip():
                             bytecode_lines.append(current_line.strip())
                         current_line = ""
@@ -2431,17 +2586,16 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                         current_line += ch
 
                 if depth != 0:
-                    raise SyntaxError(stream.format_error('Unclosed #bytecode block'))
+                    raise SyntaxError(stream.format_error("Unclosed #bytecode block"))
 
-                node = make_node(stream,
-                    type='bytecode_block',
-                    bytecode=bytecode_lines
-                )
-                node['line'] = stmt_line
+                node = make_node(stream, type="bytecode_block", bytecode=bytecode_lines)
+                node["line"] = stmt_line
                 return node
 
             else:
-                raise SyntaxError(stream.format_error(f'Unknown directive: #{directive}'))
+                raise SyntaxError(
+                    stream.format_error(f"Unknown directive: #{directive}")
+                )
 
         word = stream.consume_word()
 
@@ -2450,25 +2604,30 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             return None
 
         # Field assignment: obj.field = value (word is "obj.field")
-        if '.' in word and stream.peek(1) == '=':
-            parts = word.split('.', 1)
+        if "." in word and stream.peek(1) == "=":
+            parts = word.split(".", 1)
             if len(parts) == 2:
                 target, field = parts
-                stream.consume('=')
+                stream.consume("=")
                 stream.strip()
-                value = _consume_expression(stream).strip().rstrip(';')
-                node = make_node(stream,
+                value = _consume_expression(stream).strip().rstrip(";")
+                node = make_node(
+                    stream,
                     type="field_assign",
                     target=target,
                     field=field,
-                    value=parse_expr(value)
+                    value=parse_expr(value),
                 )
-                node['line'] = stmt_line
+                node["line"] = stmt_line
                 return node
 
         # Func call - check for function call syntax (allows C imports and undefined functions to be caught at compile time)
         # But skip method calls (those with '.' in the name) - they're handled separately below
-        if stream.peek_char(1) == '(' and word not in ['if', 'while', 'for', 'switch', 'try', 'struct'] and '.' not in word:
+        if (
+            stream.peek_char(1) == "("
+            and word not in ["if", "while", "for", "switch", "try", "struct", "assert"]
+            and "." not in word
+        ):
             # This looks like a function call
             if word in funcs:
                 func_info = funcs[word]
@@ -2477,43 +2636,51 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 result = parse_func_call(stream, word)
 
                 # Validate argument count for C functions (skip if function has varargs)
-                if func_info.get('type') == 'c_function':
-                    params = func_info.get('params', [])
+                if func_info.get("type") == "c_function":
+                    params = func_info.get("params", [])
                     params_list = params if isinstance(params, list) else []
                     has_varargs = any(
-                        isinstance(p, dict) and isinstance(p.get('type', ''), str) and
-                        (p.get('type', '').endswith('*') or p.get('type', '').endswith('**'))
+                        isinstance(p, dict)
+                        and isinstance(p.get("type", ""), str)
+                        and (
+                            p.get("type", "").endswith("*")
+                            or p.get("type", "").endswith("**")
+                        )
                         for p in params_list
                     )
                     if not has_varargs:
-                        expected = func_info.get('param_count', 0)
-                        actual = len(result.get('args', []))
+                        expected = func_info.get("param_count", 0)
+                        actual = len(result.get("args", []))
                         if actual != expected:
-                            param_names = ', '.join(
-                                f"{p.get('type', '')} {p.get('name', '')}" for p in params_list if isinstance(p, dict)
+                            param_names = ", ".join(
+                                f"{p.get('type', '')} {p.get('name', '')}"
+                                for p in params_list
+                                if isinstance(p, dict)
                             )
-                            raise SyntaxError(stream.format_error(
-                                f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
-                                f"({param_names or 'void'}), got {actual}"
-                            ))
+                            raise SyntaxError(
+                                stream.format_error(
+                                    f"Function '{word}' expects {expected} argument{'s' if expected != 1 else ''} "
+                                    f"({param_names or 'void'}), got {actual}"
+                                )
+                            )
 
                 return result
             else:
                 # Parse as generic function call (could be user-defined or C-imported)
-                stream.consume('(')
+                stream.consume("(")
                 stream.strip()
 
                 args = []
-                current_arg = ''
+                current_arg = ""
                 depth = 0
 
                 while stream.text:
                     ch = stream.text[0]
 
-                    if ch == '(':
+                    if ch == "(":
                         depth += 1
                         current_arg += ch
-                    elif ch == ')':
+                    elif ch == ")":
                         if depth == 0:
                             # End of argument list
                             if current_arg.strip():
@@ -2522,137 +2689,139 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                             break
                         depth -= 1
                         current_arg += ch
-                    elif ch == ',' and depth == 0:
+                    elif ch == "," and depth == 0:
                         args.append(parse_expr(current_arg.strip()))
-                        current_arg = ''
+                        current_arg = ""
                     else:
                         current_arg += ch
 
                     stream._advance(1)
 
-                node = make_node(
-                    stream,
-                    type='call',
-                    name=word,
-                    args=args
-                )
-                node['line'] = stmt_line
+                node = make_node(stream, type="call", name=word, args=args)
+                node["line"] = stmt_line
                 return node
 
-
-
         # Debug what comes after word
-        next_char = stream.text[0] if stream.text else 'EOF'
+        next_char = stream.text[0] if stream.text else "EOF"
 
         # Handle method calls: obj.method() where word is just "obj"
-        if stream.peek_char(1) == '.':
+        if stream.peek_char(1) == ".":
             # This could be obj.method() or obj.field = value
             # Consume the rest to check
-            remaining = _consume_expression(stream).strip().rstrip(';')
+            remaining = _consume_expression(stream).strip().rstrip(";")
 
             # Check if this is a method call by looking for '('
-            if '(' in remaining:
+            if "(" in remaining:
                 # Method call: obj.method(args)
                 full_expr = word + remaining
                 parsed = parse_expr(full_expr)
-                if isinstance(parsed, dict) and 'func' in parsed:
+                if isinstance(parsed, dict) and "func" in parsed:
                     return parsed
-                raise SyntaxError(stream.format_error(f'Invalid method call'))
+                raise SyntaxError(stream.format_error(f"Invalid method call"))
             else:
                 # Restore the stream - this is something else
                 # Put back the remaining text
-                stream.text = remaining + '\n' + stream.text
+                stream.text = remaining + "\n" + stream.text
                 stream.char = 0
                 stream.line = stmt_line
 
         # Handle expression statements like obj.attr.method() where word contains '.'
-        elif '.' in word and stream.peek_char(1) == '(':
+        elif "." in word and stream.peek_char(1) == "(":
             # This is a method call on an object - parse the full expression
-            full_expr = word + _consume_expression(stream).strip().rstrip(';')
+            full_expr = word + _consume_expression(stream).strip().rstrip(";")
             parsed = parse_expr(full_expr)
             # If it's a call expression (has 'func' key), return it as a statement
-            if isinstance(parsed, dict) and 'func' in parsed:
+            if isinstance(parsed, dict) and "func" in parsed:
                 return parsed
             # Otherwise, this might be an error
-            raise SyntaxError(stream.format_error(f'Invalid expression statement'))
+            raise SyntaxError(stream.format_error(f"Invalid expression statement"))
 
-        elif stream.peek(1) == '[':
-            stream.consume('[')
-            index_expr = stream.consume_until(']')
-            stream.consume(']')  # Consume the closing bracket
+        elif stream.peek(1) == "[":
+            stream.consume("[")
+            index_expr = stream.consume_until("]")
+            stream.consume("]")  # Consume the closing bracket
             stream.strip()
-            if not stream.consume('='):
+            if not stream.consume("="):
                 raise SyntaxError(stream.format_error('Expected "=" after index'))
-            value = _consume_expression(stream).strip().rstrip(';')
-            node = make_node(stream,
+            value = _consume_expression(stream).strip().rstrip(";")
+            node = make_node(
+                stream,
                 type="index_assign",
                 target=word,
                 index=parse_expr(index_expr),
-                value=parse_expr(value)
+                value=parse_expr(value),
             )
-            node['line'] = stmt_line
+            node["line"] = stmt_line
             return node
 
-        elif stream.peek_char(1) == '=':
+        elif stream.peek_char(1) == "=":
             # Reassignment without type def
             return parse_var(stream, None, word, [])
 
-        elif stream.peek_char(2) in ['+=', '-=', '*=', '/=', '%=', '&=', '|=', '^='] or stream.peek_char(3) in ['<<=', '>>=']:
+        elif stream.peek_char(2) in [
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "&=",
+            "|=",
+            "^=",
+        ] or stream.peek_char(3) in ["<<=", ">>="]:
             # Strip whitespace to position at the operator
             stream.strip()
 
             # Check for 3-character operators first
-            aug_op = stream.peek(3) if stream.peek(3) in ['<<=', '>>='] else stream.peek(2)
+            aug_op = (
+                stream.peek(3) if stream.peek(3) in ["<<=", ">>="] else stream.peek(2)
+            )
             stream.consume(aug_op)
             stream.strip()
 
             # Read the value expression
-            value_text = _consume_expression(stream).strip().rstrip(';')
+            value_text = _consume_expression(stream).strip().rstrip(";")
             value_expr = parse_expr(value_text)
 
             # Map augmented operators to their binary equivalents
             op_map = {
-                '+=': 'Add',
-                '-=': 'Sub',
-                '*=': 'Mult',
-                '/=': 'Div',
-                '%=': 'Mod',
-                '&=': 'BitAnd',
-                '|=': 'BitOr',
-                '^=': 'BitXor',
-                '<<=': 'LShift',
-                '>>=': 'RShift'
+                "+=": "Add",
+                "-=": "Sub",
+                "*=": "Mult",
+                "/=": "Div",
+                "%=": "Mod",
+                "&=": "BitAnd",
+                "|=": "BitOr",
+                "^=": "BitXor",
+                "<<=": "LShift",
+                ">>=": "RShift",
             }
 
             # Convert to: name = name op value
             binary_expr = {
-                'left': {'id': word},
-                'op': op_map[aug_op],
-                'right': value_expr
+                "left": {"id": word},
+                "op": op_map[aug_op],
+                "right": value_expr,
             }
 
             # Get the variable type if it exists
             var_type = None
             if word in vars:
-                var_type = vars[word].get('type', 'any')
+                var_type = vars[word].get("type", "any")
             else:
                 raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
 
             # Update vars table
-            vars[word] = {
-                "type": var_type,
-                "value": binary_expr,
-                "mods": []
-            }
+            vars[word] = {"type": var_type, "value": binary_expr, "mods": []}
 
-            node = make_node(stream,
+            node = make_node(
+                stream,
                 type="var",
                 name=word,
                 value_type=var_type,
                 value=binary_expr,
-                mods=[]
+                mods=[],
             )
-            node['line'] = stmt_line
+            node["line"] = stmt_line
             return node
 
         elif word in types:
@@ -2661,39 +2830,51 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             list_elem_type = None
 
             stream.strip()
-            if word == 'list' and stream.peek(1) == '[':
-                stream.consume('[')
-                spec_text = stream.consume_until(']')
-                if not stream.consume(']'):
-                    raise SyntaxError(stream.format_error('Expected "]" after list capacity spec'))
+            if word == "list" and stream.peek(1) == "[":
+                stream.consume("[")
+                spec_text = stream.consume_until("]")
+                if not stream.consume("]"):
+                    raise SyntaxError(
+                        stream.format_error('Expected "]" after list capacity spec')
+                    )
 
                 spec_text = spec_text.strip()
-                if ':' not in spec_text:
-                    raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+                if ":" not in spec_text:
+                    raise SyntaxError(
+                        stream.format_error("Expected list capacity spec like [3:int]")
+                    )
 
-                size_text, elem_type = [part.strip() for part in spec_text.split(':', 1)]
+                size_text, elem_type = [
+                    part.strip() for part in spec_text.split(":", 1)
+                ]
                 if not size_text or not elem_type:
-                    raise SyntaxError(stream.format_error('Expected list capacity spec like [3:int]'))
+                    raise SyntaxError(
+                        stream.format_error("Expected list capacity spec like [3:int]")
+                    )
 
                 size_node = parse_expr(size_text)
                 size_value = _eval_const_node(size_node)
                 if not isinstance(size_value, int):
-                    raise SyntaxError(stream.format_error('List capacity must be an integer constant'))
+                    raise SyntaxError(
+                        stream.format_error("List capacity must be an integer constant")
+                    )
                 if size_value < 0:
-                    raise SyntaxError(stream.format_error('List capacity must be >= 0'))
+                    raise SyntaxError(stream.format_error("List capacity must be >= 0"))
 
                 if elem_type not in types and elem_type not in vars:
-                    raise SyntaxError(stream.format_error(f'Unknown list element type: {elem_type}'))
+                    raise SyntaxError(
+                        stream.format_error(f"Unknown list element type: {elem_type}")
+                    )
 
                 list_capacity = size_value
                 list_elem_type = elem_type
 
             node = parse_var(stream, word, name, [], list_capacity, list_elem_type)
             if node is not SkipNode and isinstance(node, dict):
-                node['line'] = stmt_line
+                node["line"] = stmt_line
             return node
 
-        elif word == 'if':
+        elif word == "if":
             # Save line before parsing
             if_line = stream.line
 
@@ -2701,43 +2882,37 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             # Extract first argument value (ignore type)
             arg_value = args[0][0] if args else ""
             args = parse_expr(arg_value)
-            scope = parse_scope(stream, level+1)
+            scope = parse_scope(stream, level + 1)
 
-            node = make_node(stream,
-                type="if",
-                condition=args,
-                scope=scope,
-                elifs=[],
-                **{"else": {}}
+            node = make_node(
+                stream, type="if", condition=args, scope=scope, elifs=[], **{"else": {}}
             )
-            node['line'] = if_line
+            node["line"] = if_line
 
             # Check if there are any elifs or an else.
             while True:
                 stream.strip()
                 word = stream.peek_word()
-                if word == 'elif':
-                    stream.consume('elif')
+                if word == "elif":
+                    stream.consume("elif")
                     args = parse_args(stream)
                     # Extract argument values (ignore types) and join them
                     arg_values = [arg_name for arg_name, _, _ in args]
-                    args = parse_expr(''.join(arg_values))
-                    scope = parse_scope(stream, level+1)
-                    node['elifs'].append(
-                        {
-                            "type": "elif",
-                            "condition": args,
-                            "scope": scope
-                        }
+                    args = parse_expr("".join(arg_values))
+                    scope = parse_scope(stream, level + 1)
+                    node["elifs"].append(
+                        {"type": "elif", "condition": args, "scope": scope}
                     )
 
-                elif word == 'else':
-                    if node['else']:
-                        raise SyntaxError('The "else" clause has already been defined here.')
+                elif word == "else":
+                    if node["else"]:
+                        raise SyntaxError(
+                            'The "else" clause has already been defined here.'
+                        )
 
-                    stream.consume('else')
-                    scope = parse_scope(stream, level+1)
-                    node['else'] = scope
+                    stream.consume("else")
+                    scope = parse_scope(stream, level + 1)
+                    node["else"] = scope
 
                 else:
                     break
@@ -2745,23 +2920,31 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             return node
 
         elif word in {"elif", "else"}:
-            raise SyntaxError(f'?{stream.line},{stream.char}:Unexpected "{word}": {stream.orig_line()}')
+            raise SyntaxError(
+                f'?{stream.line},{stream.char}:Unexpected "{word}": {stream.orig_line()}'
+            )
 
-        elif word == 'switch':
+        elif word == "switch":
             # Save line before parsing
             switch_line = stream.line
 
             args = parse_args(stream, check_comma=False)
             if len(args) != 1:
-                raise SyntaxError(stream.format_error(f'switch requires exactly 1 argument, got {len(args)}'))
+                raise SyntaxError(
+                    stream.format_error(
+                        f"switch requires exactly 1 argument, got {len(args)}"
+                    )
+                )
 
             # Parse the expression to switch on
             switch_expr = parse_expr(args[0][0])
 
             # Expect opening brace
             stream.strip()
-            if not stream.consume('{'):
-                raise SyntaxError(stream.format_error('Expected "{" after switch condition'))
+            if not stream.consume("{"):
+                raise SyntaxError(
+                    stream.format_error('Expected "{" after switch condition')
+                )
 
             cases = []
             default_case = None
@@ -2771,30 +2954,30 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                 stream.strip()
 
                 # Check for closing brace
-                if stream.peek(1) == '}':
-                    stream.consume('}')
+                if stream.peek(1) == "}":
+                    stream.consume("}")
                     break
 
                 word = stream.peek_word()
 
-                if word == 'case':
-                    stream.consume('case')
+                if word == "case":
+                    stream.consume("case")
                     stream.strip()
 
                     # Parse case values (can be multiple: case 1, 2, 3:)
                     case_values = []
                     while True:
                         # Read until : or ,
-                        value_text = ''
+                        value_text = ""
                         depth = 0
                         while stream.text:
                             ch = stream.peek(1)
-                            if ch in '{[(':
+                            if ch in "{[(":
                                 depth += 1
-                            elif ch in '}])':
+                            elif ch in "}])":
                                 depth -= 1
 
-                            if depth == 0 and ch in ',:':
+                            if depth == 0 and ch in ",:":
                                 break
 
                             value_text += ch
@@ -2805,64 +2988,70 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                             case_values.append(parse_literal(value_text))
 
                         stream.strip()
-                        if stream.peek(1) == ',':
-                            stream.consume(',')
+                        if stream.peek(1) == ",":
+                            stream.consume(",")
                             stream.strip()
-                        elif stream.peek(1) == ':':
-                            stream.consume(':')
+                        elif stream.peek(1) == ":":
+                            stream.consume(":")
                             break
                         else:
-                            raise SyntaxError(stream.format_error('Expected ":" or "," in case statement'))
+                            raise SyntaxError(
+                                stream.format_error(
+                                    'Expected ":" or "," in case statement'
+                                )
+                            )
 
                     # Parse case body using custom parsing that stops at case/default/}
-                    case_body = parse_switch_body(stream, level+1)
+                    case_body = parse_switch_body(stream, level + 1)
 
-                    cases.append({
-                        'values': case_values,
-                        'body': case_body
-                    })
+                    cases.append({"values": case_values, "body": case_body})
 
-                elif word.startswith('default'):
-                    stream.consume('default')
+                elif word.startswith("default"):
+                    stream.consume("default")
                     stream.strip()
-                    if not stream.consume(':'):
-                        raise SyntaxError(stream.format_error('Expected ":" after default'))
+                    if not stream.consume(":"):
+                        raise SyntaxError(
+                            stream.format_error('Expected ":" after default')
+                        )
 
                     # Parse default body using custom parsing that stops at case/default/}
-                    default_case = parse_switch_body(stream, level+1)
+                    default_case = parse_switch_body(stream, level + 1)
 
                 else:
-                    raise SyntaxError(stream.format_error(f'Expected "case" or "default" in switch statement, got "{word}"'))
+                    raise SyntaxError(
+                        stream.format_error(
+                            f'Expected "case" or "default" in switch statement, got "{word}"'
+                        )
+                    )
 
-            node = make_node(stream,
-                type='switch',
+            node = make_node(
+                stream,
+                type="switch",
                 expr=switch_expr,
                 cases=cases,
-                default=default_case
+                default=default_case,
             )
-            node['line'] = switch_line
+            node["line"] = switch_line
             return node
 
-        elif word == 'assert':
+        elif word == "assert":
             # Save line before parsing
             assert_line = stream.line
 
             args = parse_args(stream, False)
             if len(args) < 1 or len(args) > 2:
-                raise SyntaxError(f'assert requires 1 or 2 arguments, got {len(args)}')
+                raise SyntaxError(f"assert requires 1 or 2 arguments, got {len(args)}")
             # Extract argument values (ignore types)
             condition = parse_expr(args[0][0])
             message = parse_expr(args[1][0]) if len(args) == 2 else None
 
-            node = make_node(stream,
-                type="assert",
-                condition=condition,
-                message=message
+            node = make_node(
+                stream, type="assert", condition=condition, message=message
             )
-            node['line'] = assert_line
+            node["line"] = assert_line
             return node
 
-        elif word == 'for':
+        elif word == "for":
             # Save line before parsing
             for_line = stream.line
 
@@ -2870,54 +3059,63 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
 
             args = parse_args(stream)
             if len(args) == 0 or len(args) > 2:
-                raise SyntaxError(f'Invalid syntax: {stream.orig_line()}. Expected 1 or 2 arguments but got {len(args)}')
+                raise SyntaxError(
+                    f"Invalid syntax: {stream.orig_line()}. Expected 1 or 2 arguments but got {len(args)}"
+                )
 
             # Check if this is a range-based for loop: for (i in 0..10) or for (item in list)
             if len(args) == 1:
                 arg_text = args[0][0]
 
-                if ' in ' not in arg_text:
-                    raise SyntaxError(stream.format_error('Invalid for loop syntax. Expected "for (var in iterable)" or "for (var, count)"'))
-                parts = arg_text.split(' in ', 1)
+                if " in " not in arg_text:
+                    raise SyntaxError(
+                        stream.format_error(
+                            'Invalid for loop syntax. Expected "for (var in iterable)" or "for (var, count)"'
+                        )
+                    )
+                parts = arg_text.split(" in ", 1)
                 if len(parts) != 2:
-                    raise SyntaxError(stream.format_error('Invalid for loop syntax'))
+                    raise SyntaxError(stream.format_error("Invalid for loop syntax"))
 
                 varname = parts[0].strip()
                 # Handle typed variable: "str style" -> "style"
-                if ' ' in varname:
-                    varname = varname.split(' ')[-1].strip()
+                if " " in varname:
+                    varname = varname.split(" ")[-1].strip()
 
                 iterable_expr = parts[1].strip()
 
                 # Check if it's a range expression (start..end) or (start..end..step)
-                if '..' in iterable_expr:
-                    range_parts = iterable_expr.split('..')
+                if ".." in iterable_expr:
+                    range_parts = iterable_expr.split("..")
                     if len(range_parts) < 2 or len(range_parts) > 3:
-                        raise SyntaxError(stream.format_error('Invalid range syntax'))
+                        raise SyntaxError(stream.format_error("Invalid range syntax"))
 
                     start_expr = range_parts[0].strip()
                     end_expr = range_parts[1].strip()
-                    step_expr = range_parts[2].strip() if len(range_parts) == 3 else None
+                    step_expr = (
+                        range_parts[2].strip() if len(range_parts) == 3 else None
+                    )
 
-                    scope = parse_scope(stream, level+1)
+                    scope = parse_scope(stream, level + 1)
 
                     loop_depth -= 1
 
-                    result = make_node(stream,
+                    result = make_node(
+                        stream,
                         type="for",
                         var=varname,
                         start=parse_expr(start_expr) if start_expr else 0,
                         end=parse_expr(end_expr),
-                        scope=scope
+                        scope=scope,
                     )
-                    result['line'] = for_line
+                    result["line"] = for_line
 
                     # Add step if provided
                     if step_expr:
                         result["step"] = parse_expr(step_expr)
 
                     # Try to unroll loop if bounds are constant (with -O flag)
-                    if '-O' in sys.argv or '--optimize' in sys.argv:
+                    if "-O" in sys.argv or "--optimize" in sys.argv:
                         unrolled = _try_unroll_for_loop(result, max_iterations=10)
                         if unrolled is not None:
                             return unrolled
@@ -2925,7 +3123,7 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     return result
                 else:
                     # It's iterating over a list/iterable
-                    scope = parse_scope(stream, level+1)
+                    scope = parse_scope(stream, level + 1)
 
                     loop_depth -= 1
 
@@ -2934,14 +3132,14 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                         "var": varname,
                         "iterable": parse_literal(iterable_expr),
                         "scope": scope,
-                        "line": for_line
+                        "line": for_line,
                     }
             else:
                 # Old syntax: for (var, count)
                 varname = args[0][0]
                 end = args[1][0]
 
-                scope = parse_scope(stream, level+1)
+                scope = parse_scope(stream, level + 1)
 
                 loop_depth -= 1
 
@@ -2951,10 +3149,10 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     "start": 0,
                     "end": parse_expr(end),
                     "scope": scope,
-                    "line": for_line
+                    "line": for_line,
                 }
 
-        elif word == 'while':
+        elif word == "while":
             # Save line before parsing
             while_line = stream.line
 
@@ -2964,52 +3162,55 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             # Extract first argument value (ignore type)
             arg_value = args[0][0] if args else ""
             args = parse_expr(arg_value)
-            scope = parse_scope(stream, level+1)
+            scope = parse_scope(stream, level + 1)
 
             loop_depth -= 1
 
-            node = make_node(stream,
-                type=word,
-                condition=args,
-                scope=scope
-            )
-            node['line'] = while_line
+            node = make_node(stream, type=word, condition=args, scope=scope)
+            node["line"] = while_line
             return node
 
-        elif word == 'try':
+        elif word == "try":
             # Save line before parsing
             try_line = stream.line
 
             # Parse try block
-            try_scope = parse_scope(stream, level+1)
+            try_scope = parse_scope(stream, level + 1)
 
             # Expect 'except' keyword
             stream.strip()
-            if not stream.consume('except'):
-                raise SyntaxError(stream.format_error('Expected "except" after try block'))
+            if not stream.consume("except"):
+                raise SyntaxError(
+                    stream.format_error('Expected "except" after try block')
+                )
 
             # Parse exception type in quotes
             stream.strip()
             if stream.peek(1) != '"':
-                raise SyntaxError(stream.format_error('Expected exception type in quotes after "except"'))
+                raise SyntaxError(
+                    stream.format_error(
+                        'Expected exception type in quotes after "except"'
+                    )
+                )
 
             stream.consume('"')
             exc_type = stream.consume_until('"')
             stream.consume('"')
 
             # Parse except block
-            except_scope = parse_scope(stream, level+1)
+            except_scope = parse_scope(stream, level + 1)
 
-            node = make_node(stream,
+            node = make_node(
+                stream,
                 type="try",
                 try_scope=try_scope,
                 exc_type=exc_type,
-                except_scope=except_scope
+                except_scope=except_scope,
             )
-            node['line'] = try_line
+            node["line"] = try_line
             return node
 
-        elif word == 'break':
+        elif word == "break":
             # Save line before parsing
             break_line = stream.line
 
@@ -3025,16 +3226,17 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             break_level = int(level_str) if level_str else 1
 
             if break_level > loop_depth:
-                raise SyntaxError(stream.format_error(f'"break {break_level}" exceeds loop depth {loop_depth}'))
+                raise SyntaxError(
+                    stream.format_error(
+                        f'"break {break_level}" exceeds loop depth {loop_depth}'
+                    )
+                )
 
-            node = make_node(stream,
-                type="break",
-                level=break_level
-            )
-            node['line'] = break_line
+            node = make_node(stream, type="break", level=break_level)
+            node["line"] = break_line
             return node
 
-        elif word == 'continue':
+        elif word == "continue":
             # Save line before parsing
             continue_line = stream.line
 
@@ -3050,63 +3252,58 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
             continue_level = int(level_str) if level_str else 1
 
             if continue_level > loop_depth:
-                raise SyntaxError(stream.format_error(f'"continue {continue_level}" exceeds loop depth {loop_depth}'))
+                raise SyntaxError(
+                    stream.format_error(
+                        f'"continue {continue_level}" exceeds loop depth {loop_depth}'
+                    )
+                )
 
-            node = make_node(stream,
-                type="continue",
-                level=continue_level
-            )
-            node['line'] = continue_line
+            node = make_node(stream, type="continue", level=continue_level)
+            node["line"] = continue_line
             return node
 
-        elif word == 'return':
+        elif word == "return":
             # Save line before parsing
             return_line = stream.line
 
             # consume_word() already consumed whitespace after 'return', which may include newlines
             # So we need to check if there's actually content on the same line
-            rest = _consume_expression(stream).strip().rstrip(';')
+            rest = _consume_expression(stream).strip().rstrip(";")
 
             # If rest contains only whitespace or is a closing brace, treat as void return
             rest_stripped = rest.strip()
             expr = None
 
             # If we accidentally consumed a closing brace, seek back
-            if rest_stripped == '}':
+            if rest_stripped == "}":
                 stream.seek_back(len(rest))
-            elif rest_stripped and rest_stripped != ';':
+            elif rest_stripped and rest_stripped != ";":
                 # There's actual content to parse
                 expr = parse_expr(rest)
 
-            node = make_node(stream,
-                type="return",
-                value=expr
-            )
-            node['line'] = return_line
+            node = make_node(stream, type="return", value=expr)
+            node["line"] = return_line
             return node
 
-        elif word == 'goto':
+        elif word == "goto":
             # goto label
             goto_line = stream.line
             stream.strip()
             label = stream.consume_word()
 
-            node = make_node(stream,
-                type='goto',
-                label=label
-            )
-            node['line'] = goto_line
+            node = make_node(stream, type="goto", label=label)
+            node["line"] = goto_line
             return node
 
-        elif word == 'raise':
+        elif word == "raise":
             # Save line and char position before parsing
             raise_line = stream.line
-            raise_char = stream.char - len('raise')
+            raise_char = stream.char - len("raise")
 
             # Parse raise statement: raise "ExceptionType" "message"
             # or: raise "ExceptionType"
             # or: raise (re-raise current exception)
-            rest = _consume_expression(stream).strip().rstrip(';')
+            rest = _consume_expression(stream).strip().rstrip(";")
 
             exc_type = None
             message = None
@@ -3117,35 +3314,44 @@ def parse_any(stream:InputStream, level:int=0) -> dict[str, Any] | None | type[S
                     # Find the closing quote
                     end_quote = rest.find('"', 1)
                     if end_quote == -1:
-                        raise SyntaxError(stream.format_error('Unterminated string in raise statement'))
+                        raise SyntaxError(
+                            stream.format_error(
+                                "Unterminated string in raise statement"
+                            )
+                        )
                     exc_type = rest[1:end_quote]
-                    rest = rest[end_quote + 1:].strip()
+                    rest = rest[end_quote + 1 :].strip()
 
                     # Parse optional message
                     if rest and rest[0] == '"':
                         end_quote = rest.find('"', 1)
                         if end_quote == -1:
-                            raise SyntaxError(stream.format_error('Unterminated string in raise statement'))
+                            raise SyntaxError(
+                                stream.format_error(
+                                    "Unterminated string in raise statement"
+                                )
+                            )
                         message = rest[1:end_quote]
                 else:
-                    raise SyntaxError(stream.format_error('raise statement requires a string literal for exception type'))
+                    raise SyntaxError(
+                        stream.format_error(
+                            "raise statement requires a string literal for exception type"
+                        )
+                    )
 
-            node = make_node(stream,
-                type="raise",
-                exc_type=exc_type,
-                message=message
-            )
-            node['line'] = raise_line
-            node['char'] = raise_char
+            node = make_node(stream, type="raise", exc_type=exc_type, message=message)
+            node["line"] = raise_line
+            node["char"] = raise_char
             return node
 
-        elif stream.peek_char(1) == '}':
+        elif stream.peek_char(1) == "}":
             return
 
         else:
             raise SyntaxError(stream.format_error(f'"{word}" is not defined.'))
 
-def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
+
+def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
     global loop_depth, vars, types, _imported_files, disable_eval, eval_timeout_seconds
     global _eval_cache, _eval_failed_cache, _eval_timeout_funcs, _runtime_call_funcs
 
@@ -3166,36 +3372,36 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
 
     if not isinstance(text, InputStream):
         # Check for #pragma directives before removing comments
-        lines = text.split('\n')
+        lines = text.split("\n")
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith('#pragma'):
-                if stripped == '#pragma no_eval':
+            if stripped.startswith("#pragma"):
+                if stripped == "#pragma no_eval":
                     disable_eval = True
-                elif stripped.startswith('#pragma eval_timeout'):
+                elif stripped.startswith("#pragma eval_timeout"):
                     parts = stripped.split()
                     if len(parts) >= 3:
                         try:
                             eval_timeout_seconds = float(parts[2])
                         except ValueError:
                             pass
-            elif stripped and not stripped.startswith('#'):
+            elif stripped and not stripped.startswith("#"):
                 # Stop after first non-pragma, non-empty line
                 break
-        
+
         # Remove comments but preserve line numbers by replacing comment content with spaces
         processed_lines = []
         for line in lines:
-            comment_start = line.find('//')
+            comment_start = line.find("//")
             if comment_start != -1:
                 # Keep text before comment, replace comment with spaces to preserve length
                 before_comment = line[:comment_start]
                 comment_part = line[comment_start:]
-                processed_lines.append(before_comment + ' ' * len(comment_part))
+                processed_lines.append(before_comment + " " * len(comment_part))
             else:
                 processed_lines.append(line)
 
-        text = '\n'.join(processed_lines)  # Don't strip - preserve line numbers!
+        text = "\n".join(processed_lines)  # Don't strip - preserve line numbers!
         stream = InputStream(text)
         stream.file_path = file
     else:
@@ -3203,18 +3409,18 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
         # Comments are already removed at the top level, don't recreate stream
 
     try:
-        ast:AstType = []
+        ast: AstType = []
 
         # Add source file metadata as first node (for compiler)
         if level == 0 and file:
-            ast.append({'type': 'metadata', 'source_file': file})
+            ast.append({"type": "metadata", "source_file": file})
 
         while stream.text:
             # Strip whitespace before checking for scope end
             stream.strip()
 
             # If we hit a closing brace, we're done with this scope
-            if stream.text.startswith('}'):
+            if stream.text.startswith("}"):
                 break
 
             node = parse_any(stream, level)
@@ -3229,25 +3435,28 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             assert isinstance(node, dict), "Node should be a dict at this point"
 
             # Handle unrolled loops - flatten their statements into the parent scope
-            if node.get('type') == 'unrolled_loop':
-                ast.extend(node.get('statements', []))
+            if node.get("type") == "unrolled_loop":
+                ast.extend(node.get("statements", []))
             else:
                 ast.append(node)
 
         if level == 0 and not is_imported_file:
+
             def _collect_calls_from_scope(scope: list) -> set[str]:
                 names: set[str] = set()
 
                 def walk(node: Any):
                     if not isinstance(node, dict):
                         return
-                    if node.get('type') == 'call':
-                        func_name = node.get('name')
+                    if node.get("type") == "call":
+                        func_name = node.get("name")
                         if func_name:
                             names.add(func_name)
-                    if 'func' in node and 'args' in node:
-                        func_ref = node.get('func')
-                        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                    if "func" in node and "args" in node:
+                        func_ref = node.get("func")
+                        func_name = (
+                            func_ref.get("id") if isinstance(func_ref, dict) else None
+                        )
                         if func_name:
                             names.add(func_name)
                     for value in node.values():
@@ -3262,23 +3471,30 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                 return names
 
             def _is_evaluable_function(name: str, func: dict) -> bool:
-                if func.get('type') != 'func':
+                if func.get("type") != "func":
                     return False
                 if name in _eval_timeout_funcs:
                     return False
-                return_type = func.get('return_type', 'none')
-                if isinstance(return_type, str) and return_type in vars and vars[return_type].get('type') == 'struct_def':
+                return_type = func.get("return_type", "none")
+                if (
+                    isinstance(return_type, str)
+                    and return_type in vars
+                    and vars[return_type].get("type") == "struct_def"
+                ):
                     return False
-                if _scope_has_non_evaluable_nodes(func.get('func', []), {name}):
+                if _scope_has_non_evaluable_nodes(func.get("func", []), {name}):
                     return False
-                return func.get('can_eval', True)
+                return func.get("can_eval", True)
 
             def _is_inlineable_const_value(value: Any) -> bool:
                 if isinstance(value, dict):
                     if _is_runtime_expression(value):
                         return False
-                    value_type = value.get('type')
-                    return value_type in {'int', 'float', 'bool', 'string', 'str', 'bytes'} and 'value' in value
+                    value_type = value.get("type")
+                    return (
+                        value_type in {"int", "float", "bool", "string", "str", "bytes"}
+                        and "value" in value
+                    )
                 return isinstance(value, (int, float, bool))
 
             def _normalize_literal_value(value: Any) -> Any:
@@ -3294,33 +3510,45 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                     return {"type": "string", "value": value}
                 return value
 
-            def _replace_const_refs(node: Any, const_map: dict[str, Any], skip_name: str | None = None) -> Any:
+            def _replace_const_refs(
+                node: Any, const_map: dict[str, Any], skip_name: str | None = None
+            ) -> Any:
                 if isinstance(node, dict):
-                    if set(node.keys()) == {'id'}:
-                        name = node.get('id')
-                        if isinstance(name, str) and name != skip_name and name in const_map:
+                    if set(node.keys()) == {"id"}:
+                        name = node.get("id")
+                        if (
+                            isinstance(name, str)
+                            and name != skip_name
+                            and name in const_map
+                        ):
                             return copy.deepcopy(const_map[name])
 
                     new_node: dict[str, Any] = {}
                     for key, value in node.items():
-                        if key == 'func':
-                            if isinstance(value, dict) and set(value.keys()) == {'id'}:
+                        if key == "func":
+                            if isinstance(value, dict) and set(value.keys()) == {"id"}:
                                 new_node[key] = value
                             else:
-                                new_node[key] = _replace_const_refs(value, const_map, skip_name)
+                                new_node[key] = _replace_const_refs(
+                                    value, const_map, skip_name
+                                )
                             continue
-                        if key == 'name' and node.get('type') == 'call':
+                        if key == "name" and node.get("type") == "call":
                             new_node[key] = value
                             continue
                         new_node[key] = _replace_const_refs(value, const_map, skip_name)
                     return new_node
                 if isinstance(node, list):
-                    return [_replace_const_refs(item, const_map, skip_name) for item in node]
+                    return [
+                        _replace_const_refs(item, const_map, skip_name) for item in node
+                    ]
                 return node
 
             def _contains_call_nodes(node: Any) -> bool:
                 if isinstance(node, dict):
-                    if node.get('type') == 'call' or ('func' in node and 'args' in node):
+                    if node.get("type") == "call" or (
+                        "func" in node and "args" in node
+                    ):
                         return True
                     for value in node.values():
                         if _contains_call_nodes(value):
@@ -3332,22 +3560,29 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             def _try_eval_const_expr(node: Any) -> Any | None:
                 if not isinstance(node, dict):
                     return node
+
                 def _is_const_func_name(name: str | None) -> bool:
                     if not name or name not in funcs:
                         return False
                     func_info = funcs.get(name)
-                    func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
-                    return isinstance(func_mods, list) and 'const' in func_mods
+                    func_mods = (
+                        func_info.get("mods", []) if isinstance(func_info, dict) else []
+                    )
+                    return isinstance(func_mods, list) and "const" in func_mods
 
                 def _contains_nonconst_calls(expr: Any) -> bool:
                     if isinstance(expr, dict):
-                        if expr.get('type') == 'call':
-                            func_name = expr.get('name')
+                        if expr.get("type") == "call":
+                            func_name = expr.get("name")
                             if func_name and not _is_const_func_name(func_name):
                                 return True
-                        if 'func' in expr and 'args' in expr:
-                            func_ref = expr.get('func')
-                            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
+                        if "func" in expr and "args" in expr:
+                            func_ref = expr.get("func")
+                            func_name = (
+                                func_ref.get("id")
+                                if isinstance(func_ref, dict)
+                                else None
+                            )
                             if func_name and not _is_const_func_name(func_name):
                                 return True
                         for value in expr.values():
@@ -3372,24 +3607,26 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                             _check_eval_timeout()
                         return value
                     finally:
-                        setattr(runtime_module, 'runtime', old_runtime)
+                        setattr(runtime_module, "runtime", old_runtime)
                 except Exception:
                     return None
 
-            def _inline_single_assignment_constants(scope: list, inherited: dict[str, Any]) -> list:
+            def _inline_single_assignment_constants(
+                scope: list, inherited: dict[str, Any]
+            ) -> list:
                 assign_counts: dict[str, int] = {}
                 assign_values: dict[str, Any] = {}
 
                 def walk_assignments(node: Any):
                     if isinstance(node, dict):
-                        if node.get('type') == 'function':
+                        if node.get("type") == "function":
                             return
-                        if node.get('type') == 'var':
-                            name = node.get('name')
+                        if node.get("type") == "var":
+                            name = node.get("name")
                             if isinstance(name, str):
                                 assign_counts[name] = assign_counts.get(name, 0) + 1
                                 if name not in assign_values:
-                                    assign_values[name] = node.get('value')
+                                    assign_values[name] = node.get("value")
                         for value in node.values():
                             walk_assignments(value)
                         return
@@ -3419,25 +3656,36 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                         new_scope.append(stmt)
                         continue
 
-                    if stmt.get('type') == 'function':
-                        func_args = stmt.get('args', [])
+                    if stmt.get("type") == "function":
+                        func_args = stmt.get("args", [])
                         func_inherited = dict(scope_map)
                         for arg_entry in func_args:
                             if isinstance(arg_entry, (list, tuple)) and arg_entry:
                                 arg_name = arg_entry[0]
-                                if isinstance(arg_name, str) and arg_name in func_inherited:
+                                if (
+                                    isinstance(arg_name, str)
+                                    and arg_name in func_inherited
+                                ):
                                     del func_inherited[arg_name]
-                        func_scope = stmt.get('scope', [])
+                        func_scope = stmt.get("scope", [])
                         if isinstance(func_scope, list):
-                            stmt['scope'] = _inline_single_assignment_constants(func_scope, func_inherited)
+                            stmt["scope"] = _inline_single_assignment_constants(
+                                func_scope, func_inherited
+                            )
                         new_scope.append(stmt)
                         continue
 
-                    if stmt.get('type') == 'var':
-                        name = stmt.get('name')
+                    if stmt.get("type") == "var":
+                        name = stmt.get("name")
                         if isinstance(name, str) and name in local_inline:
                             continue
-                        new_scope.append(_replace_const_refs(stmt, scope_map, skip_name=name if isinstance(name, str) else None))
+                        new_scope.append(
+                            _replace_const_refs(
+                                stmt,
+                                scope_map,
+                                skip_name=name if isinstance(name, str) else None,
+                            )
+                        )
                         continue
 
                     new_scope.append(_replace_const_refs(stmt, scope_map))
@@ -3447,10 +3695,10 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             def _fold_const_calls_in_scope(scope: list) -> list:
                 new_scope: list = []
                 for stmt in scope:
-                    if isinstance(stmt, dict) and stmt.get('type') == 'function':
-                        func_scope = stmt.get('scope', [])
+                    if isinstance(stmt, dict) and stmt.get("type") == "function":
+                        func_scope = stmt.get("scope", [])
                         if isinstance(func_scope, list):
-                            stmt['scope'] = _fold_const_calls_in_scope(func_scope)
+                            stmt["scope"] = _fold_const_calls_in_scope(func_scope)
                         new_scope.append(stmt)
                         continue
                     if isinstance(stmt, dict):
@@ -3459,20 +3707,22 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                         new_scope.append(stmt)
                 return new_scope
 
-            def _fold_large_int_print_args(scope: list, inherited: dict[str, Any]) -> list:
+            def _fold_large_int_print_args(
+                scope: list, inherited: dict[str, Any]
+            ) -> list:
                 assign_counts: dict[str, int] = {}
                 assign_values: dict[str, Any] = {}
 
                 def walk_assignments(node: Any):
                     if isinstance(node, dict):
-                        if node.get('type') == 'function':
+                        if node.get("type") == "function":
                             return
-                        if node.get('type') == 'var':
-                            name = node.get('name')
+                        if node.get("type") == "var":
+                            name = node.get("name")
                             if isinstance(name, str):
                                 assign_counts[name] = assign_counts.get(name, 0) + 1
                                 if name not in assign_values:
-                                    assign_values[name] = node.get('value')
+                                    assign_values[name] = node.get("value")
                         for value in node.values():
                             walk_assignments(value)
                         return
@@ -3495,10 +3745,10 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                     usage: dict[str, dict[str, int]] = {}
 
                     def bump(name: str, string_context: bool):
-                        data = usage.setdefault(name, {'total': 0, 'string': 0})
-                        data['total'] += 1
+                        data = usage.setdefault(name, {"total": 0, "string": 0})
+                        data["total"] += 1
                         if string_context:
-                            data['string'] += 1
+                            data["string"] += 1
 
                     def walk(node: Any, string_context: bool, in_function: bool):
                         if isinstance(node, list):
@@ -3508,34 +3758,38 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                         if not isinstance(node, dict):
                             return
 
-                        if node.get('type') == 'function':
-                            func_scope = node.get('scope', [])
+                        if node.get("type") == "function":
+                            func_scope = node.get("scope", [])
                             if isinstance(func_scope, list):
                                 walk(func_scope, False, True)
                             return
 
-                        if set(node.keys()) == {'id'}:
-                            name = node.get('id')
+                        if set(node.keys()) == {"id"}:
+                            name = node.get("id")
                             if isinstance(name, str):
                                 bump(name, string_context if not in_function else False)
                             return
 
-                        if node.get('type') == 'call':
-                            name = node.get('name')
-                            if name in {'print', 'println'}:
-                                for arg in node.get('args', []):
+                        if node.get("type") == "call":
+                            name = node.get("name")
+                            if name in {"print", "println"}:
+                                for arg in node.get("args", []):
                                     walk(arg, True, in_function)
                                 return
 
-                        if 'func' in node and 'args' in node:
-                            func_ref = node.get('func')
-                            func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
-                            if func_name in {'print', 'println'}:
-                                for arg in node.get('args', []):
+                        if "func" in node and "args" in node:
+                            func_ref = node.get("func")
+                            func_name = (
+                                func_ref.get("id")
+                                if isinstance(func_ref, dict)
+                                else None
+                            )
+                            if func_name in {"print", "println"}:
+                                for arg in node.get("args", []):
                                     walk(arg, True, in_function)
                                 return
-                            if func_name == 'str':
-                                args = node.get('args', [])
+                            if func_name == "str":
+                                args = node.get("args", [])
                                 for arg in args[:1]:
                                     walk(arg, True, in_function)
                                 for arg in args[1:]:
@@ -3543,7 +3797,7 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                                 return
 
                         for key, value in node.items():
-                            if key == 'func':
+                            if key == "func":
                                 continue
                             walk(value, string_context, in_function)
 
@@ -3557,7 +3811,7 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                     if not _is_large_int(value):
                         continue
                     usage = usage_map.get(name)
-                    if usage and usage['total'] == usage['string']:
+                    if usage and usage["total"] == usage["string"]:
                         removable_vars.add(name)
 
                 scope_map = dict(inherited)
@@ -3572,61 +3826,79 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
                     if not isinstance(node, dict):
                         return node
 
-                    if set(node.keys()) == {'id'}:
-                        name = node.get('id')
+                    if set(node.keys()) == {"id"}:
+                        name = node.get("id")
                         if isinstance(name, str) and name in removable_vars:
-                            return {'type': 'string', 'value': str(scope_map[name])}
-                        if isinstance(name, str) and name in scope_map and _is_large_int(scope_map[name]):
-                            return {'type': 'string', 'value': str(scope_map[name])}
+                            return {"type": "string", "value": str(scope_map[name])}
+                        if (
+                            isinstance(name, str)
+                            and name in scope_map
+                            and _is_large_int(scope_map[name])
+                        ):
+                            return {"type": "string", "value": str(scope_map[name])}
                         return node
 
-                    if node.get('type') == 'call':
-                        name = node.get('name')
-                        if name in {'print', 'println'}:
-                            args = node.get('args', [])
+                    if node.get("type") == "call":
+                        name = node.get("name")
+                        if name in {"print", "println"}:
+                            args = node.get("args", [])
                             new_args = []
                             for arg in args:
                                 new_arg = fold_node(arg)
                                 value = _try_eval_const_expr(new_arg)
-                                if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
-                                    var_name = new_arg.get('id')
+                                if (
+                                    value is None
+                                    and isinstance(new_arg, dict)
+                                    and set(new_arg.keys()) == {"id"}
+                                ):
+                                    var_name = new_arg.get("id")
                                     if isinstance(var_name, str):
                                         value = scope_map.get(var_name)
                                 if _is_large_int(value):
-                                    new_arg = {'type': 'string', 'value': str(value)}
+                                    new_arg = {"type": "string", "value": str(value)}
                                 new_args.append(new_arg)
-                            node['args'] = new_args
+                            node["args"] = new_args
                             return node
 
-                    if 'func' in node and 'args' in node:
-                        func_ref = node.get('func')
-                        func_name = func_ref.get('id') if isinstance(func_ref, dict) else None
-                        if func_name in {'print', 'println'}:
-                            args = node.get('args', [])
+                    if "func" in node and "args" in node:
+                        func_ref = node.get("func")
+                        func_name = (
+                            func_ref.get("id") if isinstance(func_ref, dict) else None
+                        )
+                        if func_name in {"print", "println"}:
+                            args = node.get("args", [])
                             new_args = []
                             for arg in args:
                                 new_arg = fold_node(arg)
                                 value = _try_eval_const_expr(new_arg)
-                                if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
-                                    var_name = new_arg.get('id')
+                                if (
+                                    value is None
+                                    and isinstance(new_arg, dict)
+                                    and set(new_arg.keys()) == {"id"}
+                                ):
+                                    var_name = new_arg.get("id")
                                     if isinstance(var_name, str):
                                         value = scope_map.get(var_name)
                                 if _is_large_int(value):
-                                    new_arg = {'type': 'string', 'value': str(value)}
+                                    new_arg = {"type": "string", "value": str(value)}
                                 new_args.append(new_arg)
-                            node['args'] = new_args
+                            node["args"] = new_args
                             return node
-                        if func_name == 'str' and len(node.get('args', [])) == 1:
-                            arg = node.get('args', [None])[0]
+                        if func_name == "str" and len(node.get("args", [])) == 1:
+                            arg = node.get("args", [None])[0]
                             new_arg = fold_node(arg)
                             value = _try_eval_const_expr(new_arg)
-                            if value is None and isinstance(new_arg, dict) and set(new_arg.keys()) == {'id'}:
-                                var_name = new_arg.get('id')
+                            if (
+                                value is None
+                                and isinstance(new_arg, dict)
+                                and set(new_arg.keys()) == {"id"}
+                            ):
+                                var_name = new_arg.get("id")
                                 if isinstance(var_name, str):
                                     value = scope_map.get(var_name)
                             if _is_large_int(value):
-                                return {'type': 'string', 'value': str(value)}
-                            node['args'] = [new_arg]
+                                return {"type": "string", "value": str(value)}
+                            node["args"] = [new_arg]
                             return node
 
                     new_node: dict[str, Any] = {}
@@ -3636,22 +3908,27 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
 
                 new_scope: list = []
                 for stmt in scope:
-                    if isinstance(stmt, dict) and stmt.get('type') == 'function':
-                        func_args = stmt.get('args', [])
+                    if isinstance(stmt, dict) and stmt.get("type") == "function":
+                        func_args = stmt.get("args", [])
                         func_inherited = dict(scope_map)
                         for arg_entry in func_args:
                             if isinstance(arg_entry, (list, tuple)) and arg_entry:
                                 arg_name = arg_entry[0]
-                                if isinstance(arg_name, str) and arg_name in func_inherited:
+                                if (
+                                    isinstance(arg_name, str)
+                                    and arg_name in func_inherited
+                                ):
                                     del func_inherited[arg_name]
-                        func_scope = stmt.get('scope', [])
+                        func_scope = stmt.get("scope", [])
                         if isinstance(func_scope, list):
-                            stmt['scope'] = _fold_large_int_print_args(func_scope, func_inherited)
+                            stmt["scope"] = _fold_large_int_print_args(
+                                func_scope, func_inherited
+                            )
                         new_scope.append(stmt)
                         continue
 
-                    if isinstance(stmt, dict) and stmt.get('type') == 'var':
-                        name = stmt.get('name')
+                    if isinstance(stmt, dict) and stmt.get("type") == "var":
+                        name = stmt.get("name")
                         if isinstance(name, str) and name in removable_vars:
                             continue
 
@@ -3666,14 +3943,14 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             # Build call graph from function bodies (only used if function is reachable)
             func_nodes: dict[str, dict[str, Any]] = {}
             for node in ast:
-                if isinstance(node, dict) and node.get('type') == 'function':
-                    func_name = node.get('name')
+                if isinstance(node, dict) and node.get("type") == "function":
+                    func_name = node.get("name")
                     if isinstance(func_name, str):
                         func_nodes[func_name] = node
 
             call_graph: dict[str, set[str]] = {}
             for func_name, node in func_nodes.items():
-                scope = node.get('scope', [])
+                scope = node.get("scope", [])
                 if isinstance(scope, list):
                     call_graph[func_name] = _collect_calls_from_scope(scope)
                 else:
@@ -3682,12 +3959,12 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             # Roots are calls from top-level statements plus main entry
             roots: set[str] = set()
             for node in ast:
-                if isinstance(node, dict) and node.get('type') == 'function':
+                if isinstance(node, dict) and node.get("type") == "function":
                     continue
                 roots |= _collect_calls_from_scope([node])
 
-            if 'main' in func_nodes:
-                roots.add('main')
+            if "main" in func_nodes:
+                roots.add("main")
 
             runtime_calls: set[str] = set()
             stack = list(roots)
@@ -3702,14 +3979,20 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             const_runtime_calls = set()
             for func_name in runtime_calls:
                 func_info = funcs.get(func_name)
-                func_mods = func_info.get('mods', []) if isinstance(func_info, dict) else []
-                if isinstance(func_mods, list) and 'const' in func_mods:
+                func_mods = (
+                    func_info.get("mods", []) if isinstance(func_info, dict) else []
+                )
+                if isinstance(func_mods, list) and "const" in func_mods:
                     const_runtime_calls.add(func_name)
 
-            def _serialize_memo_table(table: dict[tuple[Any, ...], Any]) -> list[dict[str, Any]]:
+            def _serialize_memo_table(
+                table: dict[tuple[Any, ...], Any],
+            ) -> list[dict[str, Any]]:
                 entries: list[dict[str, Any]] = []
                 for args_key, value in table.items():
-                    args_list = list(args_key) if isinstance(args_key, tuple) else [args_key]
+                    args_list = (
+                        list(args_key) if isinstance(args_key, tuple) else [args_key]
+                    )
                     entries.append({"args": args_list, "value": value})
                 return entries
 
@@ -3727,23 +4010,34 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
 
                 for func_name, memo_table in memo_tables.items():
                     func_info = funcs.get(func_name)
-                    if func_info and func_info.get('type') == 'func':
-                        func_info['memo_table'] = memo_table  # type: ignore[assignment]
+                    if func_info and func_info.get("type") == "func":
+                        func_info["memo_table"] = memo_table  # type: ignore[assignment]
 
             filtered_ast: AstType = []
             for node in ast:
-                if isinstance(node, dict) and node.get('type') == 'function':
-                    func_name = node.get('name')
+                if isinstance(node, dict) and node.get("type") == "function":
+                    func_name = node.get("name")
                     if not isinstance(func_name, str):
                         filtered_ast.append(node)
                         continue
                     func_info = funcs.get(func_name)
                     if func_info and isinstance(func_info, dict):
-                        memo_table = func_info.get('memo_table')
-                        if memo_table is not None and (memo_table or func_name in const_runtime_calls or func_name in _eval_timeout_funcs):
-                            memo_table_cast = cast(dict[tuple[Any, ...], Any], memo_table)
-                            node['memo_table'] = _serialize_memo_table(memo_table_cast)
-                    if func_name and func_name != 'main' and func_info and func_name not in runtime_calls:
+                        memo_table = func_info.get("memo_table")
+                        if memo_table is not None and (
+                            memo_table
+                            or func_name in const_runtime_calls
+                            or func_name in _eval_timeout_funcs
+                        ):
+                            memo_table_cast = cast(
+                                dict[tuple[Any, ...], Any], memo_table
+                            )
+                            node["memo_table"] = _serialize_memo_table(memo_table_cast)
+                    if (
+                        func_name
+                        and func_name != "main"
+                        and func_info
+                        and func_name not in runtime_calls
+                    ):
                         if _is_evaluable_function(func_name, func_info):
                             # Remove fully evaluatable function (all calls folded)
                             if func_name in funcs:
@@ -3764,18 +4058,18 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
 
         # If error already has location prefix from format_error, extract just the message
         # Format is either "Line X:Y: message" or "file:X:Y: message"
-        if ':' in error_text and '\n' not in error_text.split(':')[0]:
+        if ":" in error_text and "\n" not in error_text.split(":")[0]:
             # Split and look for the pattern
-            first_line = error_text.split('\n')[0]
+            first_line = error_text.split("\n")[0]
             # Try to find where the actual message starts (after "Line X:Y:" or "file:X:Y:")
-            parts = first_line.split(': ', 1)
+            parts = first_line.split(": ", 1)
             if len(parts) == 2:
                 error_text = parts[1]
 
-        if error_text.startswith('?'):
-            line_num, error_text = error_text.removeprefix('?').split(':',1)
-            if ',' in line_num:
-                line_num, char = line_num.split(',',1)
+        if error_text.startswith("?"):
+            line_num, error_text = error_text.removeprefix("?").split(":", 1)
+            if "," in line_num:
+                line_num, char = line_num.split(",", 1)
                 char = int(char)
 
             line_num = int(line_num)
@@ -3787,21 +4081,21 @@ def parse(text:str|InputStream, level:int=0, file:str='') -> AstType:
             if char is None:
                 char = stream.char
 
-        line = stream.orig_line(line_num-1)
+        line = stream.orig_line(line_num - 1)
 
         if char is not None and char < 0:
-            char = len(line)+char
+            char = len(line) + char
 
         # Default to position 0 if still None
         if char is None:
             char = 0
 
         # Format the error message with location info
-        location = f'{file}:{line_num}:{char}' if file else f'Line {line_num}:{char}'
+        location = f"{file}:{line_num}:{char}" if file else f"Line {line_num}:{char}"
         error_msg = f'Syntax Error\n  File "{file}" line {line_num} in {current_func}\n      {line}\n      {' '*char + '^'}\n    {location}: {error_text}'
 
         # Always raise the exception so it can be caught by test framework or CLI
         raise SyntaxError(error_msg)
 
-debug = '-d' in sys.argv or '--debug' in sys.argv
 
+debug = "-d" in sys.argv or "--debug" in sys.argv

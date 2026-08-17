@@ -4,10 +4,21 @@ The type lattice flows information forward through the IR, giving precise types
 at every point. This enables type-specialized codegen (mov for int, movsd for float)
 and drives escape analysis for struct allocation tier decisions.
 """
+
 from __future__ import annotations
 from optimizer.ir import (
-    Module, Function, BasicBlock, Instruction, Value, Constant, Param,
-    Op, IRType, StructType, ListType, ValueType,
+    Module,
+    Function,
+    BasicBlock,
+    Instruction,
+    Value,
+    Constant,
+    Param,
+    Op,
+    IRType,
+    StructType,
+    ListType,
+    ValueType,
 )
 
 
@@ -63,8 +74,19 @@ class TypeLattice:
             return IRType.BOOL
 
         # Integer arithmetic → int
-        if op in (Op.ADD, Op.SUB, Op.MUL, Op.DIV, Op.MOD, Op.NEG,
-                  Op.SHL, Op.SHR, Op.BIT_AND, Op.BIT_OR, Op.BIT_XOR):
+        if op in (
+            Op.ADD,
+            Op.SUB,
+            Op.MUL,
+            Op.DIV,
+            Op.MOD,
+            Op.NEG,
+            Op.SHL,
+            Op.SHR,
+            Op.BIT_AND,
+            Op.BIT_OR,
+            Op.BIT_XOR,
+        ):
             return IRType.INT64
 
         # Float arithmetic → float
@@ -144,10 +166,12 @@ class TypeLattice:
 
         # Select
         if op == Op.SELECT and len(inst.operands) >= 3:
-            return self._join_types([
-                self._get_type(inst.operands[1]),
-                self._get_type(inst.operands[2]),
-            ])
+            return self._join_types(
+                [
+                    self._get_type(inst.operands[1]),
+                    self._get_type(inst.operands[2]),
+                ]
+            )
 
         # Math
         if op in (Op.SQRT, Op.SIN, Op.COS, Op.TAN, Op.POW):
@@ -253,7 +277,9 @@ class EscapeAnalysis:
                         new_state = max(new_state, self.ARG_ESCAPE)
                     elif inst.op == Op.STORE_FIELD:
                         # Storing a struct into another struct's field → full escape
-                        if op_val is not inst.operands[0]:  # it's the value, not the target
+                        if (
+                            op_val is not inst.operands[0]
+                        ):  # it's the value, not the target
                             new_state = self.FULL_ESCAPE
                     elif inst.op == Op.PHI:
                         # Phi merges: if any incoming value escapes, the phi result escapes

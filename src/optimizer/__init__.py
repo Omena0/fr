@@ -2,12 +2,12 @@
 # See PLAN.md for architecture documentation
 
 # Re-export BytecodeOptimizer so existing `from optimizer import BytecodeOptimizer` works
-from optimizer.bytecode_opt import BytecodeOptimizer
+from .bytecode_opt import BytecodeOptimizer
 
-__all__ = ['BytecodeOptimizer', 'compile_native_ssa']
+__all__ = ["BytecodeOptimizer", "compile_native_ssa"]
 
 
-def compile_native_ssa(bytecode: str, opt_level: int = 2) -> str:
+def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
     """Compile bytecode to x86_64 assembly using the SSA IR pipeline.
 
     This is the new native compilation path:
@@ -20,11 +20,11 @@ def compile_native_ssa(bytecode: str, opt_level: int = 2) -> str:
     Returns:
         x86_64 assembly text (Intel syntax)
     """
-    from optimizer.ir_builder import build_ir
-    from optimizer.ir import dump_module
-    from optimizer.passes import run_passes
-    from optimizer.codegen import generate_asm
-    from optimizer.peephole import optimize_asm_text
+    from .ir_builder import build_ir
+    from .ir import dump_module
+    from .passes import run_passes
+    from .codegen import generate_asm
+    from .peephole import optimize_asm_text
 
     # Phase 1: Build SSA IR from bytecode
     module = build_ir(bytecode)
@@ -36,7 +36,8 @@ def compile_native_ssa(bytecode: str, opt_level: int = 2) -> str:
     # Phase 3: Run SMT synthesis (level 3 only)
     if opt_level >= 3:
         try:
-            from optimizer.synthesis import synthesis_pass
+            from .synthesis import synthesis_pass
+
             synthesis_pass(module)
         except ImportError:
             pass  # z3 not installed, skip

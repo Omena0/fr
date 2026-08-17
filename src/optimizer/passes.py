@@ -13,18 +13,31 @@ Passes implemented:
 - Inlining (small functions)
 - TCO (Tail Call Optimization)
 """
+
 from __future__ import annotations
 from collections import defaultdict
 from optimizer.ir import (
-    Module, Function, BasicBlock, Instruction, Value, Constant, Param,
-    Op, IRType, StructType, ListType, ValueType,
-    SIDE_EFFECT_OPS, COMMUTATIVE_OPS, TERMINATOR_OPS,
+    Module,
+    Function,
+    BasicBlock,
+    Instruction,
+    Value,
+    Constant,
+    Param,
+    Op,
+    IRType,
+    StructType,
+    ListType,
+    ValueType,
+    SIDE_EFFECT_OPS,
+    COMMUTATIVE_OPS,
+    TERMINATOR_OPS,
 )
 from optimizer.analysis import DomTree, LoopInfo, LivenessInfo, FunctionAnalysis
 from optimizer.types import EscapeAnalysis
 
-
 # ── SCCP: Sparse Conditional Constant Propagation ───────────────
+
 
 def sccp(func: Function) -> bool:
     """Propagate constants through the IR. Fold operations on constants."""
@@ -58,8 +71,12 @@ def sccp(func: Function) -> bool:
     if changed:
         for block in func.blocks:
             for inst in block.instructions:
-                if inst.result and inst.op in (Op.CONST_INT, Op.CONST_FLOAT,
-                                                Op.CONST_BOOL, Op.CONST_STR):
+                if inst.result and inst.op in (
+                    Op.CONST_INT,
+                    Op.CONST_FLOAT,
+                    Op.CONST_BOOL,
+                    Op.CONST_STR,
+                ):
                     _replace_const_uses(inst)
 
     return changed
@@ -177,6 +194,7 @@ def _replace_const_uses(inst: Instruction):
 
 
 # ── Algebraic Simplification ───────────────────────────────────
+
 
 def algebraic_simplify(func: Function) -> bool:
     """Apply algebraic identities and strength reductions."""
@@ -368,6 +386,7 @@ def _make_const_int(val: int, inst: Instruction) -> Value:
 
 # ── DCE: Dead Code Elimination ─────────────────────────────────
 
+
 def dce(func: Function) -> bool:
     """Remove instructions whose results are unused and that have no side effects."""
     changed = False
@@ -418,6 +437,7 @@ def _is_dead(inst: Instruction) -> bool:
 
 
 # ── CSE: Common Subexpression Elimination ───────────────────────
+
 
 def cse(func: Function) -> bool:
     """Eliminate redundant computations (same op, same operands → same result)."""
@@ -471,6 +491,7 @@ def _cse_key(inst: Instruction) -> tuple | None:
 
 # ── LICM: Loop Invariant Code Motion ───────────────────────────
 
+
 def licm(func: Function) -> bool:
     """Move loop-invariant instructions to the loop preheader."""
     analysis = FunctionAnalysis(func)
@@ -510,6 +531,7 @@ def _find_preheader(loop: Loop) -> BasicBlock | None:
 
 
 # ── SROA: Scalar Replacement of Aggregates ──────────────────────
+
 
 def sroa(func: Function) -> bool:
     """Replace struct allocations with individual scalar values when possible.
@@ -589,6 +611,7 @@ def sroa(func: Function) -> bool:
 
 # ── Inlining ────────────────────────────────────────────────────
 
+
 def inline_small_functions(module: Module, max_inst: int = 20) -> bool:
     """Inline small functions at call sites."""
     changed = False
@@ -607,9 +630,13 @@ def inline_small_functions(module: Module, max_inst: int = 20) -> bool:
                 if inst.op == Op.CALL and inst.imm_str:
                     target_name = inst.imm_str
                     target = module.get_function(target_name)
-                    if (target and target is not func and
-                            func_sizes.get(target_name, 999) <= max_inst and
-                            len(target.blocks) == 1 and not target.is_extern):
+                    if (
+                        target
+                        and target is not func
+                        and func_sizes.get(target_name, 999) <= max_inst
+                        and len(target.blocks) == 1
+                        and not target.is_extern
+                    ):
                         if _try_inline(func, block, inst, target, i):
                             changed = True
                             continue  # Re-check same index (inlined code is there now)
@@ -618,9 +645,13 @@ def inline_small_functions(module: Module, max_inst: int = 20) -> bool:
     return changed
 
 
-def _try_inline(caller_func: Function, call_block: BasicBlock,
-                call_inst: Instruction, callee: Function,
-                call_idx: int) -> bool:
+def _try_inline(
+    caller_func: Function,
+    call_block: BasicBlock,
+    call_inst: Instruction,
+    callee: Function,
+    call_idx: int,
+) -> bool:
     """Inline a single-block function at a call site."""
     if len(callee.blocks) != 1:
         return False
@@ -653,9 +684,12 @@ def _try_inline(caller_func: Function, call_block: BasicBlock,
             else:
                 new_operands.append(v)
 
-        new_inst = Instruction(cinst.op, new_operands,
-                               cinst.result.type if cinst.result else None,
-                               cinst.source_line)
+        new_inst = Instruction(
+            cinst.op,
+            new_operands,
+            cinst.result.type if cinst.result else None,
+            cinst.source_line,
+        )
         new_inst.imm_int = cinst.imm_int
         new_inst.imm_str = cinst.imm_str
         new_inst.imm_float = cinst.imm_float
@@ -674,7 +708,11 @@ def _try_inline(caller_func: Function, call_block: BasicBlock,
 
     # Replace call result uses with return value
     if call_inst.result and return_val:
-        mapped_ret = param_map.get(return_val.id, return_val) if isinstance(return_val, Value) else return_val
+        mapped_ret = (
+            param_map.get(return_val.id, return_val)
+            if isinstance(return_val, Value)
+            else return_val
+        )
         for user in list(call_inst.result.uses):
             user.replace_operand(call_inst.result, mapped_ret)
 
@@ -682,6 +720,7 @@ def _try_inline(caller_func: Function, call_block: BasicBlock,
 
 
 # ── Tail Call Optimization ──────────────────────────────────────
+
 
 def tco(func: Function) -> bool:
     """Convert tail calls to jumps (tail call optimization)."""
@@ -722,6 +761,7 @@ def tco(func: Function) -> bool:
 
 # ── Branch simplification ──────────────────────────────────────
 
+
 def simplify_branches(func: Function) -> bool:
     """Simplify control flow: fold constant branches, remove unreachable blocks."""
     changed = False
@@ -755,6 +795,7 @@ def simplify_branches(func: Function) -> bool:
 
 
 # ── Pass pipeline ───────────────────────────────────────────────
+
 
 def run_passes(module: Module, level: int = 2) -> bool:
     """Run optimization passes on the module.

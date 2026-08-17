@@ -8,7 +8,8 @@ shipped.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from parser import parse
 from compiler import compile_ast_to_bytecode
@@ -17,7 +18,7 @@ from optimizer import BytecodeOptimizer
 
 def compile(source: str) -> str:
     """Parse + compile source to optimized bytecode."""
-    ast = parse(source, file='test.fr')
+    ast = parse(source, file="test.fr")
     bc, _ = compile_ast_to_bytecode(ast)
     return bc
 
@@ -25,7 +26,7 @@ def compile(source: str) -> str:
 def compile_unoptimized(source: str) -> str:
     """Parse + compile source to bytecode, then return the *un*optimized
     version (for comparison)."""
-    ast = parse(source, file='test.fr')
+    ast = parse(source, file="test.fr")
     # Temporarily block the optimizer
     original = BytecodeOptimizer.optimize
     BytecodeOptimizer.optimize = lambda self, bytecode: bytecode
@@ -47,7 +48,12 @@ def extract_func_body(bc: str) -> list[str]:
             continue
         if stripped == ".end":
             break
-        if in_func and stripped and not stripped.startswith(".") and not stripped.startswith("#"):
+        if (
+            in_func
+            and stripped
+            and not stripped.startswith(".")
+            and not stripped.startswith("#")
+        ):
             lines.append(stripped)
     return lines
 
@@ -59,22 +65,16 @@ def extract_func_body(bc: str) -> list[str]:
 #      was incorrectly removed, producing broken bytecode.
 # ============================================================
 
+
 def test_dead_store_across_lines():
     """Variable assigned on one line and used on the next must NOT be removed."""
-    source = (
-        "void main() {\n"
-        "    list x = [1, 2, 3]\n"
-        "    println(x)\n"
-        "}\n"
-    )
+    source = "void main() {\n" "    list x = [1, 2, 3]\n" "    println(x)\n" "}\n"
     bc = compile(source)
     body = extract_func_body(bc)
 
     # The STORE for variable x (slot 0) must be present
     stores = [l for l in body if l.startswith("STORE 0")]
-    assert stores, (
-        "STORE 0 was removed by optimizer! Bytecode:\n" + bc
-    )
+    assert stores, "STORE 0 was removed by optimizer! Bytecode:\n" + bc
     # And the LOAD for variable x must be present
     loads = [l for l in body if l.startswith("LOAD 0")]
     assert loads, "LOAD 0 missing!"
@@ -115,16 +115,15 @@ def test_dead_store_truly_dead_is_removed():
     optimizer = BytecodeOptimizer()
     lines = [
         "  CONST_I64 42",
-        "  STORE 0",        # slot 0 is never loaded — dead store
-        "  CONST_STR \"1\"",
+        "  STORE 0",  # slot 0 is never loaded — dead store
+        '  CONST_STR "1"',
         "  BUILTIN_PRINTLN",
         "  RETURN_VOID",
     ]
     result = optimizer.remove_dead_stores(lines)
     stores = [l.strip() for l in result if l.strip() == "STORE 0"]
     assert not stores, (
-        "STORE 0 should be removed — slot 0 is never loaded.\n"
-        f"Result: {result}"
+        "STORE 0 should be removed — slot 0 is never loaded.\n" f"Result: {result}"
     )
 
 
@@ -134,6 +133,7 @@ def test_dead_store_truly_dead_is_removed():
 #      Fused instructions like INC_LOCAL, COPY_LOCAL_REF,
 #      FUSED_LOAD_STORE, etc. also read from variable slots.
 # ============================================================
+
 
 def test_dead_store_respects_inc_local():
     """A variable used by INC_LOCAL must not be dead-store eliminated."""
@@ -187,6 +187,7 @@ def test_dead_store_respects_fused_load_store():
 # Regression: .line directives must survive optimizer passes
 # ============================================================
 
+
 def test_line_directives_preserved():
     """The optimizer must not destroy .line directives."""
     source = (
@@ -207,6 +208,7 @@ def test_line_directives_preserved():
 #      a single FUSED_GET_STORE_LOAD instruction with triplets.
 # ============================================================
 
+
 def test_fuse_get_store_load():
     """Consecutive STRUCT_GET + STORE + LOAD sequences must be fused."""
     optimizer = BytecodeOptimizer()
@@ -219,10 +221,13 @@ def test_fuse_get_store_load():
         "  FUSED_STORE_LOAD 4 1",
     ]
     result = optimizer.fuse_get_store_load(lines)
-    fused = [l.strip() for l in result if 'FUSED_GET_STORE_LOAD' in l]
-    assert len(fused) == 1, f"Expected 1 FUSED_GET_STORE_LOAD, got {len(fused)}: {result}"
-    assert fused[0] == "FUSED_GET_STORE_LOAD 0 2 1 1 3 1 2 4 1", \
-        f"Wrong args: {fused[0]}"
+    fused = [l.strip() for l in result if "FUSED_GET_STORE_LOAD" in l]
+    assert (
+        len(fused) == 1
+    ), f"Expected 1 FUSED_GET_STORE_LOAD, got {len(fused)}: {result}"
+    assert (
+        fused[0] == "FUSED_GET_STORE_LOAD 0 2 1 1 3 1 2 4 1"
+    ), f"Wrong args: {fused[0]}"
 
 
 def test_fuse_get_store_load_raw():
@@ -237,8 +242,10 @@ def test_fuse_get_store_load_raw():
         "  LOAD 1",
     ]
     result = optimizer.fuse_get_store_load(lines)
-    fused = [l.strip() for l in result if 'FUSED_GET_STORE_LOAD' in l]
-    assert len(fused) == 1, f"Expected 1 FUSED_GET_STORE_LOAD, got {len(fused)}: {result}"
+    fused = [l.strip() for l in result if "FUSED_GET_STORE_LOAD" in l]
+    assert (
+        len(fused) == 1
+    ), f"Expected 1 FUSED_GET_STORE_LOAD, got {len(fused)}: {result}"
     assert fused[0] == "FUSED_GET_STORE_LOAD 0 2 1 1 3 1"
 
 
@@ -251,7 +258,7 @@ def test_fuse_get_store_load_single_not_fused():
         "  BUILTIN_PRINTLN",
     ]
     result = optimizer.fuse_get_store_load(lines)
-    fused = [l.strip() for l in result if 'FUSED_GET_STORE_LOAD' in l]
+    fused = [l.strip() for l in result if "FUSED_GET_STORE_LOAD" in l]
     assert len(fused) == 0, f"Single pair should not be fused: {result}"
 
 
@@ -288,6 +295,7 @@ def test_optimize_not_jumps():
 # ============================================================
 # Run all tests
 # ============================================================
+
 
 def run_tests():
     tests = [v for k, v in globals().items() if k.startswith("test_")]
