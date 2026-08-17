@@ -3,7 +3,7 @@
 
 [![Build](https://github.com/Omena0/fr/actions/workflows/publish.yaml/badge.svg)](https://github.com/Omena0/fr/actions/workflows/publish.yaml)
 ![Tests](https://github.com/Omena0/fr/actions/workflows/test.yaml/badge.svg)
-![LoC](https://img.shields.io/badge/Lines%20Of%20Code-68.3K-red?logo=code)
+![LoC](https://img.shields.io/badge/Lines%20Of%20Code-64.9K-red?logo=code)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)
 
 Simple bytecode compiled C-style compiled language.
