@@ -79,13 +79,10 @@ class RegAllocation:
 
     def location(self, value: Value) -> str:
         """Get the location string for a value (register or stack slot)."""
-        reg = self.reg_map.get(value.id)
-        if reg:
+        if reg := self.reg_map.get(value.id):
             return reg
         slot = self.spill_map.get(value.id)
-        if slot is not None:
-            return f"[rbp - {slot}]"
-        return "???"
+        return f"[rbp - {slot}]" if slot is not None else "???"
 
 
 class LinearScanAllocator:
@@ -102,7 +99,7 @@ class LinearScanAllocator:
     def __init__(self, func: Function):
         self.func = func
         self.result = RegAllocation()
-        self._next_spill_offset = 8  # Start at [rbp-8]
+        self._next_spill_offset = 0  # Start at 0; only grow if we actually spill
         self._active: list[LiveInterval] = []  # Currently active intervals
         self._free_gprs: list[str] = list(reversed(ALL_GPRS))
         self._free_xmms: list[str] = list(reversed(ALL_XMMS))
@@ -125,15 +122,14 @@ class LinearScanAllocator:
                     float_arg_idx += 1
                 else:
                     self._spill(param)
+            elif int_arg_idx < len(ARG_REGS):
+                reg = ARG_REGS[int_arg_idx]
+                self.result.reg_map[param.id] = reg
+                if reg in self._free_gprs:
+                    self._free_gprs.remove(reg)
+                int_arg_idx += 1
             else:
-                if int_arg_idx < len(ARG_REGS):
-                    reg = ARG_REGS[int_arg_idx]
-                    self.result.reg_map[param.id] = reg
-                    if reg in self._free_gprs:
-                        self._free_gprs.remove(reg)
-                    int_arg_idx += 1
-                else:
-                    self._spill(param)
+                self._spill(param)
 
         # Process intervals in order of start point
         for interval in intervals:
@@ -144,10 +140,7 @@ class LinearScanAllocator:
             # Expire old intervals
             self._expire_old_intervals(interval.start)
 
-            # Determine register class
-            needs_float = is_float_type(interval.value.type)
-
-            if needs_float:
+            if needs_float := is_float_type(interval.value.type):
                 if self._free_xmms:
                     reg = self._free_xmms.pop()
                     self._assign(interval, reg)
@@ -155,24 +148,14 @@ class LinearScanAllocator:
                     self._spill_at_interval(interval, is_float=True)
             else:
                 forbidden = interval.forbidden_regs
-                if interval.crosses_call:
-                    # Prefer callee-saved registers for values live across calls
-                    reg = self._pick_callee_saved_gpr(forbidden)
-                    if reg:
-                        self._assign(interval, reg)
-                    else:
-                        reg = self._pick_free_gpr(forbidden)
-                        if reg:
-                            self._assign(interval, reg)
-                        else:
-                            self._spill_at_interval(interval, is_float=False)
+                if interval.crosses_call and (
+                    reg := self._pick_callee_saved_gpr(forbidden)
+                ):
+                    self._assign(interval, reg)
+                elif reg := self._pick_free_gpr(forbidden):
+                    self._assign(interval, reg)
                 else:
-                    reg = self._pick_free_gpr(forbidden)
-                    if reg:
-                        self._assign(interval, reg)
-                    else:
-                        self._spill_at_interval(interval, is_float=False)
-
+                    self._spill_at_interval(interval, is_float=False)
         # Track which callee-saved registers are used
         for reg in self.result.reg_map.values():
             if reg in CALLEE_SAVED_GPRS and reg not in self.result.used_callee_saved:
@@ -204,9 +187,7 @@ class LinearScanAllocator:
         still_active = []
         for interval in self._active:
             if interval.end <= current_point:
-                # Free the register
-                reg = interval.reg
-                if reg:
+                if reg := interval.reg:
                     if reg.startswith("xmm"):
                         self._free_xmms.append(reg)
                     else:

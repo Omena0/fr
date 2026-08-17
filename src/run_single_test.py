@@ -45,46 +45,71 @@ from runtime import run, format_runtime_exception  # type: ignore
 from optimizer import compile_native_ssa
 
 RUNTIME_DIR = Path(__file__).parent.parent / "runtime"
-RUNTIME_SRC = RUNTIME_DIR / "runtime_lib.c"
+RUNTIME_SRC = RUNTIME_DIR / "fr_rt.c"
+RUNTIME_SYSCALL_ASM = RUNTIME_DIR / "syscall.S"
 RUNTIME_INCLUDE_DIR = str(RUNTIME_DIR)
 RUNTIME_OBJ = Path(tempfile.gettempdir()) / "frscript_runtime_lib.o"
+SYSCALL_OBJ = Path(tempfile.gettempdir()) / "frscript_syscall.o"
 
 
 def ensure_runtime_object():
-    """Compile runtime_lib.c to an object file and reuse it across tests."""
-    src_mtime = RUNTIME_SRC.stat().st_mtime
-    if RUNTIME_OBJ.exists():
+    """Compile fr_rt.c and syscall.S to object files and reuse them across tests."""
+    src_mtime = max(RUNTIME_SRC.stat().st_mtime, RUNTIME_SYSCALL_ASM.stat().st_mtime)
+    if RUNTIME_OBJ.exists() and SYSCALL_OBJ.exists():
         try:
-            if RUNTIME_OBJ.stat().st_mtime >= src_mtime:
-                return str(RUNTIME_OBJ)
+            if RUNTIME_OBJ.stat().st_mtime >= src_mtime and SYSCALL_OBJ.stat().st_mtime >= src_mtime:
+                return str(RUNTIME_OBJ), str(SYSCALL_OBJ)
         except OSError:
             pass
 
-    tmp_obj = RUNTIME_OBJ.with_suffix(".o.tmp")
-    compile_cmd = [
+    tmp_rt_obj = RUNTIME_OBJ.with_suffix(".o.tmp")
+    tmp_sc_obj = SYSCALL_OBJ.with_suffix(".o.tmp")
+
+    rt_cmd = [
         "gcc",
         "-c",
-        "-O3",
+        "-Os",
         "-march=native",
         "-mtune=native",
+        "-fno-strict-aliasing",
+        "-fwrapv",
         "-ffunction-sections",
         "-fdata-sections",
+        "-fno-asynchronous-unwind-tables",
+        "-fno-stack-protector",
+        "-fno-builtin",
         "-I",
         RUNTIME_INCLUDE_DIR,
         "-o",
-        str(tmp_obj),
+        str(tmp_rt_obj),
         str(RUNTIME_SRC),
     ]
-    result = subprocess.run(compile_cmd, capture_output=True, text=True)
+    result = subprocess.run(rt_cmd, capture_output=True, text=True)
     if result.returncode != 0:
         try:
-            tmp_obj.unlink()
+            tmp_rt_obj.unlink()
         except OSError:
             pass
-        raise RuntimeError(result.stderr.strip() or "Failed to compile runtime_lib.c")
+        raise RuntimeError(result.stderr.strip() or "Failed to compile fr_rt.c")
 
-    tmp_obj.replace(RUNTIME_OBJ)
-    return str(RUNTIME_OBJ)
+    sc_cmd = [
+        "as",
+        "-o",
+        str(tmp_sc_obj),
+        str(RUNTIME_SYSCALL_ASM),
+    ]
+    result = subprocess.run(sc_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        try:
+            tmp_rt_obj.unlink()
+            tmp_sc_obj.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(result.stderr.strip() or "Failed to assemble syscall.S")
+
+    tmp_rt_obj.replace(RUNTIME_OBJ)
+    tmp_sc_obj.replace(SYSCALL_OBJ)
+    return str(RUNTIME_OBJ), str(SYSCALL_OBJ)
 
 
 def extract_error_message(error_text):
@@ -551,8 +576,10 @@ def main():
             runtime_obj = ensure_runtime_object()
         except Exception as exc:
             native_error = str(exc)
+
         if runtime_obj:
             try:
+                rt_obj, sc_obj = runtime_obj
                 # Extract C imports from bytecode
                 c_import_files = []
                 for line in bytecode.split("\n"):
@@ -598,26 +625,33 @@ def main():
                         [
                             "gcc",
                             obj_file,
-                            runtime_obj,
+                            sc_obj,
+                            rt_obj,
                             f"-I{RUNTIME_INCLUDE_DIR}",
                             "-O3",
                             "-march=native",
                             "-mtune=native",
+                            "-fno-strict-aliasing",
+                            "-fwrapv",
                             "-ffunction-sections",
                             "-fdata-sections",
+                            "-fno-asynchronous-unwind-tables",
+                            "-fno-stack-protector",
+                            "-fno-builtin",
+                            "-nostdlib",
+                            "-static",
+                            "-nostartfiles",
                             "-Wl,--gc-sections",
+                            "-Wl,--build-id=none",
+                            "-Wl,--strip-all",
                             "-o",
                             native_bin,
                         ]
                         + c_import_files
-                        + [  # Add C import files to the command
-                            "-lm",
-                            "-no-pie",
-                        ]
                     )
 
                     result = subprocess.run(
-                        compile_cmd, capture_output=True, text=True, timeout=10
+                        compile_cmd, capture_output=True, text=True, timeout=30
                     )
 
                     if result.returncode != 0:
@@ -655,11 +689,8 @@ def main():
                                     result.stderr.strip()
                                     if result.stderr
                                     else f"Binary exited with code {result.returncode}"
-                                )
+                                 )
                             native_error = extract_error_message(stderr_text)
-
-                            if stderr_text and not native_output:
-                                native_output = None
 
                     try:
                         os.unlink(native_bin)

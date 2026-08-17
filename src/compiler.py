@@ -2528,8 +2528,7 @@ class BytecodeCompiler:
         # Optimize the function bytecode
         bytecode = "\n".join(self.output)
         optimizer = BytecodeOptimizer()
-        optimize = '-O' in flags and '-O0' not in flags
-        if optimize:
+        if '-O0' not in flags:
             bytecode = optimizer.optimize(bytecode)
 
         return bytecode

@@ -452,6 +452,53 @@ def compile_cmd(args=None):
         sys.exit(1)
 
 
+def ir_cmd(args):
+    """Dump SSA IR for a source file"""
+    if len(args) < 1:
+        print("Usage: fr ir <file.fr> [-O] [-O0]")
+        print("  -O:    Enable optimizations (default)")
+        print("  -O0:   Disable optimizations")
+        sys.exit(1)
+
+    input_file = args[0]
+    optimize = "-O" in args and "-O0" not in args
+
+    # Load AST
+    file_type = detect_file_type(input_file)
+    if file_type == "source":
+        with open(input_file) as f:
+            source = f.read()
+        try:
+            ast = parse(source, file=input_file)
+        except SyntaxError as e:
+            print(f"Parse error: {e}")
+            sys.exit(1)
+    elif file_type == "json":
+        with open(input_file) as f:
+            ast = json.load(f)
+    elif file_type == "binary_ast":
+        with open(input_file, "rb") as f:
+            ast = decode_binary(f.read())
+    else:
+        print(f"Error: Cannot load {input_file} - unknown format")
+        print("Expected: .fr, .json, or binary AST file")
+        sys.exit(1)
+
+    try:
+        bytecode, _ = compile_ast_to_bytecode(ast)
+        from optimizer import compile_native_ssa
+
+        opt_level = 3 if "-O3" in args else (2 if optimize else 1)
+        ir_text = compile_native_ssa(bytecode, opt_level=opt_level, dump_ir=True)
+        print(ir_text)
+    except Exception as e:
+        print(f"IR generation error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def encode_cmd(args):
     """Encode JSON AST to binary"""
     if len(args) < 1:
@@ -491,13 +538,17 @@ def decode_cmd(args):
 def native_cmd(args):
     """Compile bytecode to x86_64 native binary"""
     if len(args) < 1:
-        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--ssa]")
+        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--ssa] [--ssa-ir] [-Os]")
         print("  -a, --asm:  Keep assembly file")
         print("  --ssa:      Use SSA IR superoptimizer pipeline")
+        print("  --ssa-ir:   Dump SSA IR instead of generating assembly")
+        print("  -Os:        Optimize for size (passes -Os to gcc, strips binary)")
         sys.exit(1)
 
     input_file = args[0]
     keep_asm = "-a" in args or "--asm" in args
+    dump_ir = "--ssa-ir" in args
+    optimize_size = "-Os" in args
 
     # Determine output filename
     if "-o" in args:
@@ -519,29 +570,20 @@ def native_cmd(args):
     with open(input_file, "r") as f:
         bytecode = f.read()
 
-    # Extract C import files and linker flags from bytecode comments
-    c_import_files = []
-    link_libs = []
-    for line in bytecode.split("\n"):
-        if line.startswith("# C import:"):
-            c_file = line.split("# C import:")[1].strip()
-            c_import_files.append(c_file)
-        elif line.startswith("# Link:"):
-            lib = line.split("# Link:")[1].strip()
-            # Split the library flags by spaces to handle multiple flags like "-L./lib -lraylib"
-            lib_flags = lib.split()
-            for flag in lib_flags:
-                if flag not in link_libs:
-                    link_libs.append(flag)
-
     # Compile to x86_64
     try:
-        # Check for optimization flag, but -O0 disables it
-        optimize = "-O" in args and "-O0" not in args
-
         from optimizer import compile_native_ssa
 
-        opt_level = 3 if "-O3" in args else (2 if optimize else 1)
+        opt_level = 3 if "-O3" in args else (2 if ("-O" in args and "-O0" not in args and "-Os" not in args) else 1)
+        if optimize_size:
+            opt_level = max(opt_level, 2)
+
+        if dump_ir:
+            ir_text = compile_native_ssa(bytecode, opt_level=opt_level, dump_ir=True)
+            print(ir_text)
+            return
+
+        optimize = ("-O" in args and "-O0" not in args) or optimize_size
         if optimize:
             print(f"Optimizer (level {opt_level})")
         asm = compile_native_ssa(bytecode, opt_level)
@@ -557,6 +599,9 @@ def native_cmd(args):
         try:
             # Compile C import files to object files (skip header files)
             c_obj_files = []
+            c_import_files = []
+            link_libs = []
+
             for c_file in c_import_files:
                 # Skip header files - they're for parsing only
                 if c_file.endswith(".h"):
@@ -564,6 +609,19 @@ def native_cmd(args):
 
                 c_obj = c_file.replace(".c", ".o")
                 print(f"Compiling C file: {c_file}")
+                cflags = [
+                    "-Os" if optimize_size else "-O3",
+                    "-march=native",
+                    "-mtune=native",
+                    "-fno-strict-aliasing",
+                    "-fwrapv",
+                    "-ffunction-sections",
+                    "-fdata-sections",
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-stack-protector",
+                    "-fno-builtin",
+                ]
+                cflags = [f for f in cflags if f]
                 result = subprocess.run(
                     [
                         "gcc",
@@ -571,17 +629,7 @@ def native_cmd(args):
                         c_file,
                         "-o",
                         c_obj,
-                        "-O3",
-                        "-march=native",
-                        "-mtune=native",
-                        "-finline-functions",
-                        "-funroll-loops",
-                        "-fno-strict-aliasing",
-                        "-fwrapv",
-                        "-fno-tree-pre",
-                        "-fno-ipa-cp",
-                        "-ffunction-sections",
-                        "-fdata-sections",
+                        *cflags,
                     ],
                     capture_output=True,
                     text=True,
@@ -609,32 +657,49 @@ def native_cmd(args):
                 print(runtime_dir)
             else:
                 runtime_dir = "runtime"
-            runtime_lib = f"{runtime_dir}/runtime_lib.c"
+            runtime_lib = f"{runtime_dir}/fr_rt.c"
+            syscall_asm = f"{runtime_dir}/syscall.S"
+
+            # Compile syscall assembly
+            syscall_obj = f"/tmp/fr_syscall_{os.getpid()}.o"
+            subprocess.run(
+                ["as", syscall_asm, "-o", syscall_obj],
+                check=True, capture_output=True
+            )
+
+            cflags = [
+                "-Os" if optimize_size else "-O3",
+                "-march=native",
+                "-mtune=native",
+                "-fno-strict-aliasing",
+                "-fwrapv",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-fno-asynchronous-unwind-tables",
+                "-fno-stack-protector",
+                "-fno-builtin",
+            ]
+            cflags = [f for f in cflags if f]
 
             gcc_flags = [
                 "gcc",
+                *cflags,
                 obj_file,
+                syscall_obj,
                 *c_obj_files,
                 str(runtime_lib),
                 "-o",
                 exe_file,
                 f"-I{runtime_dir}",
-                "-O3",
-                "-march=native",
-                "-mtune=native",
-                "-finline-functions",
-                "-funroll-loops",
-                "-fno-strict-aliasing",
-                "-fwrapv",
-                "-fno-tree-pre",
-                "-fno-ipa-cp",
-                "-ffunction-sections",
-                "-fdata-sections",
+                "-nostdlib",
+                "-static",
+                "-nostartfiles",
                 "-Wl,--gc-sections",
-                "-lm",
+                "-Wl,--build-id=none",
+                "-Wl,--strip-all",
                 *link_libs,
-                "-no-pie",
             ]
+            gcc_flags = [f for f in gcc_flags if f]
 
             # Build native binary executable
             subprocess.run(gcc_flags, check=True, capture_output=True)
@@ -645,6 +710,7 @@ def native_cmd(args):
             for c_obj in c_obj_files:
                 os.remove(c_obj)
             os.remove(obj_file)
+            os.remove(syscall_obj)
             if not keep_asm:
                 os.remove(asm_file)
 
@@ -900,12 +966,9 @@ def main():
         print("                                    -O: Enable bytecode optimization")
         print("  fr parse <file.fr> [--json]     - Parse to AST (binary or JSON)")
         print("  fr compile <file> [-o out.bc] - Compile to bytecode")
-        print(
-            "  fr native <file.bc> [-o out] [-a|--asm] - Compile bytecode to native binary"
-        )
-        print(
-            "  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] [-w|--web] - Compile typed module to Wasm"
-        )
+        print("  fr ir <file.fr> [--ssa-ir]       - Dump SSA IR")
+        print("  fr native <file.bc> [-o out] [-a|--asm] [--ssa] [--ssa-ir] - Compile bytecode to native binary")
+        print("  fr wasm <file.fr|ast.json|ast.bin> [-o output.wasm] [-r|--run] [-w|--web] - Compile typed module to Wasm")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -915,6 +978,8 @@ def main():
         parse_cmd(args)
     elif cmd == "compile":
         compile_cmd(args)
+    elif cmd == "ir":
+        ir_cmd(args)
     elif cmd == "native":
         native_cmd(args)
     elif cmd == "wasm":

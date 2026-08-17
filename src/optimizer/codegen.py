@@ -52,6 +52,9 @@ class CodeGen:
         self.externs: set[str] = set()
         # Link flags from module
         self.link_flags: list[str] = []
+        # Format strings for direct libc I/O
+        self._format_counter = 0
+        self._format_labels: dict[str, str] = {}
 
     def _asm_func_name(self, name: str) -> str:
         """Return the assembly label for a user function.
@@ -59,9 +62,7 @@ class CodeGen:
         Renames 'main' to '_fr_main' to avoid collision with the
         C-level main entry point we emit.
         """
-        if name == "main":
-            return "_fr_main"
-        return name
+        return "_fr_main" if name == "main" else name
 
     def emit(self) -> str:
         """Generate complete assembly for the module."""
@@ -83,18 +84,13 @@ class CodeGen:
                 continue
             self._emit_function(func)
 
-        # Emit main (entry point)
+        # Emit entry point
         entry = self.module.entry_func
         if entry:
             asm_entry = self._asm_func_name(entry)
             self._emit("")
-            self._emit("main:")
-            self._emit("    push rbp")
-            self._emit("    mov rbp, rsp")
-            # Initialize bump allocator
-            self._emit("    lea rax, [rip + _fr_heap]")
-            self._emit("    mov [rip + _fr_heap_ptr], rax")
-            # Initialize runtime (exception handling, struct heap)
+            self._emit(".global _start")
+            self._emit("_start:")
             self._emit("    call runtime_init")
             self._emit(f"    call {asm_entry}")
             self._emit("    mov edi, eax")
@@ -103,8 +99,9 @@ class CodeGen:
         # Emit rodata
         self._emit_rodata()
 
-        # Emit bss
-        self._emit_bss()
+        # Emit bss (only if needed)
+        if self._module_needs_bss():
+            self._emit_bss()
 
         return "\n".join(self.lines) + "\n"
 
@@ -143,6 +140,13 @@ class CodeGen:
             self._float_counter += 1
             self.float_labels[f] = label
         return self.float_labels[f]
+
+    def _get_format_label(self, fmt: str) -> str:
+        if fmt not in self._format_labels:
+            label = f".FMT{self._format_counter}"
+            self._format_counter += 1
+            self._format_labels[fmt] = label
+        return self._format_labels[fmt]
 
     def _next_label(self) -> int:
         self._label_counter += 1
@@ -201,43 +205,54 @@ class CodeGen:
 
     def _emit_function(self, func: Function):
         """Emit a complete function with prologue, body, epilogue."""
-        # Register allocation
         alloc = allocate_registers(func)
         asm_name = self._asm_func_name(func.name)
 
-        # Pre-compute caller-save sets: for each call instruction, determine
-        # which caller-saved GPRs hold live values and must be saved/restored.
         self._caller_save_map: dict[int, list[str]] = {}
         self._compute_caller_saves(func, alloc)
 
-        # Compute total frame size upfront (spill slots + callee saves)
         callee_save_size = len(alloc.used_callee_saved) * 8
-        total_frame = alloc.frame_size + callee_save_size
-        total_frame = (total_frame + 15) & ~15  # 16-byte align
+        has_calls = self._func_has_calls(func)
+        has_spills = alloc.frame_size > 0
+        has_callee_saves = callee_save_size > 0
+
+        if has_spills:
+            total_frame = alloc.frame_size + callee_save_size
+            total_frame = (total_frame + 15) & ~15
+        elif has_callee_saves:
+            total_frame = callee_save_size
+        elif has_calls:
+            total_frame = 8
+        else:
+            total_frame = 0
 
         self._emit("")
         self._emit(f"{asm_name}:")
 
-        # Prologue
-        self._emit("    push rbp")
-        self._emit("    mov rbp, rsp")
-        if total_frame > 0:
-            self._emit(f"    sub rsp, {total_frame}")
+        if has_spills:
+            self._emit("    push rbp")
+            self._emit("    mov rbp, rsp")
+            if total_frame > 0:
+                self._emit(f"    sub rsp, {total_frame}")
 
-        # Save callee-saved registers (within the allocated frame)
-        save_offset = alloc.frame_size
-        for reg in alloc.used_callee_saved:
-            save_offset += 8
-            self._emit(f"    mov [rbp - {save_offset}], {reg}")
+            save_offset = alloc.frame_size
+            for reg in alloc.used_callee_saved:
+                save_offset += 8
+                self._emit(f"    mov [rbp - {save_offset}], {reg}")
 
-        # Store callee save info for epilogue
-        self._current_callee_saves = []
-        save_offset = alloc.frame_size
-        for reg in alloc.used_callee_saved:
-            save_offset += 8
-            self._current_callee_saves.append((reg, save_offset))
+            self._current_callee_saves = []
+            save_offset = alloc.frame_size
+            for reg in alloc.used_callee_saved:
+                save_offset += 8
+                self._current_callee_saves.append((reg, save_offset))
+        elif has_callee_saves:
+            for reg in alloc.used_callee_saved:
+                self._emit(f"    push {reg}")
+            if has_calls:
+                self._emit("    sub rsp, 8")
+        elif has_calls:
+            self._emit("    sub rsp, 8")
 
-        # Emit blocks
         for block in func.blocks:
             self._emit_block(func, block, alloc)
 
@@ -689,11 +704,34 @@ class CodeGen:
             if list_type == IRType.STRING:
                 self._emit_runtime_call("runtime_str_get_char", inst, alloc, 2)
             else:
-                self._emit_runtime_call("runtime_list_get_int", inst, alloc, 2)
+                a = self._loc(inst.operands[0], alloc)
+                b = self._loc(inst.operands[1], alloc)
+                line = inst.source_line or 0
+                if a != "rdi":
+                    self._emit(f"    mov rdi, {a}")
+                if b != "rsi":
+                    self._emit(f"    mov rsi, {b}")
+                self._emit(f"    mov rdx, {line}")
+                self._emit_call_aligned("runtime_list_get_int_at")
+                if inst.result:
+                    dst = self._loc(inst.result, alloc)
+                    if dst != "rax":
+                        self._emit(f"    mov {dst}, rax")
             return
 
         if op == Op.LIST_SET:
-            self._emit_runtime_call("runtime_list_set_int", inst, alloc, 3)
+            a = self._loc(inst.operands[0], alloc)
+            b = self._loc(inst.operands[1], alloc)
+            c = self._loc(inst.operands[2], alloc)
+            line = inst.source_line or 0
+            if a != "rdi":
+                self._emit(f"    mov rdi, {a}")
+            if b != "rsi":
+                self._emit(f"    mov rsi, {b}")
+            if c != "rdx":
+                self._emit(f"    mov rdx, {c}")
+            self._emit(f"    mov rcx, {line}")
+            self._emit_call_aligned("runtime_list_set_int_at")
             return
 
         if op == Op.LIST_LEN:
@@ -821,69 +859,101 @@ class CodeGen:
         if op == Op.PRINT:
             val_type = inst.operands[0].type if inst.operands else IRType.INT64
             if val_type == IRType.STRING:
-                self._emit_runtime_call("runtime_print_str", inst, alloc, 1)
+                a = self._loc(inst.operands[0], alloc)
+                if a != "rdi":
+                    self._emit(f"    mov rdi, {a}")
+                self._emit_call_aligned("fputs")
+                self._emit("    mov rdi, stdout")
+                self._emit_call_aligned("fflush")
             elif val_type == IRType.FLOAT64:
-                self._emit_runtime_call(
-                    "runtime_print_float", inst, alloc, 1, float_args=[0]
-                )
+                a = self._loc(inst.operands[0], alloc)
+                fmt = self._get_format_label("%f")
+                self._emit(f"    lea rdi, [rip + {fmt}]")
+                if a.startswith("xmm"):
+                    self._emit(f"    movsd xmm1, {a}")
+                else:
+                    self._emit(f"    movq xmm1, {a}")
+                self._emit("    mov rsi, rdi")
+                self._emit_call_aligned("printf")
             elif val_type == IRType.BOOL:
-                # Convert to string "true"/"false" then print
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_bool_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_print_str")
+                self._emit_call_aligned("fputs")
+                self._emit("    mov rdi, stdout")
+                self._emit_call_aligned("fflush")
             elif isinstance(val_type, ListType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_list_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_print_str")
+                self._emit_call_aligned("fputs")
+                self._emit("    mov rdi, stdout")
+                self._emit_call_aligned("fflush")
             elif isinstance(val_type, SetType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_set_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_print_str")
+                self._emit_call_aligned("fputs")
+                self._emit("    mov rdi, stdout")
+                self._emit_call_aligned("fflush")
             else:
-                self._emit_runtime_call("runtime_print_int", inst, alloc, 1)
+                a = self._loc(inst.operands[0], alloc)
+                fmt = self._get_format_label("%ld")
+                self._emit(f"    lea rdi, [rip + {fmt}]")
+                self._emit(f"    mov rsi, {a}")
+                self._emit_call_aligned("printf")
             return
 
         if op == Op.PRINTLN:
             val_type = inst.operands[0].type if inst.operands else IRType.INT64
             if val_type == IRType.STRING:
-                self._emit_runtime_call("runtime_println_str", inst, alloc, 1)
+                a = self._loc(inst.operands[0], alloc)
+                if a != "rdi":
+                    self._emit(f"    mov rdi, {a}")
+                self._emit_call_aligned("puts")
             elif val_type == IRType.FLOAT64:
-                self._emit_runtime_call(
-                    "runtime_println_float", inst, alloc, 1, float_args=[0]
-                )
+                a = self._loc(inst.operands[0], alloc)
+                fmt = self._get_format_label("%g")
+                self._emit(f"    lea rdi, [rip + {fmt}]")
+                if a.startswith("xmm"):
+                    self._emit(f"    movsd xmm1, {a}")
+                else:
+                    self._emit(f"    movq xmm1, {a}")
+                self._emit("    mov rsi, rdi")
+                self._emit_call_aligned("printf")
             elif val_type == IRType.BOOL:
-                # Convert to string "true"/"false" then println
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_bool_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_println_str")
+                self._emit_call_aligned("puts")
             elif isinstance(val_type, ListType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_list_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_println_str")
+                self._emit_call_aligned("puts")
             elif isinstance(val_type, SetType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_set_to_str")
                 self._emit(f"    mov rdi, rax")
-                self._emit_call_aligned("runtime_println_str")
+                self._emit_call_aligned("puts")
             else:
-                self._emit_runtime_call("runtime_println_int", inst, alloc, 1)
+                a = self._loc(inst.operands[0], alloc)
+                fmt = self._get_format_label("%ld\n")
+                self._emit(f"    lea rdi, [rip + {fmt}]")
+                self._emit(f"    mov rsi, {a}")
+                self._emit_call_aligned("printf")
             return
 
         if op == Op.INPUT:
@@ -1364,36 +1434,48 @@ class CodeGen:
                 self._emit(f"    movsd xmm15, {src}")
                 remaining[0] = ("xmm15", dst)
 
-    def _emit_call_aligned(self, func_name: str):
-        """Emit a call with 16-byte stack alignment."""
-        label_aligned = self._new_label("aligned")
-        label_done = self._new_label("done")
-        self._emit(f"    test spl, 0xF")
-        self._emit(f"    jz {label_aligned}")
-        self._emit(f"    sub rsp, 8")
-        self._emit(f"    call {func_name}")
-        self._emit(f"    add rsp, 8")
-        self._emit(f"    jmp {label_done}")
-        self._emit(f"{label_aligned}:")
-        self._emit(f"    call {func_name}")
-        self._emit(f"{label_done}:")
-
     def _emit_epilogue(self, func: Function, alloc: RegAllocation):
-        """Emit function epilogue: restore callee-saved regs and return."""
-        # Restore callee-saved registers
-        save_offset = alloc.frame_size
-        for reg in alloc.used_callee_saved:
-            save_offset += 8
-            self._emit(f"    mov {reg}, [rbp - {save_offset}]")
+        callee_save_size = len(alloc.used_callee_saved) * 8
+        has_calls = self._func_has_calls(func)
+        has_spills = alloc.frame_size > 0
+        has_callee_saves = callee_save_size > 0
 
-        self._emit("    mov rsp, rbp")
-        self._emit("    pop rbp")
-        self._emit("    ret")
+        if has_spills:
+            save_offset = alloc.frame_size
+            for reg in alloc.used_callee_saved:
+                save_offset += 8
+                self._emit(f"    mov {reg}, [rbp - {save_offset}]")
+
+            self._emit("    mov rsp, rbp")
+            self._emit("    pop rbp")
+            self._emit("    ret")
+        elif has_callee_saves:
+            if has_calls:
+                self._emit("    add rsp, 8")
+            for reg in reversed(alloc.used_callee_saved):
+                self._emit(f"    pop {reg}")
+            self._emit("    ret")
+        elif has_calls:
+            self._emit("    add rsp, 8")
+            self._emit("    ret")
+        else:
+            self._emit("    ret")
+
+    def _func_has_calls(self, func: Function) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                if inst.op in self._CALL_OPS or inst.op == Op.CALL:
+                    return True
+        return False
+
+    def _emit_call_aligned(self, func_name: str):
+        """Emit a call (stack alignment guaranteed by prologue)."""
+        self._emit(f"    call {func_name}")
 
     # ── Sections ────────────────────────────────────────────────
 
     def _emit_rodata(self):
-        """Emit read-only data section (strings, floats)."""
+        """Emit read-only data section (strings, floats, format strings)."""
         self._emit("")
         self._emit(".section .rodata")
 
@@ -1406,43 +1488,90 @@ class CodeGen:
         for f, label in self.float_labels.items():
             import struct
 
-            # Emit float as raw bytes to avoid precision issues
             raw = struct.pack("<d", f)
             hex_val = "0x" + raw[::-1].hex()
             self._emit(f"{label}:")
             self._emit(f"    .quad {hex_val}")
+
+        for fmt, label in self._format_labels.items():
+            escaped = fmt.replace("\\", "\\\\").replace('"', '\\"')
+            self._emit(f"{label}:")
+            self._emit(f'    .asciz "{escaped}"')
 
     def _emit_bss(self):
         """Emit BSS section (heap, globals)."""
         self._emit("")
         self._emit(".section .bss")
 
-        # Bump allocator heap (16MB)
-        self._emit(".globl _fr_heap_ptr")
-        self._emit("_fr_heap_ptr:")
-        self._emit("    .quad 0")
-        self._emit(".globl _fr_heap")
-        self._emit("_fr_heap:")
-        self._emit("    .space 16777216")
+        if self.module.global_vars:
+            for name in self.module.global_vars:
+                self._emit(f"_fr_global_{name}:")
+                self._emit(f"    .quad 0")
 
-        # Global variables
-        for name in self.module.global_vars:
-            self._emit(f"_fr_global_{name}:")
-            self._emit(f"    .quad 0")
+        if self._module_needs_heap():
+            self._emit(".globl _fr_heap_ptr")
+            self._emit("_fr_heap_ptr:")
+            self._emit("    .quad 0")
+            self._emit(".globl _fr_heap")
+            self._emit("_fr_heap:")
+            self._emit("    .space 16777216")
 
-        # Also emit the old-style struct_data for runtime lib compatibility
-        self._emit(".globl struct_data")
-        self._emit("struct_data:")
-        self._emit("    .space 67108864")
         self._emit(".globl struct_heap_base")
         self._emit("struct_heap_base:")
         self._emit("    .quad 0")
         self._emit(".globl struct_heap_ptr")
         self._emit("struct_heap_ptr:")
         self._emit("    .quad 0")
-        self._emit(".globl global_vars")
-        self._emit("global_vars:")
-        self._emit("    .space 2048")
+
+        if self._module_needs_structs():
+            self._emit(".globl struct_data")
+            self._emit("struct_data:")
+            self._emit("    .space 67108864")
+
+        if self.module.global_vars:
+            self._emit(".globl global_vars")
+            self._emit("global_vars:")
+            self._emit("    .space 2048")
+
+    def _module_needs_bss(self) -> bool:
+        return True
+
+    def _module_needs_heap(self) -> bool:
+        for func in self.module.functions:
+            for block in func.blocks:
+                for inst in block.instructions:
+                    if inst.op in {
+                        Op.ALLOC_LIST,
+                        Op.LIST_APPEND,
+                        Op.STR_CONCAT,
+                        Op.TO_STR,
+                        Op.TO_BOOL,
+                        Op.SQRT,
+                        Op.SIN,
+                        Op.COS,
+                        Op.TAN,
+                        Op.ABS,
+                        Op.FLOOR,
+                        Op.CEIL,
+                        Op.ROUND,
+                        Op.POW,
+                        Op.MIN,
+                        Op.MAX,
+                    }:
+                        return True
+        return False
+
+    def _module_needs_structs(self) -> bool:
+        for func in self.module.functions:
+            for block in func.blocks:
+                for inst in block.instructions:
+                    if inst.op in {
+                        Op.ALLOC_STRUCT,
+                        Op.LOAD_FIELD,
+                        Op.STORE_FIELD,
+                    }:
+                        return True
+        return False
 
 
 def _dword(reg: str) -> str:

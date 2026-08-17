@@ -7,7 +7,7 @@ from .bytecode_opt import BytecodeOptimizer
 __all__ = ["BytecodeOptimizer", "compile_native_ssa"]
 
 
-def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
+def compile_native_ssa(bytecode: str, opt_level: int = 3, dump_ir: bool = False) -> str:
     """Compile bytecode to x86_64 assembly using the SSA IR pipeline.
 
     This is the new native compilation path:
@@ -16,9 +16,10 @@ def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
     Args:
         bytecode: The bytecode text (as produced by compiler.py)
         opt_level: 0=none, 1=basic, 2=standard, 3=aggressive+synthesis
+        dump_ir: If True, return the IR text instead of assembly
 
     Returns:
-        x86_64 assembly text (Intel syntax)
+        x86_64 assembly text (Intel syntax) or IR text if dump_ir=True
     """
     from .ir_builder import build_ir
     from .ir import dump_module
@@ -28,6 +29,9 @@ def compile_native_ssa(bytecode: str, opt_level: int = 3) -> str:
 
     # Phase 1: Build SSA IR from bytecode
     module = build_ir(bytecode)
+
+    if dump_ir:
+        return dump_module(module)
 
     # Phase 2: Run optimization passes
     if opt_level > 0:

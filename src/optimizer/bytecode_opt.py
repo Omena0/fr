@@ -1887,6 +1887,8 @@ class BytecodeOptimizer:
 
         NOT; JUMP_IF_FALSE L  ->  JUMP_IF_TRUE L
         NOT; JUMP_IF_TRUE L   ->  JUMP_IF_FALSE L
+
+        Skips over .line directives and comments between NOT and the jump.
         """
         result: List[str] = []
         i = 0
@@ -1895,18 +1897,33 @@ class BytecodeOptimizer:
             line = lines[i].strip()
             indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())] if lines[i] else '  '
 
-            if line == 'NOT' and i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                if next_line.startswith('JUMP_IF_FALSE '):
-                    label = next_line.split()[1]
-                    result.append(f"{indent}JUMP_IF_TRUE {label}")
-                    i += 2
-                    continue
-                elif next_line.startswith('JUMP_IF_TRUE '):
-                    label = next_line.split()[1]
-                    result.append(f"{indent}JUMP_IF_FALSE {label}")
-                    i += 2
-                    continue
+            if line == 'NOT':
+                j = i + 1
+                found_jump = False
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if not next_line or next_line.startswith('.') or next_line.startswith('#'):
+                        result.append(lines[j])
+                        j += 1
+                        continue
+                    if next_line.startswith('JUMP_IF_FALSE '):
+                        label = next_line.split()[1]
+                        result.append(f"{indent}JUMP_IF_TRUE {label}")
+                        i = j + 1
+                        found_jump = True
+                        break
+                    elif next_line.startswith('JUMP_IF_TRUE '):
+                        label = next_line.split()[1]
+                        result.append(f"{indent}JUMP_IF_FALSE {label}")
+                        i = j + 1
+                        found_jump = True
+                        break
+                    else:
+                        break
+                if not found_jump:
+                    result.append(lines[i])
+                    i += 1
+                continue
 
             result.append(lines[i])
             i += 1

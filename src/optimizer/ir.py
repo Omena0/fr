@@ -184,7 +184,10 @@ SIDE_EFFECT_OPS = frozenset({
     Op.BRANCH, Op.JUMP, Op.RETURN, Op.RETURN_VOID,
     Op.STORE_GLOBAL, Op.PRINT, Op.PRINTLN, Op.INPUT,
     Op.TRY_BEGIN, Op.TRY_END, Op.RAISE,
-    Op.DIV, Op.MOD, Op.FDIV,  # division can raise ZeroDivisionError
+    Op.DIV, Op.MOD, Op.FDIV,
+    Op.ALLOC_LIST, Op.LIST_GET, Op.LIST_LEN,
+    Op.ALLOC_STRUCT, Op.LOAD_FIELD, Op.STORE_FIELD,
+    Op.STR_CONCAT, Op.TO_STR, Op.TO_BOOL,
 })
 
 # Operations that are terminators (must be last in a basic block)

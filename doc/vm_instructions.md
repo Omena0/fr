@@ -26,6 +26,7 @@ This document describes all bytecode instructions in fr.
 - [Exception Handling](#exception-handling)
 - [Built-in Functions](#built-in-functions)
 - [Optimized Instructions](#optimized-instructions)
+- [Switch Instructions](#switch-instructions)
 - [Directives](#directives)
 
 ---
@@ -379,6 +380,54 @@ Compare if first value is greater than or equal to second.
 
 **Stack:** `value value -> bool`
 
+### CMP_LT_CONST
+
+Compare the top of the stack with an integer constant (less than).
+
+**Syntax:** `CMP_LT_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
+### CMP_GT_CONST
+
+Compare the top of the stack with an integer constant (greater than).
+
+**Syntax:** `CMP_GT_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
+### CMP_LE_CONST
+
+Compare the top of the stack with an integer constant (less than or equal).
+
+**Syntax:** `CMP_LE_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
+### CMP_GE_CONST
+
+Compare the top of the stack with an integer constant (greater than or equal).
+
+**Syntax:** `CMP_GE_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
+### CMP_EQ_CONST
+
+Compare the top of the stack with an integer constant (equal).
+
+**Syntax:** `CMP_EQ_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
+### CMP_NE_CONST
+
+Compare the top of the stack with an integer constant (not equal).
+
+**Syntax:** `CMP_NE_CONST <constant>`
+
+**Stack:** `int64 -> bool`
+
 ---
 
 ## Logical Operations
@@ -671,7 +720,6 @@ Pop the last element from a list.
 
 **Stack:** `list -> value`
 
-
 ### LIST_NEW_I64
 
 Create a new list pre-populated with integer values.
@@ -723,6 +771,7 @@ Create a new list from values currently on the stack.
 **Description:** Pops `<count>` values from the stack and creates a list containing them in order (bottom of stack becomes first element).
 
 ---
+
 ## Set Operations
 
 ### SET_NEW
@@ -1224,7 +1273,7 @@ Fork the current process, creating a child process.
 
 ### JOIN
 
-Wait for a child process to finish and get its exit status.
+Wait for a child process to finish and get its exit status. This is an alias for `WAIT`.
 
 **Syntax:** `JOIN`
 
@@ -1259,7 +1308,6 @@ Exit the program with a specific exit code.
 
 - `code`: Exit code (int, 0 means success, non-zero indicates error)
 
-
 ### GETPID
 
 Get the current process ID.
@@ -1270,7 +1318,21 @@ Get the current process ID.
 
 **Returns:** The process ID of the current process as an integer.
 
+### WAIT
+
+Wait for a child process to finish and get its exit status. `JOIN` is an alias for this instruction.
+
+**Syntax:** `WAIT`
+
+**Stack:** `pid -> exit_status`
+
+**Returns:**
+
+- Exit status (0-255) if child exited normally
+- `-1` on error or abnormal termination
+
 ---
+
 ## Socket Operations
 
 ### SOCKET_CREATE
@@ -1821,8 +1883,6 @@ Fused load two variables and compare inequality (combines LOAD, LOAD, CMP_NE).
 
 ---
 
-
----
 ## Switch Instructions
 
 ### SWITCH_JUMP_TABLE
@@ -1836,6 +1896,7 @@ Jump table for dense integer switch statements. Provides O(1) dispatch for switc
 **Description:** Pops an integer value from the stack and jumps to the corresponding case label if the value is within the range `[min, max]`. If the value is outside the range, jumps to the default label. The labels are resolved at load time.
 
 ---
+
 ## Directives
 
 These are not executable instructions but are used during bytecode parsing to define program structure.
