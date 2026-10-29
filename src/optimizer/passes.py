@@ -1339,10 +1339,22 @@ def specialize_calls(
                     if specializations >= cfg.max_specializations:
                         continue
                     specializations += 1
-                    new_name = f"{target.name}__spec_{specializations}"
-                    clone = _clone_specialized(module, target, specs, new_name, cfg)
+                    candidate = f"{target.name}__spec_{specializations}"
+                    clone = _clone_specialized(module, target, specs, candidate, cfg)
+                    target_size = sum(len(b.instructions) for b in target.blocks)
+                    clone_size = sum(len(b.instructions) for b in clone.blocks)
+                    beneficial = (
+                        len(clone.blocks) < len(target.blocks)
+                        or clone_size < target_size
+                    )
+                    if not beneficial:
+                        cache[key] = ""
+                        continue
+                    new_name = candidate
                     module.add_function(clone)
                     cache[key] = new_name
+                if not new_name:
+                    continue
                 if inst.imm_str != new_name:
                     inst.imm_str = new_name
                     changed = True
@@ -1385,7 +1397,8 @@ def licm(func: Function) -> bool:
                 continue
             for inst in list(block.instructions):
                 if inst.result is None or inst.op in (
-                    Op.PHI, Op.JUMP, Op.BRANCH, Op.RETURN, Op.RETURN_VOID
+                    Op.PHI, Op.JUMP, Op.BRANCH, Op.RETURN, Op.RETURN_VOID,
+                    Op.CONST_INT, Op.CONST_FLOAT, Op.CONST_STR, Op.CONST_BOOL,
                 ):
                     continue
                 if inst.has_side_effects or inst.op in (

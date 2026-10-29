@@ -4,15 +4,25 @@ The benchmarks are ordinary Fr programs and are not part of the test suite.
 
 ## N-body
 
-`nbody.fr` is the correctness-sized run (1,000 steps). `nbody_bench.fr` runs
-200,000 steps and is the optimization target: it combines nested loops, struct
-field traffic, list indexing/set, floating-point math, calls and reference-
-counted heap objects.
+`nbody.fr` is the correctness-sized run (1,000 steps). `nbody_bench.fr` builds
+128 bodies and runs 1,000 steps; it combines nested loops, struct field traffic,
+list indexing/set, floating-point math, calls and reference-counted heap
+objects. `memory_bench.fr` holds 250,000 reference-counted structs in a list and
+walks them, giving a reproducible allocation/RSS measurement.
 
 ```sh
 python3 src/cli.py compile bench/nbody_bench.fr -o /tmp/nbody.bc
 python3 src/cli.py native /tmp/nbody.bc -o /tmp/nbody -O3
 time /tmp/nbody
+/usr/bin/time -f 'rss_kb=%M elapsed=%e' /tmp/nbody
+```
+
+Memory benchmark:
+
+```sh
+python3 src/cli.py compile bench/memory_bench.fr -o /tmp/mem.bc
+python3 src/cli.py native /tmp/mem.bc -o /tmp/mem -O3
+/usr/bin/time -f 'rss_kb=%M elapsed=%e' /tmp/mem
 ```
 
 The compiler optimizations validated against this target include scope elision,

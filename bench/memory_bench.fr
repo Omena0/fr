@@ -1,0 +1,26 @@
+// Memory/allocation benchmark: hold 250k reference-counted structs in a list.
+
+struct Node {
+    int a
+    int b
+    int c
+    int d
+}
+
+void main() {
+    list nodes = []
+    int i = 0
+    while (i < 250000) {
+        nodes.append(Node(i, i + 1, i + 2, i + 3))
+        i = i + 1
+    }
+
+    int total = 0
+    int j = 0
+    while (j < len(nodes)) {
+        Node n = nodes[j]
+        total = total + n.a + n.d
+        j = j + 1
+    }
+    println(str(total))
+}

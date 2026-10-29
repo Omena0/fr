@@ -1,3 +1,6 @@
+// N-body benchmark with a larger body count to exercise list/struct memory.
+// Generate 128 bodies, then run 1,000 simulation steps.
+
 struct Body {
     float x
     float y
@@ -69,13 +72,22 @@ void advance(list bodies, float dt, int steps) {
 }
 
 void main() {
-    list bodies = [
-        Body(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 39.47),
-        Body(4.84, -1.16, -0.10, 0.60, 2.81, -0.02, 0.037),
-        Body(8.34, 4.12, -0.40, -1.01, 1.85, 0.01, 0.011),
-        Body(12.89, -15.10, -0.20, 1.08, 0.44, -0.01, 0.001),
-        Body(15.37, -25.91, 0.10, 0.97, 0.58, 0.00, 0.0005)
-    ]
-    advance(bodies, 0.01, 200000)
+    list bodies = []
+    int i = 0
+    while (i < 128) {
+        float fi = float(i)
+        float mass = 0.001 + 0.01 / (fi + 1.0)
+        bodies.append(Body(
+            fi * 0.7,
+            -fi * 0.31,
+            float(i % 7) * 0.13,
+            float(i % 5) * 0.02,
+            float(i % 11) * 0.015,
+            float(i % 3) * 0.01,
+            mass
+        ))
+        i = i + 1
+    }
+    advance(bodies, 0.001, 1000)
     println(str(energy(bodies)))
 }
