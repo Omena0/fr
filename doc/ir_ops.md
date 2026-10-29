@@ -237,7 +237,10 @@ Bitwise AND, OR, XOR operations.
 
 ## Struct Operations
 
-Structs are heap-allocated with 8-byte-aligned fields. The struct pointer model uses a bump allocator in BSS (`struct_data`).
+Structs are heap-allocated with 8-byte-aligned fields. The code generator calls
+`runtime_struct_new`, which uses the native runtime's segregated free-list
+allocator. Non-escaping allocations are replaced by SSA values (SROA) or placed
+in the function's stack frame; only escaping structs reach the runtime heap.
 
 ### ALLOC_STRUCT
 
@@ -262,6 +265,62 @@ STORE_FIELD %struct_ptr %value <field_index>
 ```
 
 Stores a value to a struct field. `*(struct_ptr + field_index * 8) = value`. Void (no result). Side-effecting.
+
+
+## Pointer Operations
+
+Language-level pointers are lowered to these operations. The escape analysis
+and register allocator take care of deciding where the target cell lives.
+
+### ALLOCA
+
+```
+%r = ALLOCA
+```
+
+Allocates an 8-byte addressable cell and returns a `*T` pointer. Used for
+address-taken locals that cannot stay in SSA form.
+
+### ADDR_GLOBAL
+
+```
+%r = ADDR_GLOBAL "<name>"
+```
+
+Returns the address of a global variable. Uses `imm_str` for the name.
+
+### PTR_LOAD
+
+```
+%r = PTR_LOAD %ptr
+```
+
+Loads the pointee. Reads memory, so it is not CSE'd across stores.
+
+### PTR_STORE
+
+```
+PTR_STORE %ptr %value
+```
+
+Stores through a pointer. Void and side-effecting.
+
+### FIELD_ADDR
+
+```
+%r = FIELD_ADDR %struct_ptr <field_index>
+```
+
+Returns `struct_ptr + field_index * 8` as a pointer to the field cell.
+
+### LIST_ELEM_ADDR
+
+```
+%r = LIST_ELEM_ADDR %list %index
+```
+
+Returns a pointer to a list element through `runtime_list_elem_addr`. The
+pointer is invalidated if the list grows.
 
 ## List Operations
 

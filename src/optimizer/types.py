@@ -281,6 +281,10 @@ class EscapeAnalysis:
                             op_val is not inst.operands[0]
                         ):  # it's the value, not the target
                             new_state = self.FULL_ESCAPE
+                    elif inst.op in (Op.PTR_STORE, Op.FIELD_ADDR):
+                        # The address of the struct (or one of its fields) may
+                        # outlive this frame; be conservative.
+                        new_state = self.FULL_ESCAPE
                     elif inst.op == Op.PHI:
                         # Phi merges: if any incoming value escapes, the phi result escapes
                         # and the phi result should propagate back to sources

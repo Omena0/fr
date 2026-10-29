@@ -2,7 +2,7 @@ CC = gcc
 PYTHON_CONFIG = python3-config
 
 # Use -O3 with -fno-strict-aliasing to prevent issues with type punning
-BASE_CFLAGS = -Wall -Wextra -O3 -std=c11 -march=native -mtune=native -fno-strict-aliasing -funroll-loops -finline-functions
+BASE_CFLAGS = -Wall -Wextra -O3 -std=c11 -march=native -mtune=native -fno-strict-aliasing -D_GNU_SOURCE -funroll-loops -finline-functions
 BASE_LDFLAGS = -lm -lgmp
 
 ifeq ($(OS),Windows_NT)

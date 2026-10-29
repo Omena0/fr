@@ -474,7 +474,7 @@ def cse(func: Function) -> bool:
 def _cse_key(inst: Instruction) -> tuple | None:
     """Create a hashable key for an instruction for CSE.
     Returns None if the instruction can't be CSE'd."""
-    if inst.op in SIDE_EFFECT_OPS:
+    if inst.has_side_effects:
         return None
     # Don't CSE allocations
     if inst.op in (Op.ALLOC_STRUCT, Op.ALLOC_LIST):
@@ -530,10 +530,101 @@ def _find_preheader(loop: Loop) -> BasicBlock | None:
     return None
 
 
+def merge_linear_blocks(func: Function) -> bool:
+    """Merge A -> B when B has exactly one predecessor.
+
+    This removes the artificial fallthrough/JUMP blocks created by the SSA
+    builder and exposes straight-line bodies to the inliner and peephole pass.
+    """
+    changed = False
+    for block in func.blocks:
+        seen = set()
+        block.predecessors = [
+            p for p in block.predecessors if not (id(p) in seen or seen.add(id(p)))
+        ]
+        seen = set()
+        block.successors = [
+            s for s in block.successors if not (id(s) in seen or seen.add(id(s)))
+        ]
+
+    while True:
+        merged = False
+        for a in list(func.blocks):
+            term = a.terminator
+            if term is None or term.op != Op.JUMP or len(term.target_blocks) != 1:
+                continue
+            b = term.target_blocks[0]
+            if b is a or b is func.entry:
+                continue
+            if len(b.predecessors) != 1 or b.predecessors[0] is not a:
+                continue
+            if b.phi_nodes:
+                continue
+            # Do not merge into a loop header with a back edge.
+            if any(succ is b for succ in b.successors):
+                continue
+
+            a.instructions.pop()  # remove JUMP
+            for inst in b.instructions:
+                inst.block = a
+                a.instructions.append(inst)
+            if b.terminator is None and len(b.successors) == 1:
+                # Materialize the implicit fallthrough edge as a real JUMP.
+                jump = Instruction(Op.JUMP, [], None, None)
+                jump.imm_str = b.successors[0].label
+                jump.target_blocks = [b.successors[0]]
+                a.instructions.append(jump)
+            a.successors = list(b.successors)
+            for succ in a.successors:
+                succ.predecessors = [a if p is b else p for p in succ.predecessors]
+            func.blocks.remove(b)
+            changed = True
+            merged = True
+            break
+        if not merged:
+            break
+    return changed
+
+
+def remove_unreachable_blocks(func: Function) -> bool:
+    """Delete blocks that cannot be reached from the entry block."""
+    if func.entry is None:
+        return False
+    reachable = set()
+    worklist = [func.entry]
+    while worklist:
+        block = worklist.pop()
+        if block in reachable:
+            continue
+        reachable.add(block)
+        worklist.extend(block.successors)
+
+    if len(reachable) == len(func.blocks):
+        return False
+
+    for block in list(func.blocks):
+        if block not in reachable:
+            func.blocks.remove(block)
+
+    for block in func.blocks:
+        block.successors = [b for b in block.successors if b in reachable]
+        block.predecessors = [b for b in block.predecessors if b in reachable]
+
+    # Rebuild target_blocks from the (possibly rewritten) terminators.
+    for block in func.blocks:
+        term = block.terminator
+        if term is not None:
+            term.target_blocks = [b for b in term.target_blocks if b in reachable]
+            block.successors = list(term.target_blocks)
+            if term.op == Op.JUMP and not term.target_blocks:
+                term.target_blocks = []
+    return True
+
+
 # ── SROA: Scalar Replacement of Aggregates ──────────────────────
 
 
-def sroa(func: Function) -> bool:
+def sroa(func: Function, escape: "EscapeAnalysis | None" = None) -> bool:
     """Replace struct allocations with individual scalar values when possible.
 
     A struct can be SROA'd if:
@@ -544,7 +635,9 @@ def sroa(func: Function) -> bool:
     MAX_SROA_FIELDS = 8
     changed = False
 
-    escape = EscapeAnalysis(func)
+    if escape is None:
+        escape = EscapeAnalysis(func)
+        escape.run()
 
     for block in func.blocks:
         for inst in list(block.instructions):
@@ -794,6 +887,281 @@ def simplify_branches(func: Function) -> bool:
     return changed
 
 
+# ── Side-effect / purity analysis ───────────────────────────────
+
+# Builtins that cannot observe or mutate program state. Calls to these are
+# safe to eliminate when their result is unused and safe to CSE.
+_PURE_BUILTINS = frozenset({
+    "str", "int", "float", "bool", "len", "abs", "min", "max",
+    "sqrt", "pow", "sin", "cos", "tan", "floor", "ceil", "round",
+    "contains", "split", "join", "replace", "strip", "upper", "lower",
+    "get_char", "repeat", "encode", "decode",
+})
+
+_IMPURE_OPS = frozenset({
+    Op.PRINT, Op.PRINTLN, Op.INPUT, Op.STORE_GLOBAL,
+    Op.STORE_FIELD, Op.LOAD_FIELD, Op.LIST_SET, Op.LIST_APPEND,
+    Op.LIST_GET, Op.PTR_STORE, Op.PTR_LOAD, Op.LOAD_GLOBAL,
+    Op.RAISE, Op.TRY_BEGIN, Op.TRY_END,
+})
+
+
+def mark_purity(module: Module) -> bool:
+    """Compute side-effect purity through the call graph.
+
+    A function is pure when every instruction is pure and every callee is
+    pure. Starting from "pure" and lowering to a fixed point gives the
+    greatest fixed point, so recursive pure functions are handled correctly.
+    """
+    funcs = {f.name: f for f in module.functions}
+    purity = {name: (not f.is_extern) for name, f in funcs.items()}
+    changed = True
+    while changed:
+        changed = False
+        for name, func in funcs.items():
+            if not purity.get(name, False):
+                continue
+            pure = True
+            for inst in func.all_instructions():
+                if inst.op in _IMPURE_OPS:
+                    pure = False
+                    break
+                if inst.op == Op.CALL:
+                    callee = inst.imm_str
+                    if not callee or not purity.get(callee, False):
+                        pure = False
+                        break
+                elif inst.op == Op.CALL_BUILTIN:
+                    if (inst.imm_str or "") not in _PURE_BUILTINS:
+                        pure = False
+                        break
+            if not pure:
+                purity[name] = False
+                changed = True
+
+    flag_changed = False
+    for func in module.functions:
+        for inst in func.all_instructions():
+            if inst.op not in (Op.CALL, Op.CALL_BUILTIN):
+                continue
+            if inst.op == Op.CALL:
+                pure = purity.get(inst.imm_str or "", False)
+            else:
+                pure = (inst.imm_str or "") in _PURE_BUILTINS
+            if inst.pure_call != pure:
+                inst.pure_call = pure
+                flag_changed = True
+    return flag_changed
+
+
+# ── Call-site specialization ────────────────────────────────────
+
+_SPECIALIZATION_LIMIT = 64
+
+
+def _const_info(value: Value):
+    """Return (type, value) for a constant SSA value, or None."""
+    if isinstance(value, Constant):
+        return (value.type, value.value)
+    inst = value.defining_inst if isinstance(value, Value) else None
+    if inst is None:
+        return None
+    if inst.op == Op.CONST_INT:
+        return (IRType.INT64, inst.imm_int)
+    if inst.op == Op.CONST_FLOAT:
+        return (IRType.FLOAT64, inst.imm_float)
+    if inst.op == Op.CONST_BOOL:
+        return (IRType.BOOL, bool(inst.imm_int))
+    if inst.op == Op.CONST_STR:
+        return (IRType.STRING, inst.imm_str)
+    return None
+
+
+def _clone_specialized(
+    module: Module, target: Function, const_args: list, new_name: str
+) -> Function:
+    """Clone *target* with parameter uses replaced by constant arguments."""
+    clone = Function(new_name, target.params, target.return_type)
+    clone.source_file = target.source_file
+    clone.local_names = dict(target.local_names)
+
+    block_map: dict[int, BasicBlock] = {}
+    for old_block in target.blocks:
+        block_map[id(old_block)] = clone.add_block(BasicBlock(old_block.label))
+
+    value_map: dict[int, Value] = {}
+
+    # Create constant values in the clone entry block.
+    entry = clone.entry
+    if entry is None:
+        entry = clone.add_block(BasicBlock("entry"))
+    insert_at = 0
+    while insert_at < len(entry.instructions) and entry.instructions[insert_at].op == Op.PHI:
+        insert_at += 1
+    for param, (ctype, cvalue) in zip(target.params, const_args):
+        inst = Instruction(Op.CONST_INT, [], ctype, None)
+        if ctype == IRType.INT64:
+            inst.imm_int = int(cvalue)
+        elif ctype == IRType.FLOAT64:
+            inst.imm_float = float(cvalue)
+        elif ctype == IRType.BOOL:
+            inst.imm_int = 1 if cvalue else 0
+        elif ctype == IRType.STRING:
+            inst.imm_str = str(cvalue)
+            if cvalue not in module.string_constants:
+                module.string_constants.append(cvalue)
+        inst.block = entry
+        entry.instructions.insert(insert_at, inst)
+        insert_at += 1
+        if inst.result:
+            value_map[param.id] = inst.result
+
+    # Clone instructions.
+    inst_map: dict[int, Instruction] = {}
+    for old_block in target.blocks:
+        new_block = block_map[id(old_block)]
+        for old_inst in old_block.instructions:
+            operands = []
+            for operand in old_inst.operands:
+                if isinstance(operand, Value) and operand.id in value_map:
+                    operands.append(value_map[operand.id])
+                else:
+                    operands.append(operand)
+            new_inst = Instruction(
+                old_inst.op,
+                operands,
+                old_inst.result.type if old_inst.result else None,
+                old_inst.source_line,
+            )
+            new_inst.imm_int = old_inst.imm_int
+            new_inst.imm_str = old_inst.imm_str
+            new_inst.imm_float = old_inst.imm_float
+            new_inst.stack_alloc = old_inst.stack_alloc
+            new_block.append(new_inst)
+            inst_map[id(old_inst)] = new_inst
+            if old_inst.result and new_inst.result:
+                value_map[old_inst.result.id] = new_inst.result
+
+    # Resolve block targets now that every block exists.
+    for old_inst, new_inst in inst_map.items():
+        old = next(
+            (i for i in target.all_instructions() if id(i) == old_inst), None
+        )
+        if old is not None and old.target_blocks:
+            new_inst.target_blocks = [
+                block_map[id(b)] for b in old.target_blocks if id(b) in block_map
+            ]
+
+    # Rebuild CFG edges.
+    for block in clone.blocks:
+        block.predecessors = []
+        block.successors = []
+    for block in clone.blocks:
+        term = block.terminator
+        if term is None:
+            continue
+        for succ in term.target_blocks:
+            block.successors.append(succ)
+            if block not in succ.predecessors:
+                succ.predecessors.append(block)
+
+    # Fold the newly exposed constants and prune unreachable branches.
+    for _ in range(4):
+        c1 = sccp(clone)
+        c2 = algebraic_simplify(clone)
+        c3 = simplify_branches(clone)
+        c4 = remove_unreachable_blocks(clone)
+        c5 = merge_linear_blocks(clone)
+        c6 = dce(clone)
+        if not (c1 or c2 or c3 or c4 or c5 or c6):
+            break
+
+    return clone
+
+
+def specialize_calls(module: Module, max_body: int = 80) -> bool:
+    """Specialize calls to multi-block functions with constant arguments.
+
+    The clone has its parameters replaced by the call-site constants, then
+    SCCP and branch pruning run on it. This makes otherwise-impure functions
+    pure for a specific call when the side-effecting branch is unreachable.
+    """
+    changed = False
+    cache: dict[tuple, str] = {}
+    specializations = 0
+
+    for func in list(module.functions):
+        for block in func.blocks:
+            for inst in block.instructions:
+                if inst.op != Op.CALL or not inst.imm_str:
+                    continue
+                target = module.get_function(inst.imm_str)
+                if target is None or target is func or target.is_extern:
+                    continue
+                # Already-specialized clones are terminal: re-specializing
+                # them each fixed-point iteration causes name explosions.
+                if "__spec_" in target.name:
+                    continue
+                if len(target.blocks) < 2:
+                    continue
+                if sum(len(b.instructions) for b in target.blocks) > max_body:
+                    continue
+                if len(inst.operands) != len(target.params):
+                    continue
+                const_args = [_const_info(v) for v in inst.operands]
+                if any(c is None for c in const_args):
+                    continue
+
+                key = (
+                    target.name,
+                    tuple((str(t), repr(v)) for t, v in const_args),  # type: ignore[misc]
+                )
+                new_name = cache.get(key)
+                if new_name is None:
+                    if specializations >= _SPECIALIZATION_LIMIT:
+                        continue
+                    specializations += 1
+                    new_name = f"{target.name}__spec_{specializations}"
+                    clone = _clone_specialized(module, target, const_args, new_name)
+                    module.add_function(clone)
+                    cache[key] = new_name
+                if inst.imm_str != new_name:
+                    inst.imm_str = new_name
+                    changed = True
+
+    return changed
+
+
+def remove_unused_functions(module: Module) -> bool:
+    """Remove functions unreachable from the entry point."""
+    by_name = {f.name: f for f in module.functions}
+    roots = []
+    if module.entry_func and module.entry_func in by_name:
+        roots.append(by_name[module.entry_func])
+    elif "main" in by_name:
+        roots.append(by_name["main"])
+    roots.extend(f for f in module.functions if f.is_extern)
+    if not roots:
+        return False
+
+    reachable: set[str] = set()
+    worklist = list(roots)
+    while worklist:
+        func = worklist.pop()
+        if func.name in reachable:
+            continue
+        reachable.add(func.name)
+        for inst in func.all_instructions():
+            if inst.op == Op.CALL and inst.imm_str:
+                callee = by_name.get(inst.imm_str)
+                if callee is not None and callee.name not in reachable:
+                    worklist.append(callee)
+
+    before = len(module.functions)
+    module.functions = [f for f in module.functions if f.name in reachable]
+    return len(module.functions) != before
+
+
 # ── Pass pipeline ───────────────────────────────────────────────
 
 
@@ -810,6 +1178,13 @@ def run_passes(module: Module, level: int = 2) -> bool:
 
     overall_changed = False
 
+    # Escape analysis is interprocedural-ish (it summarizes call sites), so
+    # compute it once per fixed-point iteration instead of passing a Function
+    # where a Module is expected (the previous code made SROA a no-op).
+    escape = EscapeAnalysis(module)
+    escape.run()
+    mark_purity(module)
+
     # Run passes in a fixed-point loop
     for iteration in range(20):  # Safety limit
         changed = False
@@ -821,15 +1196,19 @@ def run_passes(module: Module, level: int = 2) -> bool:
             changed |= sccp(func)
             changed |= algebraic_simplify(func)
             changed |= simplify_branches(func)
+            changed |= remove_unreachable_blocks(func)
+            changed |= merge_linear_blocks(func)
             changed |= dce(func)
 
             if level >= 2:
                 changed |= cse(func)
-                changed |= sroa(func)
+                changed |= sroa(func, escape)
                 changed |= tco(func)
 
         if level >= 2:
             changed |= inline_small_functions(module)
+            changed |= specialize_calls(module)
+        changed |= mark_purity(module)
 
         overall_changed |= changed
         if not changed:
@@ -839,5 +1218,17 @@ def run_passes(module: Module, level: int = 2) -> bool:
     for func in module.functions:
         if not func.is_extern:
             dce(func)
+
+    remove_unused_functions(module)
+
+    # Mark allocations that never escape the function for stack placement.
+    # SROA already removed the fully-local ones; this covers structs that are
+    # only passed to callees (ARG_ESCAPE) and therefore still need an address.
+    escape = EscapeAnalysis(module)
+    escape.run()
+    for func in module.functions:
+        for inst in func.all_instructions():
+            if inst.op == Op.ALLOC_STRUCT and inst.result is not None:
+                inst.stack_alloc = escape.can_stack_alloc(inst.result)
 
     return overall_changed

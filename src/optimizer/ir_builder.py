@@ -20,6 +20,7 @@ from optimizer.ir import (
     StructType,
     ListType,
     SetType,
+    PtrType,
     ValueType,
 )
 
@@ -130,6 +131,11 @@ class IRBuilder:
                 if sid in self._struct_id_map:
                     self._struct_id_map[sid].name = name
                     self.module.add_struct(self._struct_id_map[sid])
+
+            elif op == ".global" and args:
+                name = args[0]
+                typ = _TYPE_MAP.get(args[1], IRType.INT64) if len(args) > 1 else IRType.INT64
+                self.module.global_vars[name] = typ
 
             elif op == ".entry" and args:
                 self.module.entry_func = args[0].rstrip("%")
@@ -298,6 +304,7 @@ class IRBuilder:
         # Variable versions: track current SSA value for each local variable index
         # This is pre-SSA: we'll insert phi nodes later
         var_versions: dict[int, Value] = {}
+        self._boxed_locals: dict[int, Value] = {}
 
         # Initialize params
         for p in func.params:
@@ -356,6 +363,39 @@ class IRBuilder:
             block.append(inst)
             return inst
 
+        def _var_value(idx: int) -> Value:
+            if idx in self._boxed_locals:
+                ptr = self._boxed_locals[idx]
+                pointee = ptr.type.pointee if isinstance(ptr.type, PtrType) else IRType.INT64
+                inst = _make_inst(Op.PTR_LOAD, [ptr], pointee)
+                return inst.result or ptr
+            val = var_versions.get(idx)
+            if val is None:
+                typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
+                val = self._make_const(typ, 0, block, source_line)
+                var_versions[idx] = val
+            return val
+
+        def _set_var(idx: int, val: Value) -> None:
+            if idx in self._boxed_locals:
+                _make_inst(Op.PTR_STORE, [self._boxed_locals[idx], val], None)
+            else:
+                var_versions[idx] = val
+
+        def _box_var(idx: int) -> Value:
+            if idx in self._boxed_locals:
+                return self._boxed_locals[idx]
+            current = _var_value(idx)
+            pointee = current.type if current is not None else IRType.INT64
+            inst = _make_inst(Op.ALLOCA, [], PtrType(pointee))
+            ptr = inst.result
+            if ptr is None:
+                ptr = self._make_const(PtrType(pointee), 0, block, source_line)
+            _make_inst(Op.PTR_STORE, [ptr, current], None)
+            self._boxed_locals[idx] = ptr
+            var_versions.pop(idx, None)
+            return ptr
+
         # ── Constants ──
 
         if op == "CONST_I64":
@@ -386,20 +426,12 @@ class IRBuilder:
 
         if op == "LOAD":
             for a in args:
-                idx = int(a)
-                val = var_versions.get(idx)
-                if val is None:
-                    typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
-                    val = self._make_const(typ, 0, block, source_line)
-                    var_versions[idx] = val
-                _push(val)
+                _push(_var_value(int(a)))
             return
 
         if op == "STORE":
             for a in reversed(args):
-                idx = int(a)
-                val = _pop()
-                var_versions[idx] = val
+                _set_var(int(a), _pop())
             return
 
         if op == "STORE_CONST_I64":
@@ -439,6 +471,55 @@ class IRBuilder:
                 var_versions[idx] = val
             return
 
+        if op == "ADDR_GLOBAL" and args:
+            inst = _make_inst(
+                Op.ADDR_GLOBAL, [], PtrType(IRType.INT64), imm_str=args[0]
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "ADDR_LOCAL" and args:
+            ptr = _box_var(int(args[0]))
+            _push(ptr)
+            return
+
+        if op == "ADDR_FIELD" and args:
+            field_idx = int(args[0])
+            struct_val = _pop()
+            pointee = IRType.INT64
+            if isinstance(struct_val.type, StructType) and field_idx < len(struct_val.type.field_types):
+                pointee = struct_val.type.field_types[field_idx]
+            inst = _make_inst(Op.FIELD_ADDR, [struct_val], PtrType(pointee), imm_int=field_idx)
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "ADDR_ELEM":
+            index = _pop()
+            list_val = _pop()
+            pointee = IRType.INT64
+            if isinstance(list_val.type, ListType):
+                pointee = list_val.type.elem_type
+            inst = _make_inst(Op.LIST_ELEM_ADDR, [list_val, index], PtrType(pointee))
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "DEREF":
+            ptr = _pop()
+            pointee = ptr.type.pointee if isinstance(ptr.type, PtrType) else IRType.INT64
+            inst = _make_inst(Op.PTR_LOAD, [ptr], pointee)
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "DEREF_SET":
+            value = _pop()
+            ptr = _pop()
+            _make_inst(Op.PTR_STORE, [ptr, value], None)
+            return
+
         if op == "FUSED_LOAD_STORE":
             # Alternating LOAD/STORE/LOAD/STORE... sequence
             # Starts with LOAD, so args[0] is load, args[1] is store, args[2] is load, etc.
@@ -447,18 +528,9 @@ class IRBuilder:
             while i < len(args):
                 idx = int(args[i])
                 if expect_load:
-                    # LOAD: push var onto stack
-                    val = var_versions.get(idx)
-                    if val is None:
-                        typ = self._local_types.get(func.name, {}).get(
-                            idx, IRType.INT64
-                        )
-                        val = self._make_const(typ, 0, block, source_line)
-                    _push(val)
+                    _push(_var_value(idx))
                 else:
-                    # STORE: pop from stack into var
-                    val = _pop()
-                    var_versions[idx] = val
+                    _set_var(idx, _pop())
                 expect_load = not expect_load
                 i += 1
             return
@@ -468,11 +540,8 @@ class IRBuilder:
                 store_idx = int(args[i])
                 load_idx = int(args[i + 1])
                 val = _pop()
-                var_versions[store_idx] = val
-                load_val = var_versions.get(load_idx)
-                if load_val is None:
-                    load_val = self._make_const(IRType.INT64, 0, block, source_line)
-                _push(load_val)
+                _set_var(store_idx, val)
+                _push(_var_value(load_idx))
             return
 
         if op == "FUSED_GET_STORE_LOAD":
@@ -485,11 +554,8 @@ class IRBuilder:
                     Op.LOAD_FIELD, [struct_val], IRType.INT64, imm_int=field_idx
                 )
                 if inst.result:
-                    var_versions[store_idx] = inst.result
-                load_val = var_versions.get(load_idx)
-                if load_val is None:
-                    load_val = self._make_const(IRType.INT64, 0, block, source_line)
-                _push(load_val)
+                    _set_var(store_idx, inst.result)
+                _push(_var_value(load_idx))
             return
 
         if op in ("COPY_LOCAL", "COPY_LOCAL_REF"):
@@ -1037,6 +1103,31 @@ class IRBuilder:
                 _push(inst.result)
             return
 
+        if op == "LIST_NEW_CAP" and args:
+            capacity = int(args[0])
+            elem_code = int(args[1]) if len(args) > 1 else -1
+            elem_type = {
+                0: IRType.INT64,
+                1: IRType.STRING,
+                2: IRType.FLOAT64,
+                3: IRType.BOOL,
+            }.get(elem_code, IRType.INT64)
+            zero = (
+                ""
+                if elem_type == IRType.STRING
+                else (0.0 if elem_type == IRType.FLOAT64 else 0)
+            )
+            elems = [
+                self._make_const(elem_type, zero, block, source_line)
+                for _ in range(max(0, capacity))
+            ]
+            inst = _make_inst(
+                Op.ALLOC_LIST, elems, ListType(elem_type), imm_int=capacity
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+
         if op == "LIST_NEW_STACK" and args:
             count = int(args[0])
             elems = []
@@ -1130,8 +1221,9 @@ class IRBuilder:
             return
 
         if op == "ASSERT":
-            msg = _pop()
+            # Bytecode stack order is: message, then condition.
             cond = _pop()
+            msg = _pop()
             _make_inst(Op.CALL_BUILTIN, [cond, msg], IRType.VOID, imm_str="assert")
             return
 
@@ -1262,7 +1354,8 @@ class IRBuilder:
         # ── Global variables ──
 
         if op == "LOAD_GLOBAL" and args:
-            inst = _make_inst(Op.LOAD_GLOBAL, [], IRType.INT64, imm_str=args[0])
+            gtype = self.module.global_vars.get(args[0], IRType.INT64)
+            inst = _make_inst(Op.LOAD_GLOBAL, [], gtype, imm_str=args[0])
             if inst.result:
                 _push(inst.result)
             return
@@ -1662,22 +1755,33 @@ class IRBuilder:
                     term.target_blocks = [target]
 
             elif term.op == Op.BRANCH:
-                # BRANCH cond, false_label
-                # True branch = fall through to next block
-                # False branch = jump to label
-                false_label = term.imm_str
-                if i + 1 < len(blocks):
-                    true_block = blocks[i + 1]
-                    block.successors.append(true_block)
-                    true_block.predecessors.append(block)
-                if false_label in block_map:
-                    false_block = block_map[false_label]
-                    block.successors.append(false_block)
-                    false_block.predecessors.append(block)
-                    term.target_blocks = [
-                        blocks[i + 1] if i + 1 < len(blocks) else false_block,
-                        false_block,
-                    ]
+                # Explicit target_blocks come from switch lowering and are
+                # already authoritative (inner switch blocks have no imm_str).
+                if term.target_blocks:
+                    for target in term.target_blocks:
+                        if target not in block.successors:
+                            block.successors.append(target)
+                        if block not in target.predecessors:
+                            target.predecessors.append(block)
+                else:
+                    # BRANCH cond, false_label: true = fall through.
+                    false_label = term.imm_str
+                    if i + 1 < len(blocks):
+                        true_block = blocks[i + 1]
+                        if true_block not in block.successors:
+                            block.successors.append(true_block)
+                        if block not in true_block.predecessors:
+                            true_block.predecessors.append(block)
+                    if false_label in block_map:
+                        false_block = block_map[false_label]
+                        if false_block not in block.successors:
+                            block.successors.append(false_block)
+                        if block not in false_block.predecessors:
+                            false_block.predecessors.append(block)
+                        term.target_blocks = [
+                            blocks[i + 1] if i + 1 < len(blocks) else false_block,
+                            false_block,
+                        ]
 
             elif term.op == Op.TRY_BEGIN:
                 # TRY_BEGIN: fall through to try body, jump to except on exception

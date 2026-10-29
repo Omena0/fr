@@ -60,8 +60,24 @@ class SetType:
         return isinstance(other, SetType) and self.elem_type == other.elem_type
 
 
+@dataclass
+class PtrType:
+    """A pointer to a value. Pointers are raw addresses in the native backend."""
+
+    pointee: "ValueType"
+
+    def __hash__(self):
+        return hash(("ptr", self.pointee))
+
+    def __eq__(self, other):
+        return isinstance(other, PtrType) and self.pointee == other.pointee
+
+    def __repr__(self):
+        return f"*{self.pointee}"
+
+
 # A ValueType is the type of any SSA value
-ValueType = IRType | StructType | ListType | SetType
+ValueType = IRType | StructType | ListType | SetType | PtrType
 
 
 class Op(Enum):
@@ -110,6 +126,14 @@ class Op(Enum):
     ALLOC_STRUCT = auto()   # allocate struct, returns pointer
     LOAD_FIELD = auto()     # load field from struct pointer
     STORE_FIELD = auto()    # store field to struct pointer (void)
+
+    # Pointer operations (language-level pointers)
+    ALLOCA = auto()         # allocate an addressable cell, returns pointer
+    ADDR_GLOBAL = auto()    # address of a global variable
+    PTR_LOAD = auto()       # load through pointer
+    PTR_STORE = auto()      # store through pointer (void)
+    FIELD_ADDR = auto()     # pointer to struct field (ptr, field index -> pointer)
+    LIST_ELEM_ADDR = auto() # pointer to list element (list, index -> pointer)
 
     # List
     ALLOC_LIST = auto()
@@ -182,11 +206,12 @@ SIDE_EFFECT_OPS = frozenset({
     Op.STORE_FIELD, Op.LIST_SET, Op.LIST_APPEND,
     Op.CALL, Op.CALL_EXTERN, Op.CALL_BUILTIN,
     Op.BRANCH, Op.JUMP, Op.RETURN, Op.RETURN_VOID,
-    Op.STORE_GLOBAL, Op.PRINT, Op.PRINTLN, Op.INPUT,
+    Op.STORE_GLOBAL, Op.LOAD_GLOBAL, Op.PRINT, Op.PRINTLN, Op.INPUT,
     Op.TRY_BEGIN, Op.TRY_END, Op.RAISE,
     Op.DIV, Op.MOD, Op.FDIV,
     Op.ALLOC_LIST, Op.LIST_GET, Op.LIST_LEN,
     Op.ALLOC_STRUCT, Op.LOAD_FIELD, Op.STORE_FIELD,
+    Op.ALLOCA, Op.ADDR_GLOBAL, Op.PTR_LOAD, Op.PTR_STORE, Op.LIST_ELEM_ADDR,
     Op.STR_CONCAT, Op.TO_STR, Op.TO_BOOL,
 })
 
@@ -266,7 +291,8 @@ class Instruction:
     """A single SSA instruction. Produces at most one Value."""
 
     __slots__ = ('op', 'result', 'operands', 'block', 'source_line',
-                 'imm_int', 'imm_str', 'imm_float', 'target_blocks')
+                 'imm_int', 'imm_str', 'imm_float', 'target_blocks',
+                 'stack_alloc', 'pure_call')
 
     def __init__(self, op: Op, operands: list[Value] = None,
                  result_type: ValueType = None, source_line: int = None):
@@ -280,6 +306,8 @@ class Instruction:
         self.imm_str: Optional[str] = None
         self.imm_float: Optional[float] = None
         self.target_blocks: list[BasicBlock] = []  # for BRANCH/JUMP
+        self.stack_alloc = False  # ALLOC_STRUCT can live in the stack frame
+        self.pure_call = False    # CALL/CALL_BUILTIN proven side-effect free
 
         # Create result value if the instruction produces one
         if result_type is not None and result_type != IRType.VOID:
@@ -312,6 +340,8 @@ class Instruction:
 
     @property
     def has_side_effects(self) -> bool:
+        if self.op in (Op.CALL, Op.CALL_BUILTIN) and self.pure_call:
+            return False
         return self.op in SIDE_EFFECT_OPS
 
     def __repr__(self):

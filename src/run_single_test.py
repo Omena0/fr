@@ -62,8 +62,8 @@ def ensure_runtime_object():
         except OSError:
             pass
 
-    tmp_rt_obj = RUNTIME_OBJ.with_suffix(".o.tmp")
-    tmp_sc_obj = SYSCALL_OBJ.with_suffix(".o.tmp")
+    tmp_rt_obj = RUNTIME_OBJ.with_suffix(f".{os.getpid()}.o.tmp")
+    tmp_sc_obj = SYSCALL_OBJ.with_suffix(f".{os.getpid()}.o.tmp")
 
     rt_cmd = [
         "gcc",
@@ -107,8 +107,20 @@ def ensure_runtime_object():
             pass
         raise RuntimeError(result.stderr.strip() or "Failed to assemble syscall.S")
 
-    tmp_rt_obj.replace(RUNTIME_OBJ)
-    tmp_sc_obj.replace(SYSCALL_OBJ)
+    try:
+        tmp_rt_obj.replace(RUNTIME_OBJ)
+    except OSError:
+        try:
+            tmp_rt_obj.unlink()
+        except OSError:
+            pass
+    try:
+        tmp_sc_obj.replace(SYSCALL_OBJ)
+    except OSError:
+        try:
+            tmp_sc_obj.unlink()
+        except OSError:
+            pass
     return str(RUNTIME_OBJ), str(SYSCALL_OBJ)
 
 

@@ -1,0 +1,19 @@
+// !1
+// !2
+// !7
+
+struct Node {
+    int value
+    Node* next
+}
+
+void main() {
+    Node a = Node(1, 0)
+    Node b = Node(2, 0)
+    a.next = &b
+    Node* p = &a
+    println(p.value)
+    println(p.next.value)
+    p.next.value = 7
+    println(b.value)
+}

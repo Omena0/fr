@@ -1,0 +1,25 @@
+// !9
+// !10
+// !20
+
+int counter = 7
+
+struct Box {
+    int value
+}
+
+Box box = Box(1)
+
+void update(int v) {
+    counter = v
+    box.value = v + 1
+}
+
+void main() {
+    update(9)
+    println(counter)
+    println(box.value)
+    int* p = &counter
+    *p = 20
+    println(counter)
+}

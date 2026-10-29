@@ -245,7 +245,7 @@ class BytecodeCompiler:
         """Emit a LOAD or LOAD_GLOBAL instruction based on variable scope"""
         var_id = self.get_var_id(var_name)
         if var_name in self.global_vars:
-            self.emit(f"LOAD_GLOBAL {var_id}")
+            self.emit(f"LOAD_GLOBAL {var_name}")
         else:
             self.emit(f"LOAD {var_id}")
 
@@ -253,7 +253,7 @@ class BytecodeCompiler:
         """Emit a STORE or STORE_GLOBAL instruction based on variable scope"""
         var_id = self.get_var_id(var_name)
         if var_name in self.global_vars:
-            self.emit(f"STORE_GLOBAL {var_id}")
+            self.emit(f"STORE_GLOBAL {var_name}")
         else:
             self.emit(f"STORE {var_id}")
 
@@ -442,6 +442,8 @@ class BytecodeCompiler:
             var_type = self.var_types.get(var_name, "")
             if isinstance(var_type, str) and var_type.startswith("struct:"):
                 var_type = var_type.split(":", 1)[1]
+            if isinstance(var_type, str) and var_type.startswith("*"):
+                var_type = var_type.lstrip("*")
             # Check if this is a struct type
             return var_type if var_type in self.struct_defs else ""
         # If it's a member access (nested struct field)
@@ -458,11 +460,27 @@ class BytecodeCompiler:
                     if field.get("name") == field_name:
                         # Get the field's type
                         field_type = field.get("type", "")
+                        while isinstance(field_type, str) and field_type.startswith("*"):
+                            field_type = field_type[1:]
                         # Check if this field type is a struct
                         return field_type if field_type in self.struct_defs else ""
             return ""
 
         return ""
+
+    def expr_is_pointer(self, expr: Any) -> bool:
+        """Return True when an expression evaluates to a pointer value."""
+        if not isinstance(expr, dict):
+            return False
+        if "id" in expr and "func" not in expr:
+            return str(self.var_types.get(expr["id"], "")).startswith("*")
+        if "attr" in expr and "value" in expr:
+            base_type = self.get_expr_struct_type(expr["value"])
+            if base_type and base_type in self.struct_defs:
+                for field in self.struct_defs[base_type].get("fields", []):
+                    if field.get("name") == expr["attr"]:
+                        return str(field.get("type", "")).startswith("*")
+        return False
 
     def infer_expr_type(self, expr: Any) -> str:
         """Infer the type of an expression (returns 'i64', 'f64', 'str', 'bool', etc.)"""
@@ -586,6 +604,51 @@ class BytecodeCompiler:
             self.emit("CONST_I64 0")
             return
 
+        if isinstance(expr, dict) and expr.get("type") == "addr":
+            target = expr.get("value")
+            if isinstance(target, dict) and "id" in target and "func" not in target:
+                if target["id"] in self.global_vars:
+                    self.emit(f"ADDR_GLOBAL {target['id']}")
+                else:
+                    self.emit(f"ADDR_LOCAL {self.get_var_id(target['id'])}")
+                return
+            if isinstance(target, dict) and "attr" in target and "value" in target:
+                base = target["value"]
+                field_name = target["attr"]
+                struct_type = self.get_expr_struct_type(base)
+                field_idx = -1
+                if struct_type and struct_type in self.struct_defs:
+                    field_idx = self.struct_defs[struct_type]["field_map"].get(
+                        field_name, -1
+                    )
+                if field_idx < 0:
+                    for struct_def in self.struct_defs.values():
+                        if field_name in struct_def["field_map"]:
+                            field_idx = struct_def["field_map"][field_name]
+                            break
+                if field_idx < 0:
+                    raise ValueError(f"Unknown field: {field_name}")
+                self.compile_expr(base, expr_type)
+                if (
+                    isinstance(base, dict)
+                    and "id" in base
+                    and str(self.var_types.get(base["id"], "")).startswith("*")
+                ):
+                    self.emit("DEREF")
+                self.emit(f"ADDR_FIELD {field_idx}")
+                return
+            if isinstance(target, dict) and "slice" in target and "value" in target:
+                self.compile_expr(target["value"], expr_type)
+                self.compile_expr(target["slice"], "i64")
+                self.emit("ADDR_ELEM")
+                return
+            raise ValueError("Cannot take the address of this expression")
+
+        if isinstance(expr, dict) and expr.get("type") == "deref":
+            self.compile_expr(expr.get("value"), expr_type)
+            self.emit("DEREF")
+            return
+
         # Literal list (Python list object)
         if isinstance(expr, list):
             elements = expr
@@ -631,13 +694,13 @@ class BytecodeCompiler:
                     self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
                     return
 
-            # Create new list using stack values
-            # Push all elements to stack
+            # Build the list incrementally. This keeps the bytecode portable
+            # across every backend (including the C VM) without a special
+            # stack-pop opcode.
+            self.emit("LIST_NEW")
             for elem in elements:
                 self.compile_expr(elem, expr_type)
-
-            # Emit LIST_NEW_STACK count
-            self.emit(f"LIST_NEW_STACK {len(elements)}")
+                self.emit("LIST_APPEND")
             return
 
         # Literal boolean (must be before int since bool is subclass of int in Python)
@@ -743,13 +806,11 @@ class BytecodeCompiler:
                         self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
                         return
 
-                # Create new list using stack values
-                # Push all elements to stack
+                # Build the list incrementally for backend portability.
+                self.emit("LIST_NEW")
                 for elem in elements:
                     self.compile_expr(elem, expr_type)
-
-                # Emit LIST_NEW_STACK count
-                self.emit(f"LIST_NEW_STACK {len(elements)}")
+                    self.emit("LIST_APPEND")
                 return
 
             if isinstance(value, int):
@@ -909,6 +970,8 @@ class BytecodeCompiler:
 
                 # Compile the struct value (could be a variable, list element, etc.)
                 self.compile_expr(value_node, expr_type)
+                if self.expr_is_pointer(value_node):
+                    self.emit("DEREF")
                 self.emit(f"STRUCT_GET {field_idx}")
                 return
 
@@ -962,13 +1025,11 @@ class BytecodeCompiler:
                         self.emit(f"LIST_NEW_STR {len(values)} {' '.join(values)}")
                         return
 
-                # Create new list using stack values
-                # Push all elements to stack
+                # Build the list incrementally for backend portability.
+                self.emit("LIST_NEW")
                 for elem in elements:
                     self.compile_expr(elem, expr_type)
-
-                # Emit LIST_NEW_STACK count
-                self.emit(f"LIST_NEW_STACK {len(elements)}")
+                    self.emit("LIST_APPEND")
                 return
 
             # List/Array/Dict indexing (subscript): arr[index]
@@ -1534,6 +1595,15 @@ class BytecodeCompiler:
 
         node_type = node.get("type")
 
+        if node_type == "ptr_assign":
+            target = node.get("target")
+            if not (isinstance(target, dict) and target.get("type") == "deref"):
+                raise ValueError("Invalid pointer assignment target")
+            self.compile_expr(target.get("value"), None)
+            self.compile_expr(node.get("value"), None)
+            self.emit("DEREF_SET")
+            return
+
         # Variable declaration/assignment
         if node_type == "var":
             name = node.get("name", "")
@@ -1564,11 +1634,15 @@ class BytecodeCompiler:
             # Static list allocation: list name[capacity:type] = []
             list_capacity = node.get("list_capacity")
             if list_capacity is not None:
-                if not (
-                    isinstance(value, dict)
-                    and value.get("type") == "list"
-                    and value.get("value") == []
-                ):
+                empty_list_literal = (
+                    value == []
+                    or (
+                        isinstance(value, dict)
+                        and value.get("type") == "list"
+                        and value.get("value") == []
+                    )
+                )
+                if not empty_list_literal:
                     raise CompilerError(
                         "Static lists must be initialized with an empty list literal []"
                     )
@@ -1642,6 +1716,27 @@ class BytecodeCompiler:
             field_name = node.get("field", "")
             value = node.get("value")
 
+            # Parenthesized/dereferenced lvalue: compile the target expression
+            # directly instead of treating it as a variable name.
+            if isinstance(target_name, dict):
+                field_idx = next(
+                    (
+                        struct_def["field_map"][field_name]
+                        for struct_def in self.struct_defs.values()
+                        if field_name in struct_def["field_map"]
+                    ),
+                    -1,
+                )
+                if field_idx < 0:
+                    raise ValueError(f"Unknown field: {field_name}")
+                self.compile_expr(target_name, None)
+                if self.expr_is_pointer(target_name):
+                    self.emit("DEREF")
+                self.compile_expr(value)
+                self.emit(f"STRUCT_SET {field_idx}")
+                self.emit("POP")
+                return
+
             # Check if target is a Python module import
             if target_name in self.py_imports:
                 # Python module attribute assignment: ui.debug = False
@@ -1684,13 +1779,15 @@ class BytecodeCompiler:
                 self.emit("POP")
                 return
 
-            # Load the struct
+            # Load the struct (auto-dereference pointer-typed variables)
             self.emit_load(target_name)
+            if str(self.var_types.get(target_name, "")).startswith("*"):
+                self.emit("DEREF")
 
             field_idx = next(
                 (
                     struct_def["field_map"][field_name]
-                    for struct_name, struct_def in self.struct_defs.items()
+                    for struct_def in self.struct_defs.values()
                     if field_name in struct_def["field_map"]
                 ),
                 -1,

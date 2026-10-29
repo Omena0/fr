@@ -133,7 +133,7 @@ Can have any num args. In which case it will store all.
 
 Load a global variable onto the stack.
 
-**Syntax:** `LOAD_GLOBAL <var_index>`
+**Syntax:** `LOAD_GLOBAL <name>`
 
 **Stack:** `-> value`
 
@@ -141,9 +141,67 @@ Load a global variable onto the stack.
 
 Pop a value from the stack and store it in a global variable.
 
-**Syntax:** `STORE_GLOBAL <var_index>`
+**Syntax:** `STORE_GLOBAL <name>`
 
 **Stack:** `value ->`
+
+
+### ADDR_LOCAL
+
+Push a pointer to a local variable slot.
+
+**Syntax:** `ADDR_LOCAL <var_index>`
+
+**Stack:** `-> pointer`
+
+### ADDR_GLOBAL
+
+Push a pointer to a global variable cell.
+
+**Syntax:** `ADDR_GLOBAL <name>`
+
+**Stack:** `-> pointer`
+
+### ADDR_FIELD
+
+Pop a struct pointer and push a pointer to one of its fields.
+
+**Syntax:** `ADDR_FIELD <field_index>`
+
+**Stack:** `struct -> pointer`
+
+### ADDR_ELEM
+
+Pop a list and index, then push a pointer to the element.
+
+**Syntax:** `ADDR_ELEM`
+
+**Stack:** `list index -> pointer`
+
+### DEREF
+
+Pop a pointer and push the pointed-to value.
+
+**Syntax:** `DEREF`
+
+**Stack:** `pointer -> value`
+
+### DEREF_SET
+
+Pop a value then a pointer, and store the value through the pointer.
+
+**Syntax:** `DEREF_SET`
+
+**Stack:** `pointer value ->`
+
+### LIST_NEW_CAP
+
+Create a fixed-size list whose length is the requested capacity, filled with
+type-appropriate zero values.
+
+**Syntax:** `LIST_NEW_CAP <capacity> <elem_type>`
+
+**Stack:** `-> list`
 
 ### STORE_CONST_I64
 

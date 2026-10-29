@@ -168,6 +168,7 @@ def _file_join(*paths: str):
 # Process management functions
 _fork_processes = {}  # Maps synthetic pid -> subprocess.Popen
 _next_fork_pid = 1
+_in_fork_child = False
 
 
 def _fork() -> int:
@@ -214,6 +215,8 @@ def _fork() -> int:
     try:
         pid = _os.fork()
         if pid == 0:
+            global _in_fork_child
+            _in_fork_child = True
             # Child process: set up to receive SIGTERM when parent dies
             # This is Linux-specific
             try:
@@ -261,6 +264,12 @@ def _exit(code: int = 0) -> None:
     """Exit the program with the given exit code."""
     import sys as _sys
 
+    if _in_fork_child:
+        # In a real fork the child must terminate without unwinding the
+        # parent's interpreter state or running its atexit handlers.
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        _os._exit(int(code))
     _sys.exit(code)
 
 

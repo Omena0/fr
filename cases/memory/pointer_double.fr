@@ -1,0 +1,13 @@
+// !7
+// !11
+// !11
+
+void main() {
+    int x = 7
+    int* p = &x
+    int** pp = &p
+    println(**pp)
+    **pp = 11
+    println(x)
+    println(*p)
+}

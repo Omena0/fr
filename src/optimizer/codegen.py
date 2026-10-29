@@ -216,8 +216,21 @@ class CodeGen:
         has_spills = alloc.frame_size > 0
         has_callee_saves = callee_save_size > 0
 
+        # Reserve fixed stack slots for non-escaping struct allocations.
+        self._stack_alloc_offsets: dict[int, int] = {}
+        stack_bytes = 0
+        stack_base = alloc.frame_size + callee_save_size
+        for inst in func.all_instructions():
+            if inst.op == Op.ALLOC_STRUCT and inst.stack_alloc:
+                size = max(8, len(inst.operands) * 8)
+                size = (size + 7) & ~7
+                stack_bytes += size
+                self._stack_alloc_offsets[id(inst)] = stack_base + stack_bytes
+        if stack_bytes:
+            has_spills = True
+
         if has_spills:
-            total_frame = alloc.frame_size + callee_save_size
+            total_frame = alloc.frame_size + callee_save_size + stack_bytes
             total_frame = (total_frame + 15) & ~15
         elif has_callee_saves:
             total_frame = callee_save_size
@@ -248,7 +261,9 @@ class CodeGen:
         elif has_callee_saves:
             for reg in alloc.used_callee_saved:
                 self._emit(f"    push {reg}")
-            if has_calls:
+            # Re-establish 16-byte alignment before calls. After the pushes
+            # rsp is 0 mod 16 when an odd number of registers was saved.
+            if has_calls and (callee_save_size % 16) == 0:
                 self._emit("    sub rsp, 8")
         elif has_calls:
             self._emit("    sub rsp, 8")
@@ -275,6 +290,8 @@ class CodeGen:
             Op.LIST_APPEND,
             Op.LIST_LEN,
             Op.ALLOC_STRUCT,
+            Op.ALLOCA,
+            Op.LIST_ELEM_ADDR,
             Op.STR_CONCAT,
             Op.TO_STR,
             Op.TO_BOOL,
@@ -447,6 +464,14 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
             b = self._loc(inst.operands[1], alloc)
+            skip = self._new_label("div_ok")
+            self._emit(f"    test {b}, {b}")
+            self._emit(f"    jne {skip}")
+            msg = self._get_string_label("integer division by zero")
+            self._emit(f"    lea rdi, [rip + {msg}]")
+            self._emit(f"    mov esi, {inst.source_line or 0}")
+            self._emit_call_aligned("runtime_error_at")
+            self._emit(f"{skip}:")
             self._emit(f"    mov rax, {a}")
             self._emit(f"    cqo")
             # Can't idiv by memory with just register
@@ -466,6 +491,14 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
             b = self._loc(inst.operands[1], alloc)
+            skip = self._new_label("mod_ok")
+            self._emit(f"    test {b}, {b}")
+            self._emit(f"    jne {skip}")
+            msg = self._get_string_label("integer division by zero")
+            self._emit(f"    lea rdi, [rip + {msg}]")
+            self._emit(f"    mov esi, {inst.source_line or 0}")
+            self._emit_call_aligned("runtime_error_at")
+            self._emit(f"{skip}:")
             self._emit(f"    mov rax, {a}")
             self._emit(f"    cqo")
             if b.startswith("[") or b in ("rax", "rdx"):
@@ -506,12 +539,12 @@ class CodeGen:
                 self._emit(f"    movq xmm14, {b}")
                 self._emit(f"    ucomisd xmm14, xmm15")
             self._emit(f"    jne {skip_label}")
-            # Divisor is zero — raise ZeroDivisionError
-            zdstr = self._get_string_label("ZeroDivisionError")
+            # Divisor is zero — report through runtime_error_at so handlers and
+            # test-mode error formatting behave exactly like the other VMs.
             msgstr = self._get_string_label("float division by zero")
-            self._emit(f"    lea rdi, [rip + {zdstr}]")
-            self._emit(f"    lea rsi, [rip + {msgstr}]")
-            self._emit_call_aligned("runtime_exception_raise")
+            self._emit(f"    lea rdi, [rip + {msgstr}]")
+            self._emit(f"    mov esi, {inst.source_line or 0}")
+            self._emit_call_aligned("runtime_error_at")
             self._emit(f"{skip_label}:")
             self._emit_float_binop(inst, alloc, "divsd")
             return
@@ -667,6 +700,67 @@ class CodeGen:
                 self._emit(f"    movsd [{base_ref} + {offset}], {val}")
             else:
                 self._emit(f"    mov [{base_ref} + {offset}], {val}")
+            return
+
+        # ── Pointer operations ──
+
+        if op == Op.ADDR_GLOBAL:
+            dst = self._loc(inst.result, alloc)
+            name = inst.imm_str or "unknown"
+            self._emit(f"    lea {dst}, [rip + _fr_global_{name}]")
+            self.module.global_vars[name] = IRType.INT64
+            return
+
+        if op == Op.ALLOCA:
+            dst = self._loc(inst.result, alloc)
+            self._emit("    mov rdi, 8")
+            self._emit_call_aligned("runtime_alloc")
+            if dst != "rax":
+                self._emit(f"    mov {dst}, rax")
+            return
+
+        if op == Op.PTR_LOAD:
+            dst = self._loc(inst.result, alloc)
+            ptr = self._loc(inst.operands[0], alloc)
+            if ptr.startswith("["):
+                self._emit(f"    mov r11, {ptr}")
+                ptr_ref = "r11"
+            else:
+                ptr_ref = ptr
+            if dst.startswith("xmm"):
+                self._emit(f"    movsd {dst}, [{ptr_ref}]")
+            else:
+                self._emit(f"    mov {dst}, [{ptr_ref}]")
+            return
+
+        if op == Op.PTR_STORE:
+            ptr = self._loc(inst.operands[0], alloc)
+            val = self._loc(inst.operands[1], alloc)
+            if ptr.startswith("["):
+                self._emit(f"    mov r11, {ptr}")
+                ptr_ref = "r11"
+            else:
+                ptr_ref = ptr
+            if val.startswith("xmm"):
+                self._emit(f"    movsd [{ptr_ref}], {val}")
+            else:
+                self._emit(f"    mov [{ptr_ref}], {val}")
+            return
+
+        if op == Op.FIELD_ADDR:
+            dst = self._loc(inst.result, alloc)
+            base = self._loc(inst.operands[0], alloc)
+            offset = (inst.imm_int or 0) * 8
+            if base.startswith("["):
+                self._emit(f"    mov r11, {base}")
+                base_ref = "r11"
+            else:
+                base_ref = base
+            self._emit(f"    lea {dst}, [{base_ref} + {offset}]")
+            return
+
+        if op == Op.LIST_ELEM_ADDR:
+            self._emit_runtime_call("runtime_list_elem_addr", inst, alloc, 2)
             return
 
         # ── List operations ──
@@ -862,18 +956,17 @@ class CodeGen:
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
+                self._emit("    mov rsi, 1")
                 self._emit_call_aligned("fputs")
-                self._emit("    mov rdi, stdout")
-                self._emit_call_aligned("fflush")
             elif val_type == IRType.FLOAT64:
                 a = self._loc(inst.operands[0], alloc)
-                fmt = self._get_format_label("%f")
+                fmt = self._get_format_label("%g")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
                 if a.startswith("xmm"):
-                    self._emit(f"    movsd xmm1, {a}")
+                    self._emit(f"    movsd xmm0, {a}")
                 else:
-                    self._emit(f"    movq xmm1, {a}")
-                self._emit("    mov rsi, rdi")
+                    self._emit(f"    movq xmm0, {a}")
+                self._emit("    mov eax, 1")
                 self._emit_call_aligned("printf")
             elif val_type == IRType.BOOL:
                 a = self._loc(inst.operands[0], alloc)
@@ -881,32 +974,30 @@ class CodeGen:
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_bool_to_str")
                 self._emit(f"    mov rdi, rax")
+                self._emit("    mov rsi, 1")
                 self._emit_call_aligned("fputs")
-                self._emit("    mov rdi, stdout")
-                self._emit_call_aligned("fflush")
             elif isinstance(val_type, ListType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_list_to_str")
                 self._emit(f"    mov rdi, rax")
+                self._emit("    mov rsi, 1")
                 self._emit_call_aligned("fputs")
-                self._emit("    mov rdi, stdout")
-                self._emit_call_aligned("fflush")
             elif isinstance(val_type, SetType):
                 a = self._loc(inst.operands[0], alloc)
                 if a != "rdi":
                     self._emit(f"    mov rdi, {a}")
                 self._emit_call_aligned("runtime_set_to_str")
                 self._emit(f"    mov rdi, rax")
+                self._emit("    mov rsi, 1")
                 self._emit_call_aligned("fputs")
-                self._emit("    mov rdi, stdout")
-                self._emit_call_aligned("fflush")
             else:
                 a = self._loc(inst.operands[0], alloc)
                 fmt = self._get_format_label("%ld")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
                 self._emit(f"    mov rsi, {a}")
+                self._emit("    xor eax, eax")
                 self._emit_call_aligned("printf")
             return
 
@@ -919,13 +1010,13 @@ class CodeGen:
                 self._emit_call_aligned("puts")
             elif val_type == IRType.FLOAT64:
                 a = self._loc(inst.operands[0], alloc)
-                fmt = self._get_format_label("%g")
+                fmt = self._get_format_label("%g\n")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
                 if a.startswith("xmm"):
-                    self._emit(f"    movsd xmm1, {a}")
+                    self._emit(f"    movsd xmm0, {a}")
                 else:
-                    self._emit(f"    movq xmm1, {a}")
-                self._emit("    mov rsi, rdi")
+                    self._emit(f"    movq xmm0, {a}")
+                self._emit("    mov eax, 1")
                 self._emit_call_aligned("printf")
             elif val_type == IRType.BOOL:
                 a = self._loc(inst.operands[0], alloc)
@@ -953,6 +1044,7 @@ class CodeGen:
                 fmt = self._get_format_label("%ld\n")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
                 self._emit(f"    mov rsi, {a}")
+                self._emit("    xor eax, eax")
                 self._emit_call_aligned("printf")
             return
 
@@ -1027,15 +1119,25 @@ class CodeGen:
         if op == Op.LOAD_GLOBAL:
             dst = self._loc(inst.result, alloc)
             name = inst.imm_str or "unknown"
-            self._emit(f"    mov {dst}, [rip + _fr_global_{name}]")
-            self.module.global_vars[name] = IRType.INT64
+            typ = self.module.global_vars.get(name, IRType.INT64)
+            if dst.startswith("xmm") or typ == IRType.FLOAT64:
+                xdst = dst if dst.startswith("xmm") else "xmm15"
+                self._emit(f"    movsd {xdst}, [rip + _fr_global_{name}]")
+                if xdst != dst:
+                    self._emit(f"    movsd {dst}, {xdst}")
+            else:
+                self._emit(f"    mov {dst}, [rip + _fr_global_{name}]")
+            self.module.global_vars.setdefault(name, typ)
             return
 
         if op == Op.STORE_GLOBAL:
             val = self._loc(inst.operands[0], alloc) if inst.operands else "0"
             name = inst.imm_str or "unknown"
-            self._emit(f"    mov [rip + _fr_global_{name}], {val}")
-            self.module.global_vars[name] = IRType.INT64
+            if val.startswith("xmm"):
+                self._emit(f"    movsd [rip + _fr_global_{name}], {val}")
+            else:
+                self._emit(f"    mov [rip + _fr_global_{name}], {val}")
+            self.module.global_vars.setdefault(name, IRType.INT64)
             return
 
         # ── SELECT (branchless conditional) ──
@@ -1180,29 +1282,54 @@ class CodeGen:
         self._emit(f"    movzx {dst}, {dst_byte}")
 
     def _emit_struct_alloc(self, inst: Instruction, alloc: RegAllocation):
-        """Emit struct allocation using bump allocator."""
+        """Allocate a struct through the runtime allocator.
+
+        Field values are staged on the stack before the allocation call so
+        they cannot be clobbered by caller-saved registers. The runtime copies
+        them into the new allocation and returns a direct pointer.
+        """
         n_fields = len(inst.operands)
         size = n_fields * 8
         if size == 0:
-            size = 8  # Minimum allocation
+            size = 8
 
         dst = self._loc(inst.result, alloc)
 
-        # Bump allocate: ptr = heap_ptr; heap_ptr += size
-        self._emit(f"    mov {dst}, [rip + _fr_heap_ptr]")
-        self._emit(f"    add qword ptr [rip + _fr_heap_ptr], {size}")
+        stack_offset = getattr(self, "_stack_alloc_offsets", {}).get(id(inst))
+        if stack_offset is not None:
+            for i, field_val in enumerate(inst.operands):
+                val_loc = self._loc(field_val, alloc)
+                offset = i * 8
+                if val_loc.startswith("xmm"):
+                    self._emit(f"    movsd [rbp - {stack_offset - offset}], {val_loc}")
+                else:
+                    self._emit(f"    mov [rbp - {stack_offset - offset}], {val_loc}")
+            self._emit(f"    lea {dst}, [rbp - {stack_offset}]")
+            return
 
-        # Store initial field values
-        for i, field_val in enumerate(inst.operands):
-            val_loc = self._loc(field_val, alloc)
-            offset = i * 8
-            if val_loc.startswith("xmm"):
-                self._emit(f"    movsd [{dst} + {offset}], {val_loc}")
-            elif dst.startswith("["):
-                self._emit(f"    mov r11, {dst}")
-                self._emit(f"    mov [r11 + {offset}], {val_loc}")
-            else:
-                self._emit(f"    mov [{dst} + {offset}], {val_loc}")
+        array_size = n_fields * 8
+        aligned_size = (array_size + 15) & ~15
+        if aligned_size:
+            self._emit(f"    sub rsp, {aligned_size}")
+            for i, field_val in enumerate(inst.operands):
+                val_loc = self._loc(field_val, alloc)
+                offset = i * 8
+                if val_loc.startswith("xmm"):
+                    self._emit(f"    movsd [rsp + {offset}], {val_loc}")
+                elif val_loc.startswith("["):
+                    self._emit(f"    mov r11, {val_loc}")
+                    self._emit(f"    mov [rsp + {offset}], r11")
+                else:
+                    self._emit(f"    mov [rsp + {offset}], {val_loc}")
+
+        self._emit(f"    mov rdi, {size}")
+        self._emit(f"    mov rsi, {n_fields}")
+        self._emit(f"    mov rdx, rsp")
+        self._emit_call_aligned("runtime_struct_new")
+        if aligned_size:
+            self._emit(f"    add rsp, {aligned_size}")
+        if dst != "rax":
+            self._emit(f"    mov {dst}, rax")
 
     def _emit_call(self, inst: Instruction, alloc: RegAllocation):
         """Emit a function call using System V AMD64 ABI."""
@@ -1437,7 +1564,9 @@ class CodeGen:
     def _emit_epilogue(self, func: Function, alloc: RegAllocation):
         callee_save_size = len(alloc.used_callee_saved) * 8
         has_calls = self._func_has_calls(func)
-        has_spills = alloc.frame_size > 0
+        has_spills = alloc.frame_size > 0 or bool(
+            getattr(self, "_stack_alloc_offsets", {})
+        )
         has_callee_saves = callee_save_size > 0
 
         if has_spills:
@@ -1450,7 +1579,7 @@ class CodeGen:
             self._emit("    pop rbp")
             self._emit("    ret")
         elif has_callee_saves:
-            if has_calls:
+            if has_calls and (callee_save_size % 16) == 0:
                 self._emit("    add rsp, 8")
             for reg in reversed(alloc.used_callee_saved):
                 self._emit(f"    pop {reg}")
