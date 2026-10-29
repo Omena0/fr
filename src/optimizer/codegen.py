@@ -354,6 +354,226 @@ class CodeGen:
                     nxt.fused_compare = inst.op
                     nxt.fused_operands = list(inst.operands)
 
+    def _find_vector_loops(self, func: Function):
+        """Find simple list-reduction loops suitable for AVX2 vectorization."""
+        from optimizer.analysis import FunctionAnalysis
+
+        try:
+            loops = FunctionAnalysis(func).loops.loops
+        except Exception:
+            return {}
+        plans = {}
+        for loop in loops:
+            header = loop.header
+            term = header.terminator
+            if term is None or term.op != Op.BRANCH or len(term.target_blocks) < 2:
+                continue
+            if not term.operands:
+                continue
+            cond = term.operands[0]
+            ci = cond.defining_inst
+            if ci is None or ci.op != Op.LT or len(ci.operands) < 2:
+                continue
+            index_phi = ci.operands[0] if isinstance(ci.operands[0], Value) else None
+            length_val = ci.operands[1] if isinstance(ci.operands[1], Value) else None
+            if index_phi is None or length_val is None or length_val.defining_inst is None:
+                continue
+            if length_val.defining_inst.op != Op.LIST_LEN:
+                continue
+            if index_phi.defining_inst is None or index_phi.defining_inst.op != Op.PHI:
+                continue
+            list_val = length_val.defining_inst.operands[0]
+            if not isinstance(list_val, Value):
+                continue
+            if not header.phi_nodes or len(header.phi_nodes) > 3:
+                continue
+            acc_phi = None
+            for phi in header.phi_nodes:
+                if phi.result is not None and phi.result is not index_phi:
+                    acc_phi = phi
+                    break
+            if acc_phi is None or acc_phi.result is None:
+                continue
+            if exit_block := term.target_blocks[1]:
+                if exit_block.phi_nodes:
+                    continue
+
+            list_get = None
+            acc_next = None
+            index_next = None
+            for block in loop.blocks:
+                for inst in block.instructions:
+                    if inst.op == Op.LIST_GET and len(inst.operands) >= 2:
+                        if inst.operands[0] is list_val and inst.operands[1] is index_phi:
+                            list_get = inst
+                    if inst.op in (Op.ADD, Op.FADD) and len(inst.operands) >= 2:
+                        if acc_phi.result in inst.operands and inst.result is not None:
+                            acc_next = inst
+                    if inst.op == Op.ADD and len(inst.operands) >= 2:
+                        from optimizer.passes import _get_const_value
+                        if inst.operands[0] is index_phi:
+                            c = _get_const_value(inst.operands[1])
+                            if c == 1:
+                                index_next = inst
+            if list_get is None or acc_next is None or index_next is None:
+                continue
+
+            # Only allow the simple reduction body; reject other effects.
+            allowed = {
+                Op.PHI, Op.LIST_LEN, Op.LT, Op.LIST_GET, Op.ADD, Op.FADD,
+                Op.FMUL, Op.CONST_INT, Op.CONST_FLOAT, Op.JUMP, Op.BRANCH,
+            }
+            if any(inst.op not in allowed for block in loop.blocks for inst in block.instructions):
+                continue
+
+            contribution = acc_next.operands[0] if acc_next.operands[1] is acc_phi.result else acc_next.operands[1]
+            kind = None
+            if acc_next.op == Op.ADD and contribution is list_get.result:
+                kind = "sum_i"
+            elif acc_next.op == Op.FADD and contribution is list_get.result:
+                kind = "sum_f"
+            elif acc_next.op == Op.FADD and isinstance(contribution, Value) and contribution.defining_inst is not None:
+                mul = contribution.defining_inst
+                if mul.op == Op.FMUL and len(mul.operands) >= 2 and all(
+                    op is list_get.result for op in mul.operands
+                ):
+                    kind = "sumsq_f"
+            if kind is None:
+                continue
+            elem = list_val.type.elem_type if isinstance(list_val.type, ListType) else None
+            if kind == "sum_i" and elem != IRType.INT64:
+                continue
+            if kind in ("sum_f", "sumsq_f") and elem != IRType.FLOAT64:
+                continue
+            plans[header] = {
+                "header": header,
+                "exit": term.target_blocks[1],
+                "loop_blocks": list(loop.blocks),
+                "list": list_val,
+                "acc": acc_phi,
+                "kind": kind,
+            }
+        return plans
+
+    def _emit_vector_loop(self, func: Function, plan, alloc: RegAllocation):
+        header = plan["header"]
+        exit_block = plan["exit"]
+        list_loc = self._loc(plan["list"], alloc)
+        acc_loc = self._loc(plan["acc"].result, alloc)
+        kind = plan["kind"]
+        is_float = kind in ("sum_f", "sumsq_f")
+        asm_name = self._asm_func_name(func.name)
+        vec = self._new_label("vec")
+        scalar = self._new_label("vec_scalar")
+        horiz = self._new_label("vec_done")
+        done = self._new_label("vec_exit")
+
+        self._emit(f".{asm_name}_{header.label}:")
+        self._emit("    sub rsp, 560")
+        for i in range(16):
+            self._emit(f"    vmovups [rsp + {i * 32}], ymm{i}")
+        self._emit("    mov [rsp + 512], rax")
+        self._emit("    mov [rsp + 520], r10")
+        self._emit("    mov [rsp + 528], r11")
+        self._emit("    mov [rsp + 536], rdx")
+
+        # Preserve the initial accumulator value.
+        if is_float:
+            if acc_loc.startswith("xmm"):
+                self._emit(f"    movsd [rsp + 544], {acc_loc}")
+            else:
+                self._emit(f"    movq xmm15, {acc_loc}" if acc_loc.startswith("[") else f"    movq xmm15, {acc_loc}")
+                self._emit("    movsd [rsp + 544], xmm15")
+            self._emit("    vxorpd ymm0, ymm0, ymm0")
+            self._emit("    vxorpd xmm2, xmm2, xmm2")
+        else:
+            if acc_loc.startswith("["):
+                self._emit(f"    mov rax, {acc_loc}")
+                self._emit("    mov [rsp + 544], rax")
+            else:
+                self._emit(f"    mov [rsp + 544], {acc_loc}")
+            self._emit("    vpxor ymm0, ymm0, ymm0")
+            self._emit("    vpxor xmm2, xmm2, xmm2")
+
+        if list_loc.startswith("["):
+            self._emit(f"    mov r11, {list_loc}")
+        else:
+            self._emit(f"    mov r11, {list_loc}")
+        self._emit("    mov r10, [r11 + 8]")
+        self._emit("    mov r11, [r11]")
+        self._emit("    xor eax, eax")
+        self._emit(f"{vec}:")
+        self._emit("    lea rdx, [rax + 4]")
+        self._emit("    cmp rdx, r10")
+        self._emit(f"    ja {scalar}")
+        self._emit("    vmovupd ymm1, [r11 + rax * 8]")
+        if kind == "sumsq_f":
+            self._emit("    vmulpd ymm1, ymm1, ymm1")
+        self._emit(
+            "    vpaddq ymm0, ymm0, ymm1" if not is_float else "    vaddpd ymm0, ymm0, ymm1"
+        )
+        self._emit("    add rax, 4")
+        self._emit(f"    jmp {vec}")
+        self._emit(f"{scalar}:")
+        self._emit("    cmp rax, r10")
+        self._emit(f"    jae {horiz}")
+        if is_float:
+            if kind == "sumsq_f":
+                self._emit("    vmovsd xmm3, [r11 + rax * 8]")
+                self._emit("    vmulsd xmm3, xmm3, xmm3")
+                self._emit("    vaddsd xmm2, xmm2, xmm3")
+            else:
+                self._emit("    vaddsd xmm2, xmm2, [r11 + rax * 8]")
+        else:
+            self._emit("    mov rdx, [r11 + rax * 8]")
+            self._emit("    vmovq xmm3, rdx")
+            self._emit("    vpaddq xmm2, xmm2, xmm3")
+        self._emit("    inc rax")
+        self._emit(f"    jmp {scalar}")
+        self._emit(f"{horiz}:")
+        if is_float:
+            self._emit("    vextractf128 xmm1, ymm0, 1")
+            self._emit("    vaddpd xmm0, xmm0, xmm1")
+            self._emit("    vshufpd xmm1, xmm0, xmm0, 1")
+            self._emit("    vaddpd xmm0, xmm0, xmm1")
+            self._emit("    vaddsd xmm0, xmm0, xmm2")
+            self._emit("    vaddsd xmm0, xmm0, [rsp + 544]")
+            self._emit("    movsd [rsp + 552], xmm0")
+        else:
+            self._emit("    vextracti128 xmm1, ymm0, 1")
+            self._emit("    vpaddq xmm0, xmm0, xmm1")
+            self._emit("    vpshufd xmm1, xmm0, 0x4E")
+            self._emit("    vpaddq xmm0, xmm0, xmm1")
+            self._emit("    vmovq rax, xmm0")
+            self._emit("    vmovq rdx, xmm2")
+            self._emit("    add rax, rdx")
+            self._emit("    add rax, [rsp + 544]")
+            self._emit("    mov [rsp + 552], rax")
+
+        for i in range(16):
+            self._emit(f"    vmovups ymm{i}, [rsp + {i * 32}]")
+        self._emit("    mov rax, [rsp + 512]")
+        self._emit("    mov r10, [rsp + 520]")
+        self._emit("    mov r11, [rsp + 528]")
+        self._emit("    mov rdx, [rsp + 536]")
+        self._emit("    vzeroupper")
+        if is_float:
+            if acc_loc.startswith("xmm"):
+                self._emit(f"    movsd {acc_loc}, [rsp + 552]")
+            elif acc_loc.startswith("["):
+                self._emit(f"    movsd xmm15, [rsp + 552]")
+                self._emit(f"    movsd {acc_loc}, xmm15")
+            else:
+                self._emit(f"    movq {acc_loc}, [rsp + 552]")
+        else:
+            if acc_loc.startswith("["):
+                self._emit(f"    mov rdx, [rsp + 552]")
+                self._emit(f"    mov {acc_loc}, rdx")
+            else:
+                self._emit(f"    mov {acc_loc}, [rsp + 552]")
+        self._emit("    add rsp, 560")
+        self._emit(f"    jmp .{asm_name}_{exit_block.label}")
+
     def _emit_function(self, func: Function):
         """Emit a complete function with prologue, body, epilogue."""
         self._fold_compare_branches(func)
@@ -428,7 +648,16 @@ class CodeGen:
         if func.lookup_table and func.params:
             lookup_ret = self._emit_lookup_prelude(func, alloc)
 
+        vector_plans = self._find_vector_loops(func)
+        skipped: set[int] = set()
+        for plan in vector_plans.values():
+            for lb in plan["loop_blocks"]:
+                skipped.add(id(lb))
         for block in func.blocks:
+            if id(block) in skipped:
+                if block in vector_plans:
+                    self._emit_vector_loop(func, vector_plans[block], alloc)
+                continue
             self._emit_block(func, block, alloc)
 
         if lookup_ret is not None:
@@ -1962,7 +2191,9 @@ class CodeGen:
     def _emit_int_move(self, src: str, dst: str):
         if src == dst:
             return
-        if src.startswith("[") and dst.startswith("["):
+        if src.startswith("xmm"):
+            self._emit(f"    movq {dst}, {src}")
+        elif src.startswith("[") and dst.startswith("["):
             self._emit(f"    mov r11, {src}")
             self._emit(f"    mov {dst}, r11")
         else:

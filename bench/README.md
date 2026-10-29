@@ -2,6 +2,19 @@
 
 The benchmarks are ordinary Fr programs and are not part of the test suite.
 
+## Vector reductions
+
+`vector_bench.fr` builds 100,000-element integer and float lists and runs
+integer sum, float sum, and float sum-of-squares reductions. The native backend
+recognizes these loops and emits AVX2 vector loops with a scalar remainder,
+while the Python/C VMs run the same source as scalar loops.
+
+```sh
+python3 src/cli.py compile bench/vector_bench.fr -o /tmp/vec.bc
+python3 src/cli.py native /tmp/vec.bc -o /tmp/vec -O3
+time /tmp/vec
+```
+
 ## N-body
 
 `nbody.fr` is the correctness-sized run (1,000 steps). `nbody_bench.fr` builds

@@ -65,6 +65,19 @@ branch containing side effects that is impossible for this call disappears from
 the clone. If the clone collapses to one block, the normal inliner merges it
 into the caller, so the caller jumps directly past the eliminated checks.
 
+## Autovectorization
+
+The native backend recognizes simple list-reduction loops (`sum`, floating sum,
+and float sum-of-squares) and emits an AVX2 loop with four lanes and a scalar
+remainder. Zero-length lists, non-multiple lengths and negative index edge
+cases are handled by the same generated code. The vector loop is emitted only
+when the loop has no side effects other than reading the list and updating the
+reduction accumulator.
+
+The generated code preserves all GPR/XMM state, executes `vzeroupper` before
+returning to scalar code, and falls back to the normal path for anything that
+does not match the reduction pattern.
+
 ## Pure constant-call folding and LICM
 
 Calls to pure functions whose arguments are all compile-time constants are

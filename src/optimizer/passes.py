@@ -219,6 +219,12 @@ def _try_simplify(inst: Instruction) -> bool | None:
     op = inst.op
     ops = inst.operands
 
+    # Redundant conversions (mostly exposed by list element type propagation).
+    if op in (Op.FLOAT_TO_INT, Op.INT_TO_FLOAT, Op.TO_BOOL) and ops and inst.result is not None:
+        if ops[0].type == inst.result.type:
+            _replace_with_value(inst, ops[0])
+            return True
+
     # x + 0 → x
     if op == Op.ADD and len(ops) == 2:
         c1 = _get_const_value(ops[1])
@@ -1666,7 +1672,7 @@ def run_passes(
 
     # Run passes in a fixed-point loop
     for iteration in range(cfg.max_iterations):
-        changed = False
+        changed = propagate_list_types(module)
 
         for func in module.functions:
             if func.is_extern:
