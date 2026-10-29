@@ -30,6 +30,11 @@ void* calloc(size_t count, size_t size);
 void runtime_error_at(const char* message, int line);
 void runtime_list_append_int(RuntimeList* list, int64_t value);
 static void fr_int64_to_buf(int64_t value, char* buffer);
+void runtime_retain(void* ptr);
+void runtime_release(void* ptr);
+void runtime_scope_push(void);
+void runtime_scope_pop(void);
+void runtime_scope_unwind(int64_t depth);
 
 /* ------------------------------------------------------------------------- */
 /* Syscalls (implemented in syscall.S)                                        */
@@ -556,17 +561,171 @@ void* calloc(size_t count, size_t size) {
     return ptr;
 }
 
-void* runtime_alloc(int64_t size) { return malloc((size_t)size); }
-void runtime_free(void* ptr) { free(ptr); }
+/*
+ * Managed objects
+ * ---------------
+ * Structs and lists carry a header so the runtime can use reference counting
+ * with deterministic, scope-based cleanup. Every allocation is registered in
+ * the current function's allocation scope. Escaping values are retained by the
+ * operation that makes them escape (field/global/list store or return); when
+ * the owning function exits its scope drops one reference from every object it
+ * created. Objects still referenced elsewhere survive, unreferenced ones are
+ * freed immediately.
+ */
+#define FR_OBJ_MAGIC 0x46524F424A303031ULL /* "FROBJ001" */
+#define FR_OBJ_STRUCT 1
+#define FR_OBJ_LIST 2
+#define FR_OBJ_SET 3
+#define FR_OBJ_RAW 4
+
+typedef struct FrObjHeader {
+    uint64_t magic;
+    int64_t refcount;
+    int64_t kind;
+    int64_t aux;             /* struct: managed-field mask */
+    struct FrObjHeader* next_scope;
+    struct FrObjHeader* prev_scope;
+    int64_t scope_id;
+    uint64_t reserved;
+} FrObjHeader;
+
+#define FR_MAX_SCOPES 1024
+FrObjHeader* fr_scope_heads[FR_MAX_SCOPES];
+int64_t fr_scope_depth = 0;
+
+static bool fr_obj_valid(void* ptr) {
+    if (!ptr || !heap_base) return false;
+    unsigned char* p = (unsigned char*)ptr;
+    if (p < heap_base + sizeof(FrObjHeader) || p >= heap_cur) return false;
+    FrObjHeader* header = ((FrObjHeader*)p) - 1;
+    return header->magic == FR_OBJ_MAGIC;
+}
+
+static void* fr_obj_alloc(size_t size, int kind, int64_t aux) {
+    FrObjHeader* header = (FrObjHeader*)malloc(sizeof(FrObjHeader) + size);
+    if (!header) return NULL;
+    memset(header, 0, sizeof(FrObjHeader));
+    header->magic = FR_OBJ_MAGIC;
+    header->refcount = 1;
+    header->kind = kind;
+    header->aux = aux;
+    header->next_scope = NULL;
+    header->prev_scope = NULL;
+    header->scope_id = -1;
+    if (fr_scope_depth > 0) {
+        int depth = fr_scope_depth - 1;
+        header->scope_id = depth;
+        header->next_scope = fr_scope_heads[depth];
+        if (fr_scope_heads[depth]) fr_scope_heads[depth]->prev_scope = header;
+        fr_scope_heads[depth] = header;
+    }
+    return (void*)(header + 1);
+}
+
+void runtime_retain(void* ptr) {
+    if (!fr_obj_valid(ptr)) return;
+    FrObjHeader* header = ((FrObjHeader*)ptr) - 1;
+    header->refcount++;
+}
+
+/* Remove an object from the current scope without freeing it. Used when a
+ * store/return transfers the current scope's reference to a new owner. */
+static void runtime_scope_forget(void* ptr) {
+    if (!fr_obj_valid(ptr) || fr_scope_depth <= 0) return;
+    FrObjHeader* header = ((FrObjHeader*)ptr) - 1;
+    int depth = fr_scope_depth - 1;
+    if (header->scope_id != depth) return;
+
+    if (header->prev_scope) {
+        header->prev_scope->next_scope = header->next_scope;
+    } else if (fr_scope_heads[depth] == header) {
+        fr_scope_heads[depth] = header->next_scope;
+    }
+    if (header->next_scope) {
+        header->next_scope->prev_scope = header->prev_scope;
+    }
+    header->next_scope = NULL;
+    header->prev_scope = NULL;
+    header->scope_id = -1;
+    runtime_release(ptr);
+}
+
+void runtime_retain_transfer(void* ptr) {
+    runtime_retain(ptr);
+    runtime_scope_forget(ptr);
+}
+
+void runtime_scope_pop(void) {
+    if (fr_scope_depth <= 0) return;
+    int depth = --fr_scope_depth;
+    FrObjHeader* header = fr_scope_heads[depth];
+    fr_scope_heads[depth] = NULL;
+    while (header) {
+        FrObjHeader* next = header->next_scope;
+        header->next_scope = NULL;
+        runtime_release((void*)(header + 1));
+        header = next;
+    }
+}
+
+void runtime_scope_unwind(int64_t depth) {
+    if (depth < 0) depth = 0;
+    while (fr_scope_depth > depth) runtime_scope_pop();
+}
+
+void* runtime_alloc(int64_t size) {
+    if (size <= 0) size = 8;
+    return fr_obj_alloc((size_t)size, FR_OBJ_RAW, 0);
+}
+
+void runtime_free(void* ptr) { runtime_release(ptr); }
 void* runtime_realloc(void* ptr, int64_t size) { return realloc(ptr, (size_t)size); }
 
-void* runtime_struct_new(int64_t size, int64_t count, int64_t* fields) {
-    char* memory = (char*)malloc((size_t)size);
+void* runtime_struct_new(int64_t size, int64_t count, int64_t* fields,
+                         int64_t managed_mask) {
+    char* memory = (char*)fr_obj_alloc((size_t)size, FR_OBJ_STRUCT, managed_mask);
     if (!memory) return NULL;
     if (fields && count > 0) {
         memcpy(memory, fields, (size_t)count * sizeof(int64_t));
     }
+    for (int i = 0; i < 64; i++) {
+        if (managed_mask & ((int64_t)1 << i)) {
+            runtime_retain(((void**)memory)[i]);
+            runtime_scope_forget(((void**)memory)[i]);
+        }
+    }
     return memory;
+}
+
+void runtime_store_field(void* struct_ptr, int64_t value, int64_t field_index,
+                         int64_t managed) {
+    if (!struct_ptr) return;
+    int64_t* fields = (int64_t*)struct_ptr;
+    if (managed) {
+        if (fields[field_index] == value) return;
+        runtime_retain((void*)value);
+        if (fr_obj_valid(struct_ptr)) {
+            FrObjHeader* header = ((FrObjHeader*)struct_ptr) - 1;
+            if (header->kind == FR_OBJ_STRUCT) runtime_scope_forget((void*)value);
+        }
+        runtime_release((void*)fields[field_index]);
+    }
+    fields[field_index] = value;
+}
+
+void runtime_store_global(int64_t* slot, int64_t value, int64_t managed) {
+    if (!slot) return;
+    if (managed) {
+        if (*slot == value) return;
+        runtime_retain((void*)value);
+        runtime_scope_forget((void*)value);
+        runtime_release((void*)*slot);
+    }
+    *slot = value;
+}
+
+void runtime_ptr_store(int64_t* slot, int64_t value, int64_t managed) {
+    runtime_store_global(slot, value, managed);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -902,7 +1061,7 @@ double runtime_str_to_float(const char* str) {
 /* ------------------------------------------------------------------------- */
 
 RuntimeList* runtime_list_new(void) {
-    RuntimeList* list = (RuntimeList*)malloc(sizeof(RuntimeList));
+    RuntimeList* list = (RuntimeList*)fr_obj_alloc(sizeof(RuntimeList), FR_OBJ_LIST, 0);
     if (!list) return NULL;
     list->capacity = 8;
     list->length = 0;
@@ -915,8 +1074,18 @@ RuntimeList* runtime_list_new(void) {
     return list;
 }
 
-void runtime_list_append_int(RuntimeList* list, int64_t value) {
+RuntimeList* runtime_list_new_typed(int64_t elem_type) {
+    RuntimeList* list = runtime_list_new();
+    if (list) list->elem_type = (int)elem_type;
+    return list;
+}
+
+static void fr_list_append_raw(RuntimeList* list, int64_t value, bool retain) {
     if (!list) return;
+    if (retain) {
+        runtime_retain((void*)value);
+        runtime_scope_forget((void*)value);
+    }
     if (list->length >= list->capacity) {
         int64_t new_cap = list->capacity ? list->capacity * 2 : 8;
         int64_t* items = (int64_t*)realloc(
@@ -926,6 +1095,16 @@ void runtime_list_append_int(RuntimeList* list, int64_t value) {
         list->capacity = new_cap;
     }
     list->items[list->length++] = value;
+}
+
+void runtime_list_append_int(RuntimeList* list, int64_t value) {
+    fr_list_append_raw(list, value, list && list->elem_type == 4);
+}
+
+void runtime_list_append_managed(RuntimeList* list, int64_t value) {
+    if (!list) return;
+    if (list->elem_type < 0 || list->elem_type == 0) list->elem_type = 4;
+    fr_list_append_raw(list, value, true);
 }
 
 int64_t runtime_list_get_int(RuntimeList* list, int64_t index) {
@@ -939,7 +1118,19 @@ void runtime_list_set_int(RuntimeList* list, int64_t index, int64_t value) {
     if (!list) return;
     if (index < 0) index += list->length;
     if (index < 0 || index >= list->length) return;
+    if (list->elem_type == 4) {
+        if (list->items[index] == value) return;
+        runtime_retain((void*)value);
+        runtime_scope_forget((void*)value);
+        runtime_release((void*)list->items[index]);
+    }
     list->items[index] = value;
+}
+
+void runtime_list_set_managed(RuntimeList* list, int64_t index, int64_t value) {
+    if (!list) return;
+    if (list->elem_type < 0 || list->elem_type == 0) list->elem_type = 4;
+    runtime_list_set_int(list, index, value);
 }
 
 int64_t runtime_list_len(RuntimeList* list) { return list ? list->length : 0; }
@@ -1025,6 +1216,13 @@ void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value,
     list->items[index] = value;
 }
 
+void runtime_list_set_managed_at(RuntimeList* list, int64_t index, int64_t value,
+                                 int line) {
+    if (!list) return;
+    if (list->elem_type < 0 || list->elem_type == 0) list->elem_type = 4;
+    runtime_list_set_int_at(list, index, value, line);
+}
+
 RuntimeList* runtime_list_from_array(int64_t* values, int64_t count) {
     RuntimeList* list = runtime_list_new();
     if (!list) return NULL;
@@ -1039,7 +1237,15 @@ RuntimeList* runtime_list_from_array(int64_t* values, int64_t count) {
 RuntimeList* runtime_list_from_array_typed(int64_t* values, int64_t count,
                                             int64_t elem_type) {
     RuntimeList* list = runtime_list_from_array(values, count);
-    if (list) list->elem_type = (int)elem_type;
+    if (list) {
+        list->elem_type = (int)elem_type;
+        if (elem_type == 4) {
+            for (int64_t i = 0; i < count; i++) {
+                runtime_retain((void*)values[i]);
+                runtime_scope_forget((void*)values[i]);
+            }
+        }
+    }
     return list;
 }
 
@@ -1124,7 +1330,7 @@ typedef struct {
 } RuntimeSet;
 
 RuntimeSet* runtime_set_new(void) {
-    RuntimeSet* set = (RuntimeSet*)malloc(sizeof(RuntimeSet));
+    RuntimeSet* set = (RuntimeSet*)fr_obj_alloc(sizeof(RuntimeSet), FR_OBJ_SET, 0);
     if (!set) return NULL;
     set->capacity = 16;
     set->length = 0;
@@ -1144,6 +1350,10 @@ void runtime_set_add(RuntimeSet* set, int64_t value) {
     if (set->elem_type == -1) set->elem_type = value > 0x100000 ? 1 : 0;
     for (int64_t i = 0; i < set->length; i++) {
         if (runtime_set_equal(set, set->items[i], value)) return;
+    }
+    if (set->elem_type == 4) {
+        runtime_retain((void*)value);
+        runtime_scope_forget((void*)value);
     }
     if (set->length >= set->capacity) {
         int64_t new_cap = set->capacity * 2;
@@ -1165,6 +1375,7 @@ void runtime_set_remove(RuntimeSet* set, int64_t value) {
     if (!set) return;
     for (int64_t i = 0; i < set->length; i++) {
         if (runtime_set_equal(set, set->items[i], value)) {
+            if (set->elem_type == 4) runtime_release((void*)set->items[i]);
             for (int64_t j = i; j + 1 < set->length; j++)
                 set->items[j] = set->items[j + 1];
             set->length--;
@@ -1227,6 +1438,7 @@ void int64_to_str(int64_t value, char* buffer);
 typedef struct {
     char* exc_type;
     uint64_t jump_buffer[8];
+    int64_t scope_depth;
 } RuntimeExceptionHandler;
 
 static RuntimeExceptionHandler exception_handlers[MAX_EXCEPTION_HANDLERS];
@@ -1241,6 +1453,7 @@ void runtime_error_at(const char* message, int line) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
         if (handler->exc_type[0] == '\0' ||
             strcmp(handler->exc_type, exc_type) == 0) {
+            runtime_scope_unwind(handler->scope_depth);
             longjmp(handler->jump_buffer, 1);
         }
     }
@@ -1266,6 +1479,7 @@ void* runtime_exception_push(const char* exc_type) {
     }
     RuntimeExceptionHandler* handler = &exception_handlers[exception_handler_count];
     handler->exc_type = (char*)(exc_type ? exc_type : "");
+    handler->scope_depth = fr_scope_depth;
     return (void*)(int64_t)exception_handler_count++;
 }
 
@@ -1286,6 +1500,7 @@ void runtime_exception_raise(const char* exc_type, const char* message) {
         RuntimeExceptionHandler* handler = &exception_handlers[i];
         if (handler->exc_type[0] == '\0' ||
             strcmp(handler->exc_type, exc_type) == 0) {
+            runtime_scope_unwind(handler->scope_depth);
             longjmp(handler->jump_buffer, 1);
         }
     }
@@ -1306,6 +1521,7 @@ void runtime_exception_raise_at(const char* exc_type, const char* message,
         RuntimeExceptionHandler* handler = &exception_handlers[i];
         if (handler->exc_type[0] == '\0' ||
             strcmp(handler->exc_type, exc_type) == 0) {
+            runtime_scope_unwind(handler->scope_depth);
             longjmp(handler->jump_buffer, 1);
         }
     }
@@ -1478,9 +1694,46 @@ void int64_to_str(int64_t value, char* buffer) {
     fr_int64_to_buf(value, buffer);
 }
 
+static void fr_release_fields(char* memory, int64_t mask) {
+    for (int i = 0; i < 64; i++) {
+        if (mask & ((int64_t)1 << i)) {
+            runtime_release(((void**)memory)[i]);
+        }
+    }
+}
+
+void runtime_release(void* ptr) {
+    if (!fr_obj_valid(ptr)) return;
+    FrObjHeader* header = ((FrObjHeader*)ptr) - 1;
+    if (--header->refcount > 0) return;
+    header->magic = 0;
+
+    if (header->kind == FR_OBJ_STRUCT) {
+        fr_release_fields((char*)(header + 1), header->aux);
+    } else if (header->kind == FR_OBJ_LIST) {
+        RuntimeList* list = (RuntimeList*)(header + 1);
+        if (list->elem_type == 4) {
+            for (int64_t i = 0; i < list->length; i++) {
+                runtime_release((void*)list->items[i]);
+            }
+        }
+        free(list->items);
+    } else if (header->kind == FR_OBJ_SET) {
+        RuntimeSet* set = (RuntimeSet*)(header + 1);
+        if (set->elem_type == 4) {
+            for (int64_t i = 0; i < set->length; i++) {
+                runtime_release((void*)set->items[i]);
+            }
+        }
+        free(set->items);
+    }
+    free(header);
+}
+
 void runtime_init(void) {
     init_heap();
     runtime_exception_init();
+    fr_scope_depth = 0;
 }
 
 int64_t _fr_global_vars[256] = {0};

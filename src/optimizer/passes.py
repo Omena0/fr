@@ -35,6 +35,8 @@ from optimizer.ir import (
 )
 from optimizer.analysis import DomTree, LoopInfo, LivenessInfo, FunctionAnalysis
 from optimizer.types import EscapeAnalysis
+from optimizer.config import OptimizerConfig
+from optimizer.ranges import analyze_module_ranges, range_fold_branches
 
 # ── SCCP: Sparse Conditional Constant Propagation ───────────────
 
@@ -577,6 +579,12 @@ def merge_linear_blocks(func: Function) -> bool:
             a.successors = list(b.successors)
             for succ in a.successors:
                 succ.predecessors = [a if p is b else p for p in succ.predecessors]
+                # PHIs are indexed by predecessor block; re-point entries that
+                # referred to the merged block.
+                for phi in succ.phi_nodes:
+                    phi.target_blocks = [
+                        a if pred is b else pred for pred in phi.target_blocks
+                    ]
             func.blocks.remove(b)
             changed = True
             merged = True
@@ -977,59 +985,106 @@ def _const_info(value: Value):
     return None
 
 
+def _arg_spec(value: Value, range_hint, config: OptimizerConfig):
+    """Describe what a call site knows about one argument.
+
+    Specs are ('const', type, value), ('range', lo, hi) or ('any',).
+    """
+    info = _const_info(value)
+    if info is not None:
+        return ("const", info[0], info[1])
+    r = range_hint
+    if r is not None:
+        lo, hi = int(r[0]), int(r[1])
+        if hi - lo <= config.max_specialized_range:
+            if lo == hi:
+                return ("const", IRType.INT64, lo)
+            return ("range", lo, hi)
+    return ("any",)
+
+
+def _spec_key(spec) -> tuple:
+    if spec[0] == "const":
+        return ("c", str(spec[1]), repr(spec[2]))
+    if spec[0] == "range":
+        return ("r", spec[1], spec[2])
+    return ("u",)
+
+
 def _clone_specialized(
-    module: Module, target: Function, const_args: list, new_name: str
+    module: Module,
+    target: Function,
+    specs: list,
+    new_name: str,
+    config: OptimizerConfig | None = None,
 ) -> Function:
-    """Clone *target* with parameter uses replaced by constant arguments."""
-    clone = Function(new_name, target.params, target.return_type)
+    """Clone *target* with call-site constants and range constraints."""
+    cfg = config or OptimizerConfig.from_env()
+    params = [Param(p.name, p.type, i) for i, p in enumerate(target.params)]
+    clone = Function(new_name, params, target.return_type)
     clone.source_file = target.source_file
     clone.local_names = dict(target.local_names)
+
+    # Constant specializations get a tiny synthetic entry block. Putting the
+    # constants in the cloned entry would shift instruction indices and break
+    # PHI/target alignment.
+    has_consts = any(spec[0] == "const" for spec in specs)
+    const_entry = None
+    if has_consts:
+        const_entry = clone.add_block(BasicBlock("__spec_entry"))
 
     block_map: dict[int, BasicBlock] = {}
     for old_block in target.blocks:
         block_map[id(old_block)] = clone.add_block(BasicBlock(old_block.label))
 
     value_map: dict[int, Value] = {}
+    for old_param, new_param, spec in zip(target.params, params, specs):
+        if spec[0] == "const":
+            _, ctype, cvalue = spec
+            inst = Instruction(Op.CONST_INT, [], ctype, None)
+            if ctype == IRType.INT64:
+                inst.imm_int = int(cvalue)
+            elif ctype == IRType.FLOAT64:
+                inst.imm_float = float(cvalue)
+            elif ctype == IRType.BOOL:
+                inst.imm_int = 1 if cvalue else 0
+            elif ctype == IRType.STRING:
+                inst.imm_str = str(cvalue)
+                if cvalue not in module.string_constants:
+                    module.string_constants.append(cvalue)
+            inst.block = const_entry
+            const_entry.instructions.append(inst)
+            if inst.result:
+                value_map[old_param.id] = inst.result
+                if ctype in (IRType.INT64, IRType.BOOL):
+                    clone.param_ranges[new_param.id] = (
+                        (int(cvalue), int(cvalue))
+                        if ctype == IRType.INT64
+                        else ((1, 1) if cvalue else (0, 0))
+                    )
+        else:
+            value_map[old_param.id] = new_param
+            if spec[0] == "range":
+                clone.param_ranges[new_param.id] = (spec[1], spec[2])
 
-    # Create constant values in the clone entry block.
-    entry = clone.entry
-    if entry is None:
-        entry = clone.add_block(BasicBlock("entry"))
-    insert_at = 0
-    while insert_at < len(entry.instructions) and entry.instructions[insert_at].op == Op.PHI:
-        insert_at += 1
-    for param, (ctype, cvalue) in zip(target.params, const_args):
-        inst = Instruction(Op.CONST_INT, [], ctype, None)
-        if ctype == IRType.INT64:
-            inst.imm_int = int(cvalue)
-        elif ctype == IRType.FLOAT64:
-            inst.imm_float = float(cvalue)
-        elif ctype == IRType.BOOL:
-            inst.imm_int = 1 if cvalue else 0
-        elif ctype == IRType.STRING:
-            inst.imm_str = str(cvalue)
-            if cvalue not in module.string_constants:
-                module.string_constants.append(cvalue)
-        inst.block = entry
-        entry.instructions.insert(insert_at, inst)
-        insert_at += 1
-        if inst.result:
-            value_map[param.id] = inst.result
+    if const_entry is not None and target.entry is not None:
+        target_entry = block_map[id(target.entry)]
+        jump = Instruction(Op.JUMP, [], None, None)
+        jump.imm_str = target_entry.label
+        jump.target_blocks = [target_entry]
+        jump.block = const_entry
+        const_entry.instructions.append(jump)
 
-    # Clone instructions.
+    # Two-pass clone: first allocate every result value, then rewrite
+    # operands. PHIs reference values defined later in the function, so a
+    # single pass would leave stale cross-function references.
     inst_map: dict[int, Instruction] = {}
     for old_block in target.blocks:
         new_block = block_map[id(old_block)]
         for old_inst in old_block.instructions:
-            operands = []
-            for operand in old_inst.operands:
-                if isinstance(operand, Value) and operand.id in value_map:
-                    operands.append(value_map[operand.id])
-                else:
-                    operands.append(operand)
             new_inst = Instruction(
                 old_inst.op,
-                operands,
+                [],
                 old_inst.result.type if old_inst.result else None,
                 old_inst.source_line,
             )
@@ -1042,17 +1097,23 @@ def _clone_specialized(
             if old_inst.result and new_inst.result:
                 value_map[old_inst.result.id] = new_inst.result
 
-    # Resolve block targets now that every block exists.
-    for old_inst, new_inst in inst_map.items():
-        old = next(
-            (i for i in target.all_instructions() if id(i) == old_inst), None
-        )
-        if old is not None and old.target_blocks:
-            new_inst.target_blocks = [
-                block_map[id(b)] for b in old.target_blocks if id(b) in block_map
+    for old_block in target.blocks:
+        new_block = block_map[id(old_block)]
+        for old_inst, new_inst in zip(old_block.instructions, new_block.instructions):
+            new_inst.operands = [
+                value_map.get(operand.id, operand)
+                if isinstance(operand, Value)
+                else operand
+                for operand in old_inst.operands
             ]
+            for operand in new_inst.operands:
+                if isinstance(operand, Value) and new_inst not in operand.uses:
+                    operand.uses.append(new_inst)
+            if old_inst.target_blocks:
+                new_inst.target_blocks = [
+                    block_map[id(b)] for b in old_inst.target_blocks if id(b) in block_map
+                ]
 
-    # Rebuild CFG edges.
     for block in clone.blocks:
         block.predecessors = []
         block.successors = []
@@ -1065,27 +1126,32 @@ def _clone_specialized(
             if block not in succ.predecessors:
                 succ.predecessors.append(block)
 
-    # Fold the newly exposed constants and prune unreachable branches.
+    # Fold the newly exposed constants/ranges and prune unreachable branches.
     for _ in range(4):
         c1 = sccp(clone)
         c2 = algebraic_simplify(clone)
         c3 = simplify_branches(clone)
-        c4 = remove_unreachable_blocks(clone)
-        c5 = merge_linear_blocks(clone)
-        c6 = dce(clone)
-        if not (c1 or c2 or c3 or c4 or c5 or c6):
+        c4 = range_fold_branches(clone, clone.param_ranges, cfg)
+        c5 = remove_unreachable_blocks(clone)
+        c6 = merge_linear_blocks(clone)
+        c7 = dce(clone)
+        if not (c1 or c2 or c3 or c4 or c5 or c6 or c7):
             break
 
     return clone
 
 
-def specialize_calls(module: Module, max_body: int = 80) -> bool:
-    """Specialize calls to multi-block functions with constant arguments.
+def specialize_calls(
+    module: Module, config: OptimizerConfig | None = None
+) -> bool:
+    """Create a call-specific version of small functions.
 
-    The clone has its parameters replaced by the call-site constants, then
-    SCCP and branch pruning run on it. This makes otherwise-impure functions
-    pure for a specific call when the side-effecting branch is unreachable.
+    Specialization uses both constant arguments and ranges inferred by the
+    interprocedural analysis. Dead branches and their side effects disappear
+    from each clone, and single-block clones are subsequently inlined by the
+    normal inliner (effectively merging the function into its caller).
     """
+    cfg = config or OptimizerConfig.from_env()
     changed = False
     cache: dict[tuple, str] = {}
     specializations = 0
@@ -1098,31 +1164,31 @@ def specialize_calls(module: Module, max_body: int = 80) -> bool:
                 target = module.get_function(inst.imm_str)
                 if target is None or target is func or target.is_extern:
                     continue
-                # Already-specialized clones are terminal: re-specializing
-                # them each fixed-point iteration causes name explosions.
                 if "__spec_" in target.name:
                     continue
                 if len(target.blocks) < 2:
                     continue
-                if sum(len(b.instructions) for b in target.blocks) > max_body:
+                if sum(len(b.instructions) for b in target.blocks) > cfg.max_specialized_body:
                     continue
                 if len(inst.operands) != len(target.params):
                     continue
-                const_args = [_const_info(v) for v in inst.operands]
-                if any(c is None for c in const_args):
+
+                hint_ranges = inst.arg_ranges or [None] * len(inst.operands)
+                specs = [
+                    _arg_spec(arg, hint_ranges[i] if i < len(hint_ranges) else None, cfg)
+                    for i, arg in enumerate(inst.operands)
+                ]
+                if all(spec[0] == "any" for spec in specs):
                     continue
 
-                key = (
-                    target.name,
-                    tuple((str(t), repr(v)) for t, v in const_args),  # type: ignore[misc]
-                )
+                key = (target.name, tuple(_spec_key(spec) for spec in specs))
                 new_name = cache.get(key)
                 if new_name is None:
-                    if specializations >= _SPECIALIZATION_LIMIT:
+                    if specializations >= cfg.max_specializations:
                         continue
                     specializations += 1
                     new_name = f"{target.name}__spec_{specializations}"
-                    clone = _clone_specialized(module, target, const_args, new_name)
+                    clone = _clone_specialized(module, target, specs, new_name, cfg)
                     module.add_function(clone)
                     cache[key] = new_name
                 if inst.imm_str != new_name:
@@ -1162,10 +1228,129 @@ def remove_unused_functions(module: Module) -> bool:
     return len(module.functions) != before
 
 
+def _is_pure_function(func: Function) -> bool:
+    if func.is_extern:
+        return False
+    for inst in func.all_instructions():
+        if inst.op in _IMPURE_OPS:
+            return False
+        if inst.op in (Op.CALL, Op.CALL_BUILTIN) and not inst.pure_call:
+            return False
+        if inst.op in (Op.CALL_EXTERN, Op.TRY_BEGIN, Op.TRY_END):
+            return False
+    return True
+
+
+def build_lookup_tables(
+    module: Module, config: OptimizerConfig | None = None
+) -> bool:
+    """Precompute hot results of pure scalar functions.
+
+    Each use site contributes its constant value or inferred range. Those
+    values are simulated at compile time (with a hard step/time budget) and
+    embedded in read-only memory as a small lookup table checked on entry.
+    Misses fall through to the normal function body, so this optimization is
+    always semantics-preserving.
+    """
+    from optimizer.puresim import evaluate_function, _UNKNOWN
+
+    cfg = config or OptimizerConfig.from_env()
+    funcs = {f.name: f for f in module.functions}
+    candidates: dict[str, set[int]] = defaultdict(set)
+
+    for func in module.functions:
+        for inst in func.all_instructions():
+            if inst.op != Op.CALL or not inst.imm_str:
+                continue
+            target = funcs.get(inst.imm_str)
+            if target is None:
+                continue
+            hint_ranges = inst.arg_ranges or []
+            for i, arg in enumerate(inst.operands):
+                if i != 0:
+                    continue  # one-argument tables for now
+                info = _const_info(arg)
+                if info is not None and info[0] in (IRType.INT64, IRType.BOOL):
+                    candidates[target.name].add(int(info[1]))
+                    continue
+                r = hint_ranges[i] if i < len(hint_ranges) else None
+                if r is not None:
+                    lo, hi = int(r[0]), int(r[1])
+                    if hi - lo + 1 <= cfg.max_table_domain:
+                        for v in range(lo, min(hi, lo + cfg.max_table_entries - 1) + 1):
+                            candidates[target.name].add(v)
+
+    changed = False
+    total_queries = 0
+    for name, values in candidates.items():
+        func = funcs.get(name)
+        if func is None or not _is_pure_function(func):
+            continue
+        if len(func.params) != 1 or func.return_type not in (
+            IRType.INT64,
+            IRType.BOOL,
+        ):
+            continue
+        param_type = func.params[0].type
+        if param_type not in (IRType.INT64, IRType.BOOL):
+            continue
+        if sum(len(b.instructions) for b in func.blocks) > cfg.max_table_function_size:
+            continue
+        if len(values) < cfg.min_table_entries:
+            continue
+
+        lo = min(values)
+        hi = max(values)
+        # Densify small observed windows: a contiguous table is cheaper than a
+        # compare chain and still bounded by the configured budget.
+        if hi - lo + 1 <= cfg.max_table_domain and hi - lo + 1 <= cfg.max_table_entries:
+            values = set(range(lo, hi + 1))
+        if len(values) > cfg.max_table_entries:
+            values = set(sorted(values)[: cfg.max_table_entries])
+
+        entries: dict[int, int] = {}
+        for arg in sorted(values):
+            total_queries += 1
+            if total_queries > cfg.max_sim_calls:
+                break
+            result = evaluate_function(module, func, [arg], cfg)
+            if result is _UNKNOWN:
+                continue
+            if isinstance(result, bool):
+                entries[int(arg)] = 1 if result else 0
+            elif isinstance(result, int):
+                entries[int(arg)] = int(result)
+            elif isinstance(result, float) and result.is_integer():
+                entries[int(arg)] = int(result)
+            else:
+                continue
+        if len(entries) < cfg.min_table_entries:
+            continue
+
+        ordered = sorted(entries)
+        if ordered and ordered[-1] - ordered[0] + 1 == len(ordered):
+            func.lookup_table = {
+                "kind": "dense",
+                "min": ordered[0],
+                "max": ordered[-1],
+                "values": [entries[v] for v in ordered],
+            }
+        else:
+            func.lookup_table = {
+                "kind": "sparse",
+                "pairs": [(v, entries[v]) for v in ordered],
+            }
+        changed = True
+
+    return changed
+
+
 # ── Pass pipeline ───────────────────────────────────────────────
 
 
-def run_passes(module: Module, level: int = 2) -> bool:
+def run_passes(
+    module: Module, level: int = 2, config: OptimizerConfig | None = None
+) -> bool:
     """Run optimization passes on the module.
 
     level 0: no optimization
@@ -1176,6 +1361,7 @@ def run_passes(module: Module, level: int = 2) -> bool:
     if level == 0:
         return False
 
+    cfg = config or OptimizerConfig.from_env()
     overall_changed = False
 
     # Escape analysis is interprocedural-ish (it summarizes call sites), so
@@ -1185,8 +1371,13 @@ def run_passes(module: Module, level: int = 2) -> bool:
     escape.run()
     mark_purity(module)
 
+    # Whole-program constraint propagation: call-site values/range facts flow
+    # into callee parameters and are recorded on each call for specialization.
+    if level >= 2:
+        analyze_module_ranges(module, cfg)
+
     # Run passes in a fixed-point loop
-    for iteration in range(20):  # Safety limit
+    for iteration in range(cfg.max_iterations):
         changed = False
 
         for func in module.functions:
@@ -1196,6 +1387,8 @@ def run_passes(module: Module, level: int = 2) -> bool:
             changed |= sccp(func)
             changed |= algebraic_simplify(func)
             changed |= simplify_branches(func)
+            if level >= 2:
+                changed |= range_fold_branches(func, func.param_ranges, cfg)
             changed |= remove_unreachable_blocks(func)
             changed |= merge_linear_blocks(func)
             changed |= dce(func)
@@ -1206,8 +1399,10 @@ def run_passes(module: Module, level: int = 2) -> bool:
                 changed |= tco(func)
 
         if level >= 2:
-            changed |= inline_small_functions(module)
-            changed |= specialize_calls(module)
+            changed |= inline_small_functions(module, cfg.inline_max_inst)
+            changed |= specialize_calls(module, cfg)
+            if changed:
+                analyze_module_ranges(module, cfg)
         changed |= mark_purity(module)
 
         overall_changed |= changed
@@ -1220,6 +1415,8 @@ def run_passes(module: Module, level: int = 2) -> bool:
             dce(func)
 
     remove_unused_functions(module)
+    if level >= 2:
+        build_lookup_tables(module, cfg)
 
     # Mark allocations that never escape the function for stack placement.
     # SROA already removed the fully-local ones; this covers structs that are

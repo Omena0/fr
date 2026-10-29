@@ -1,0 +1,21 @@
+// !0
+// !2
+// !4
+
+#pragma no_eval
+
+int safe_double(int n) {
+    if (n > 1000) {
+        println("unreachable side effect")
+        return 0
+    }
+    return n * 2
+}
+
+void main() {
+    int i = 0
+    while (i < 3) {
+        println(safe_double(i))
+        i = i + 1
+    }
+}

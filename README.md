@@ -21,8 +21,9 @@ pip install frscript
 - **File and Socket I/O** - Low-level file operations and sockets.
 - **Multiprocessing**. - Easy threading with fork() and wait().
 - **Python integration** - You can use any Python libraries with Frscript.
-- **Aggressive optimization** - Bytecode and SSA optimizations, purity analysis, call-site specialization, SROA and escape analysis. Faster than python.
-- **Modern memory model** - Reference-semantics structs/lists/sets, automatic stack allocation for non-escaping values, and a free-list native allocator.
+- **Aggressive optimization** - Purity call-graph analysis, interprocedural ranges, call-site specialization, SROA/escape analysis, pure-function lookup tables and SSA/bytecode optimizations.
+- **Deterministic memory** - Reference-counted native structs/lists/sets with function-scope cleanup, plus SROA and stack allocation for non-escaping values.
+- **Modern memory model** - Reference-semantics structs/lists/sets, scope-based reference counting, automatic stack allocation for non-escaping values, and a free-list native allocator.
 - **Opt-in pointers** - `int*`, `&value`, `*p`, pointer fields and pointer parameters, lowered directly to addresses in native code.
 - **Stack-based VM** - Fast and memory efficient.
 - **Readable bytecode** - Optimize hot code manually

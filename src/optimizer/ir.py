@@ -233,7 +233,7 @@ COMMUTATIVE_OPS = frozenset({
 class Value:
     """An SSA value. Defined by exactly one instruction."""
 
-    __slots__ = ('id', 'type', 'defining_inst', 'uses')
+    __slots__ = ('id', 'type', 'defining_inst', 'uses', 'value_range')
 
     _next_id = 0
 
@@ -243,6 +243,7 @@ class Value:
         self.type = typ
         self.defining_inst = defining_inst
         self.uses: list[Instruction] = []  # instructions that use this value
+        self.value_range: Optional[tuple[int, int]] = None
 
     def __repr__(self):
         return f'%{self.id}'
@@ -292,7 +293,7 @@ class Instruction:
 
     __slots__ = ('op', 'result', 'operands', 'block', 'source_line',
                  'imm_int', 'imm_str', 'imm_float', 'target_blocks',
-                 'stack_alloc', 'pure_call')
+                 'stack_alloc', 'pure_call', 'arg_ranges', 'no_zero_check')
 
     def __init__(self, op: Op, operands: list[Value] = None,
                  result_type: ValueType = None, source_line: int = None):
@@ -308,6 +309,8 @@ class Instruction:
         self.target_blocks: list[BasicBlock] = []  # for BRANCH/JUMP
         self.stack_alloc = False  # ALLOC_STRUCT can live in the stack frame
         self.pure_call = False    # CALL/CALL_BUILTIN proven side-effect free
+        self.arg_ranges = None    # per-argument ranges inferred at this call
+        self.no_zero_check = False  # divisor proven non-zero
 
         # Create result value if the instruction produces one
         if result_type is not None and result_type != IRType.VOID:
@@ -407,7 +410,8 @@ class Function:
     """An SSA function with basic blocks."""
 
     __slots__ = ('name', 'params', 'return_type', 'blocks', 'entry',
-                 'is_extern', 'source_file', 'local_names')
+                 'is_extern', 'source_file', 'local_names', 'param_ranges',
+                 'lookup_table')
 
     def __init__(self, name: str, params: list[Param] = None,
                  return_type: ValueType = IRType.VOID):
@@ -419,6 +423,8 @@ class Function:
         self.is_extern = False
         self.source_file: Optional[str] = None
         self.local_names: dict[int, str] = {}  # maps var index → name for debugging
+        self.param_ranges: dict[int, tuple[int, int]] = {}
+        self.lookup_table = None
 
     def add_block(self, block: BasicBlock) -> BasicBlock:
         block.func = self

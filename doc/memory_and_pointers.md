@@ -71,10 +71,15 @@ cell, so `*p = ...` is visible to every alias.
   safe within the function but cannot make a dangling pointer valid.
 * Growing a list may reallocate its element buffer, invalidating pointers
   previously obtained from `&list[i]`.
-* Heap-allocated objects in the native runtime live for the duration of the
-  process. They are allocated from a segregated free-list allocator (not a
-  fixed slot table) and can be reused by `realloc`/`free` operations performed
-  by the runtime.
+* Native heap objects are reference counted with function-scope cleanup. Every
+  function enters an allocation scope, and every allocation made in that scope
+  is released when the function returns. Stores into globals, lists and
+  reference-typed struct fields, as well as returns, retain the value; when the
+  owning scope exits its reference is dropped and the object is freed if no
+  other owner remains. Overwriting a field/global releases the old value.
+* Cycles between managed objects are not collected, just as with any reference
+  counting scheme. Explicit pointer fields are borrowed by design; do not build
+  a cycle through raw pointers unless you manage its lifetime yourself.
 
 ## Automatic memory decisions
 
@@ -88,9 +93,11 @@ The SSA optimizer runs these memory-related passes:
    another object, stored to a global, or address-taken).
 3. **Stack allocation** – `ARG_ESCAPE` allocations are placed in fixed slots in
    the function frame, so passing a struct to a helper does not allocate.
-4. **Runtime allocation** – remaining structs are allocated by
-   `runtime_struct_new`, lists grow with `realloc`, and the C VM reference-counts
-   structs/lists/sets so aliases share one object.
+4. **Runtime allocation and cleanup** – remaining structs are allocated by
+   `runtime_struct_new`, lists grow with `realloc`, and both the C VM and the
+   native runtime reference-count structs/lists/sets so aliases share one
+   object. Native functions push/pop an allocation scope; escaping values are
+   retained and the rest are freed at scope exit.
 
 Because structs already have reference semantics, passing a struct to a
 function is always a pointer pass; no copy is emitted. Scalar arguments are SSA
@@ -103,5 +110,8 @@ values and are not copied either.
 * **C VM** – `Struct`, `List`, and `Set` carry a reference count. Copies of a
   `Value` retain the object; scope/variable cleanup releases it. Cycles are not
   collected, matching the usual reference-counting trade-off.
-* **Native** – direct pointers, SROA/stack placement where possible, and a
-  free-list heap for escaping objects.
+* **Native** – direct pointers, SROA/stack placement where possible, a
+  segregated free-list heap, and scope-based reference counting for escaping
+  structs/lists/sets. Values are retained when they escape into a global, list,
+  reference-typed field, pointer cell, or return value, and released when the
+  owning function scope ends or an owner is overwritten.

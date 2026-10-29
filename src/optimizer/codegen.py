@@ -203,6 +203,78 @@ class CodeGen:
 
     # ── Function emission ───────────────────────────────────────
 
+    @staticmethod
+    def _managed_type(typ) -> bool:
+        return isinstance(typ, (StructType, ListType, SetType))
+
+    @staticmethod
+    def _elem_code(typ) -> int:
+        if isinstance(typ, (StructType, ListType, SetType)):
+            return 4  # runtime-managed reference-counted element
+        if typ == IRType.STRING:
+            return 1
+        if typ == IRType.FLOAT64:
+            return 2
+        if typ == IRType.BOOL:
+            return 3
+        return 0
+
+    def _lookup_label(self, func: Function) -> str:
+        safe = "".join(c if c.isalnum() else "_" for c in func.name)
+        return f"_fr_lut_{safe}"
+
+    def _struct_managed_mask(self, typ) -> int:
+        if not isinstance(typ, StructType):
+            return 0
+        mask = 0
+        for i, field_type in enumerate(typ.field_types[:64]):
+            if self._managed_type(field_type):
+                mask |= 1 << i
+        return mask
+
+    def _emit_lookup_prelude(self, func: Function, alloc: RegAllocation) -> str:
+        """Emit a table fast path at function entry. Returns the return label."""
+        table = func.lookup_table
+        param = func.params[0]
+        loc = self._loc(param, alloc)
+        ret_label = self._new_label("lut_ret")
+        miss_label = self._new_label("lut_miss")
+        table_label = self._lookup_label(func)
+
+        if loc.startswith("["):
+            self._emit(f"    mov rax, {loc}")
+        else:
+            self._emit(f"    mov rax, {loc}")
+
+        if table.get("kind") == "dense":
+            lo = int(table["min"])
+            hi = int(table["max"])
+            self._emit(f"    cmp rax, {lo}")
+            self._emit(f"    jl {miss_label}")
+            self._emit(f"    cmp rax, {hi}")
+            self._emit(f"    jg {miss_label}")
+            if lo:
+                self._emit(f"    sub rax, {lo}")
+            self._emit(f"    lea r11, [rip + {table_label}]")
+            self._emit("    mov rax, [r11 + rax * 8]")
+            self._emit(f"    jmp {ret_label}")
+        else:
+            pairs = table.get("pairs") or []
+            hit_labels = []
+            for i, (arg, _res) in enumerate(pairs):
+                hit = self._new_label(f"lut_hit{i}")
+                hit_labels.append(hit)
+                self._emit(f"    cmp rax, {int(arg)}")
+                self._emit(f"    je {hit}")
+            self._emit(f"    jmp {miss_label}")
+            for (arg, res), hit in zip(pairs, hit_labels):
+                self._emit(f"{hit}:")
+                self._emit(f"    mov rax, {int(res)}")
+                self._emit(f"    jmp {ret_label}")
+
+        self._emit(f"{miss_label}:")
+        return ret_label
+
     def _emit_function(self, func: Function):
         """Emit a complete function with prologue, body, epilogue."""
         alloc = allocate_registers(func)
@@ -212,7 +284,9 @@ class CodeGen:
         self._compute_caller_saves(func, alloc)
 
         callee_save_size = len(alloc.used_callee_saved) * 8
-        has_calls = self._func_has_calls(func)
+        # Every user function gets a runtime allocation scope for deterministic
+        # reference-counted cleanup, so all functions are call sites.
+        has_calls = True
         has_spills = alloc.frame_size > 0
         has_callee_saves = callee_save_size > 0
 
@@ -268,8 +342,18 @@ class CodeGen:
         elif has_calls:
             self._emit("    sub rsp, 8")
 
+        self._emit_call_aligned("runtime_scope_push")
+
+        lookup_ret = None
+        if func.lookup_table and func.params:
+            lookup_ret = self._emit_lookup_prelude(func, alloc)
+
         for block in func.blocks:
             self._emit_block(func, block, alloc)
+
+        if lookup_ret is not None:
+            self._emit(f"{lookup_ret}:")
+            self._emit_epilogue(func, alloc)
 
         self._emit("")
 
@@ -464,14 +548,15 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
             b = self._loc(inst.operands[1], alloc)
-            skip = self._new_label("div_ok")
-            self._emit(f"    test {b}, {b}")
-            self._emit(f"    jne {skip}")
-            msg = self._get_string_label("integer division by zero")
-            self._emit(f"    lea rdi, [rip + {msg}]")
-            self._emit(f"    mov esi, {inst.source_line or 0}")
-            self._emit_call_aligned("runtime_error_at")
-            self._emit(f"{skip}:")
+            if not getattr(inst, "no_zero_check", False):
+                skip = self._new_label("div_ok")
+                self._emit(f"    test {b}, {b}")
+                self._emit(f"    jne {skip}")
+                msg = self._get_string_label("integer division by zero")
+                self._emit(f"    lea rdi, [rip + {msg}]")
+                self._emit(f"    mov esi, {inst.source_line or 0}")
+                self._emit_call_aligned("runtime_error_at")
+                self._emit(f"{skip}:")
             self._emit(f"    mov rax, {a}")
             self._emit(f"    cqo")
             # Can't idiv by memory with just register
@@ -491,14 +576,15 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
             b = self._loc(inst.operands[1], alloc)
-            skip = self._new_label("mod_ok")
-            self._emit(f"    test {b}, {b}")
-            self._emit(f"    jne {skip}")
-            msg = self._get_string_label("integer division by zero")
-            self._emit(f"    lea rdi, [rip + {msg}]")
-            self._emit(f"    mov esi, {inst.source_line or 0}")
-            self._emit_call_aligned("runtime_error_at")
-            self._emit(f"{skip}:")
+            if not getattr(inst, "no_zero_check", False):
+                skip = self._new_label("mod_ok")
+                self._emit(f"    test {b}, {b}")
+                self._emit(f"    jne {skip}")
+                msg = self._get_string_label("integer division by zero")
+                self._emit(f"    lea rdi, [rip + {msg}]")
+                self._emit(f"    mov esi, {inst.source_line or 0}")
+                self._emit_call_aligned("runtime_error_at")
+                self._emit(f"{skip}:")
             self._emit(f"    mov rax, {a}")
             self._emit(f"    cqo")
             if b.startswith("[") or b in ("rax", "rdx"):
@@ -529,23 +615,24 @@ class CodeGen:
             self._emit_float_binop(inst, alloc, "mulsd")
             return
         if op == Op.FDIV:
-            # Check for division by zero — raise exception if divisor is 0.0
-            b = self._loc(inst.operands[1], alloc)
-            skip_label = self._new_label("fdiv_ok")
-            self._emit(f"    xorpd xmm15, xmm15")
-            if b.startswith("xmm"):
-                self._emit(f"    ucomisd {b}, xmm15")
-            else:
-                self._emit(f"    movq xmm14, {b}")
-                self._emit(f"    ucomisd xmm14, xmm15")
-            self._emit(f"    jne {skip_label}")
-            # Divisor is zero — report through runtime_error_at so handlers and
-            # test-mode error formatting behave exactly like the other VMs.
-            msgstr = self._get_string_label("float division by zero")
-            self._emit(f"    lea rdi, [rip + {msgstr}]")
-            self._emit(f"    mov esi, {inst.source_line or 0}")
-            self._emit_call_aligned("runtime_error_at")
-            self._emit(f"{skip_label}:")
+            if not getattr(inst, "no_zero_check", False):
+                # Check for division by zero — raise exception if divisor is 0.0
+                b = self._loc(inst.operands[1], alloc)
+                skip_label = self._new_label("fdiv_ok")
+                self._emit(f"    xorpd xmm15, xmm15")
+                if b.startswith("xmm"):
+                    self._emit(f"    ucomisd {b}, xmm15")
+                else:
+                    self._emit(f"    movq xmm14, {b}")
+                    self._emit(f"    ucomisd xmm14, xmm15")
+                self._emit(f"    jne {skip_label}")
+                # Divisor is zero — report through runtime_error_at so handlers and
+                # test-mode error formatting behave exactly like the other VMs.
+                msgstr = self._get_string_label("float division by zero")
+                self._emit(f"    lea rdi, [rip + {msgstr}]")
+                self._emit(f"    mov esi, {inst.source_line or 0}")
+                self._emit_call_aligned("runtime_error_at")
+                self._emit(f"{skip_label}:")
             self._emit_float_binop(inst, alloc, "divsd")
             return
         if op == Op.FNEG:
@@ -691,6 +778,26 @@ class CodeGen:
             base = self._loc(inst.operands[0], alloc)
             val = self._loc(inst.operands[1], alloc) if len(inst.operands) > 1 else "0"
             offset = (inst.imm_int or 0) * 8
+            struct_type = inst.operands[0].type if inst.operands else None
+            field_idx = inst.imm_int or 0
+            managed = (
+                isinstance(struct_type, StructType)
+                and field_idx < len(struct_type.field_types)
+                and self._managed_type(struct_type.field_types[field_idx])
+            )
+            if managed:
+                self._emit("    sub rsp, 32")
+                self._emit(f"    mov rax, {base}")
+                self._emit("    mov [rsp], rax")
+                self._emit(f"    mov rax, {val}")
+                self._emit("    mov [rsp + 8], rax")
+                self._emit("    mov rdi, [rsp]")
+                self._emit("    mov rsi, [rsp + 8]")
+                self._emit(f"    mov rdx, {field_idx}")
+                self._emit("    mov rcx, 1")
+                self._emit_call_aligned("runtime_store_field")
+                self._emit("    add rsp, 32")
+                return
             if base.startswith("["):
                 self._emit(f"    mov r11, {base}")
                 base_ref = "r11"
@@ -736,6 +843,22 @@ class CodeGen:
         if op == Op.PTR_STORE:
             ptr = self._loc(inst.operands[0], alloc)
             val = self._loc(inst.operands[1], alloc)
+            ptr_type = inst.operands[0].type if inst.operands else None
+            val_type = inst.operands[1].type if len(inst.operands) > 1 else None
+            pointee = getattr(ptr_type, "pointee", None)
+            managed = self._managed_type(val_type) and self._managed_type(pointee)
+            if managed:
+                self._emit("    sub rsp, 32")
+                self._emit(f"    mov rax, {ptr}")
+                self._emit("    mov [rsp], rax")
+                self._emit(f"    mov rax, {val}")
+                self._emit("    mov [rsp + 8], rax")
+                self._emit("    mov rdi, [rsp]")
+                self._emit("    mov rsi, [rsp + 8]")
+                self._emit("    mov rdx, 1")
+                self._emit_call_aligned("runtime_ptr_store")
+                self._emit("    add rsp, 32")
+                return
             if ptr.startswith("["):
                 self._emit(f"    mov r11, {ptr}")
                 ptr_ref = "r11"
@@ -766,6 +889,12 @@ class CodeGen:
         # ── List operations ──
 
         if op == Op.ALLOC_LIST:
+            elem_type = (
+                inst.result.type.elem_type
+                if isinstance(inst.result.type, ListType)
+                else IRType.INT64
+            )
+            elem_code = self._elem_code(elem_type)
             if inst.operands:
                 # List with initial elements — allocate array space on stack,
                 # store elements, call runtime, then free the space.
@@ -776,20 +905,34 @@ class CodeGen:
                 self._emit(f"    sub rsp, {aligned_size}")
                 for i, v in enumerate(inst.operands):
                     loc = self._loc(v, alloc)
-                    self._emit(f"    mov [rsp + {i * 8}], {loc}")
+                    if loc.startswith("xmm"):
+                        self._emit(f"    movsd [rsp + {i * 8}], {loc}")
+                    else:
+                        self._emit(f"    mov [rsp + {i * 8}], {loc}")
                 self._emit(f"    mov rdi, rsp")
                 self._emit(f"    mov rsi, {n}")
-                self._emit_call_aligned("runtime_list_from_array")
+                self._emit(f"    mov rdx, {elem_code}")
+                self._emit_call_aligned("runtime_list_from_array_typed")
                 self._emit(f"    add rsp, {aligned_size}")
             else:
-                self._emit_call_aligned("runtime_list_new")
+                self._emit(f"    mov rdi, {elem_code}")
+                self._emit_call_aligned("runtime_list_new_typed")
             dst = self._loc(inst.result, alloc)
             if dst != "rax":
                 self._emit(f"    mov {dst}, rax")
             return
 
         if op == Op.LIST_APPEND:
-            self._emit_runtime_call("runtime_list_append_int", inst, alloc, 2)
+            managed = len(inst.operands) > 1 and self._managed_type(
+                inst.operands[1].type
+            )
+            self._emit_runtime_call(
+                "runtime_list_append_managed" if managed
+                else "runtime_list_append_int",
+                inst,
+                alloc,
+                2,
+            )
             return
 
         if op == Op.LIST_GET:
@@ -818,6 +961,9 @@ class CodeGen:
             b = self._loc(inst.operands[1], alloc)
             c = self._loc(inst.operands[2], alloc)
             line = inst.source_line or 0
+            managed = len(inst.operands) > 2 and self._managed_type(
+                inst.operands[2].type
+            )
             if a != "rdi":
                 self._emit(f"    mov rdi, {a}")
             if b != "rsi":
@@ -825,7 +971,10 @@ class CodeGen:
             if c != "rdx":
                 self._emit(f"    mov rdx, {c}")
             self._emit(f"    mov rcx, {line}")
-            self._emit_call_aligned("runtime_list_set_int_at")
+            self._emit_call_aligned(
+                "runtime_list_set_managed_at" if managed
+                else "runtime_list_set_int_at"
+            )
             return
 
         if op == Op.LIST_LEN:
@@ -889,6 +1038,16 @@ class CodeGen:
             else:
                 if val != "rax":
                     self._emit(f"    mov rax, {val}")
+            # Returning a managed value transfers a reference to the caller.
+            if self._managed_type(func.return_type) or self._managed_type(val_type):
+                self._emit("    sub rsp, 16")
+                self._emit("    mov rdi, rax")
+                self._emit("    mov [rsp], rax")
+                self._emit("    movsd [rsp + 8], xmm0")
+                self._emit_call_aligned("runtime_retain_transfer")
+                self._emit("    mov rax, [rsp]")
+                self._emit("    movsd xmm0, [rsp + 8]")
+                self._emit("    add rsp, 16")
             self._emit_epilogue(func, alloc)
             return
 
@@ -1133,11 +1292,19 @@ class CodeGen:
         if op == Op.STORE_GLOBAL:
             val = self._loc(inst.operands[0], alloc) if inst.operands else "0"
             name = inst.imm_str or "unknown"
-            if val.startswith("xmm"):
+            val_type = inst.operands[0].type if inst.operands else IRType.INT64
+            managed = self._managed_type(val_type)
+            if managed:
+                self._emit(f"    mov rsi, {val}")
+                self._emit(f"    lea rdi, [rip + _fr_global_{name}]")
+                self._emit("    mov rdx, 1")
+                self._emit_call_aligned("runtime_store_global")
+                self.module.global_vars[name] = val_type
+            elif val.startswith("xmm"):
                 self._emit(f"    movsd [rip + _fr_global_{name}], {val}")
             else:
                 self._emit(f"    mov [rip + _fr_global_{name}], {val}")
-            self.module.global_vars.setdefault(name, IRType.INT64)
+            self.module.global_vars.setdefault(name, val_type)
             return
 
         # ── SELECT (branchless conditional) ──
@@ -1325,6 +1492,7 @@ class CodeGen:
         self._emit(f"    mov rdi, {size}")
         self._emit(f"    mov rsi, {n_fields}")
         self._emit(f"    mov rdx, rsp")
+        self._emit(f"    mov rcx, {self._struct_managed_mask(inst.result.type)}")
         self._emit_call_aligned("runtime_struct_new")
         if aligned_size:
             self._emit(f"    add rsp, {aligned_size}")
@@ -1563,11 +1731,21 @@ class CodeGen:
 
     def _emit_epilogue(self, func: Function, alloc: RegAllocation):
         callee_save_size = len(alloc.used_callee_saved) * 8
-        has_calls = self._func_has_calls(func)
+        has_calls = True
         has_spills = alloc.frame_size > 0 or bool(
             getattr(self, "_stack_alloc_offsets", {})
         )
         has_callee_saves = callee_save_size > 0
+
+        # Drop this frame's allocation scope before tearing down the frame.
+        # Preserve both ABI return registers across the runtime call.
+        self._emit("    sub rsp, 16")
+        self._emit("    mov [rsp], rax")
+        self._emit("    movsd [rsp + 8], xmm0")
+        self._emit_call_aligned("runtime_scope_pop")
+        self._emit("    mov rax, [rsp]")
+        self._emit("    movsd xmm0, [rsp + 8]")
+        self._emit("    add rsp, 16")
 
         if has_spills:
             save_offset = alloc.frame_size
@@ -1626,6 +1804,20 @@ class CodeGen:
             escaped = fmt.replace("\\", "\\\\").replace('"', '\\"')
             self._emit(f"{label}:")
             self._emit(f'    .asciz "{escaped}"')
+
+        for func in self.module.functions:
+            table = func.lookup_table
+            if not table:
+                continue
+            label = self._lookup_label(func)
+            self._emit(f"{label}:")
+            if table.get("kind") == "dense":
+                for value in table.get("values", []):
+                    self._emit(f"    .quad {int(value)}")
+            else:
+                for arg, value in table.get("pairs", []):
+                    self._emit(f"    .quad {int(arg)}")
+                    self._emit(f"    .quad {int(value)}")
 
     def _emit_bss(self):
         """Emit BSS section (heap, globals)."""

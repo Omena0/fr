@@ -23,15 +23,24 @@
   - global variables and pointers to globals in all runtimes
 - Compiler analysis:
   - call-graph side-effect/purity analysis
-  - branch-sensitive call-site specialization with constant arguments
+  - interprocedural integer/boolean range analysis
+  - natural-loop induction-variable bounds
+  - branch-sensitive per-call-site specialization with constants and ranges
   - dead branch / unreachable block removal
   - linear block merging and dead function elimination
   - purity-aware DCE/CSE
+  - compile-time pure-function simulation with embedded lookup tables
+  - tunable budgets for every speculative analysis (`OptimizerConfig`)
+- Native reference counting:
+  - function allocation scopes
+  - retain on global/list/field/pointer/return escapes
+  - release on overwrite and scope exit
+  - safe stack/string pointer handling via object magic/range checks
 
 ## Next
 
-- Native reference counting or a conservative GC for long-running programs that
-  allocate many escaping structs.
+- Collect reference-count cycles (managed object cycles are currently leaked,
+  like most RC systems).
 - Pointer lifetimes beyond a frame could become a compile-time error rather than
   a documented C-style rule.
 - Wasm backend needs the new pointer/global opcodes; it is currently not part of

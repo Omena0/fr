@@ -134,7 +134,7 @@ class IRBuilder:
 
             elif op == ".global" and args:
                 name = args[0]
-                typ = _TYPE_MAP.get(args[1], IRType.INT64) if len(args) > 1 else IRType.INT64
+                typ = _parse_type(args[1], self.module) if len(args) > 1 else IRType.INT64
                 self.module.global_vars[name] = typ
 
             elif op == ".entry" and args:
@@ -1143,6 +1143,12 @@ class IRBuilder:
         if op == "LIST_APPEND":
             val = _pop()
             lst = _pop()
+            if (
+                isinstance(lst.type, ListType)
+                and lst.type.elem_type == IRType.INT64
+                and val.type != IRType.INT64
+            ):
+                lst.type = ListType(val.type)
             _make_inst(Op.LIST_APPEND, [lst, val])
             _push(lst)
             return
@@ -1161,6 +1167,12 @@ class IRBuilder:
             val = _pop()
             idx = _pop()
             lst = _pop()
+            if (
+                isinstance(lst.type, ListType)
+                and lst.type.elem_type == IRType.INT64
+                and val.type != IRType.INT64
+            ):
+                lst.type = ListType(val.type)
             _make_inst(Op.LIST_SET, [lst, idx, val])
             _push(lst)
             return
@@ -1362,7 +1374,13 @@ class IRBuilder:
 
         if op == "STORE_GLOBAL" and args:
             val = _pop()
-            _make_inst(Op.STORE_GLOBAL, [val], imm_str=args[0])
+            name = args[0]
+            current = self.module.global_vars.get(name)
+            if isinstance(val.type, (StructType, ListType)) and not isinstance(
+                current, (StructType, ListType)
+            ):
+                self.module.global_vars[name] = val.type
+            _make_inst(Op.STORE_GLOBAL, [val], imm_str=name)
             return
 
         # ── Switch ──
@@ -1800,6 +1818,22 @@ class IRBuilder:
                     ]
 
             # RETURN/RETURN_VOID have no successors
+
+        # Materialize implicit fallthrough as an explicit JUMP. This makes the
+        # CFG self-contained for cloning/analysis passes instead of relying on
+        # block list order.
+        for i, block in enumerate(blocks):
+            if block.terminator is None and i + 1 < len(blocks):
+                succ = blocks[i + 1]
+                if succ not in block.successors:
+                    block.successors.append(succ)
+                if block not in succ.predecessors:
+                    succ.predecessors.append(block)
+                jump = Instruction(Op.JUMP, [], None, None)
+                jump.imm_str = succ.label
+                jump.target_blocks = [succ]
+                jump.block = block
+                block.append(jump)
 
     # ── Phase 6: SSA construction ───────────────────────────────
 
