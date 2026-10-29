@@ -340,7 +340,16 @@ def infer_loop_ranges(func: Function) -> dict[int, Range]:
             if isinstance(back, Value) and back.defining_inst is not None:
                 bi = back.defining_inst
                 if bi.op in (Op.ADD, Op.SUB) and len(bi.operands) >= 2:
-                    for a, b in ((bi.operands[0], bi.operands[1]), (bi.operands[1], bi.operands[0])):
+                    if bi.op == Op.ADD:
+                        pairs = (
+                            (bi.operands[0], bi.operands[1]),
+                            (bi.operands[1], bi.operands[0]),
+                        )
+                    else:
+                        # SUB is not commutative: only phi - const is an
+                        # induction step, never const - phi.
+                        pairs = ((bi.operands[0], bi.operands[1]),)
+                    for a, b in pairs:
                         if a is phi.result:
                             step_const = _get_const(b)
                             if step_const is not None:
@@ -491,6 +500,7 @@ def analyze_module_ranges(
     param_ranges: dict[str, list[Range | None]] = {
         name: [None] * len(func.params) for name, func in funcs.items()
     }
+    param_unknown: set[tuple[str, int]] = set()
 
     # Loop-local facts are only valid for calls executed inside that loop.
     from optimizer.analysis import FunctionAnalysis
@@ -533,12 +543,19 @@ def analyze_module_ranges(
                 r = arg.value_range
             r = _range_for_arg(arg, owner, call, r)
             arg_ranges.append(r)
-            if i < len(param_ranges[target.name]) and r is not None:
-                old = param_ranges[target.name][i]
-                new = _merge_param_range(old, r)
-                if new != old:
-                    param_ranges[target.name][i] = new
-                    changed = True
+            if i < len(param_ranges[target.name]):
+                if r is None:
+                    key = (target.name, i)
+                    if key not in param_unknown:
+                        param_unknown.add(key)
+                        param_ranges[target.name][i] = None
+                        changed = True
+                elif (target.name, i) not in param_unknown:
+                    old = param_ranges[target.name][i]
+                    new = _merge_param_range(old, r)
+                    if new != old:
+                        param_ranges[target.name][i] = new
+                        changed = True
         call.arg_ranges = arg_ranges
         return changed
 

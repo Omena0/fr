@@ -11,6 +11,20 @@ debug_runtime_instance = None
 # Track the actual current vars (updated when entering/exiting functions)
 _current_runtime_vars = vars
 _global_vars: dict = {}
+_function_locals: set[str] = set()
+
+
+def _collect_local_decls(node, out: set[str]) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "function":
+            return
+        if node.get("type") == "var" and node.get("name") and node.get("declaration"):
+            out.add(node["name"])
+        for value in node.values():
+            _collect_local_decls(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_local_decls(item, out)
 
 
 def _lookup_var_cell(name: str):
@@ -218,7 +232,7 @@ def _process_function_arg(arg: Any, old_vars: dict) -> Any:
         # Field access
         elif "attr" in arg:
             return eval_expr_node(arg)
-        elif arg.get("type") in ("addr", "deref"):
+        elif arg.get("type") in ("addr", "deref", "bytes"):
             return eval_expr_node(arg)
         # Regular dict with value
         else:
@@ -256,7 +270,9 @@ def run_func(
     from parser import cast_args
 
     global vars, runtime, _current_runtime_vars, _runtime_current_func, _runtime_current_line
+    global _function_locals
     old_vars = vars
+    old_function_locals = _function_locals
     old_func = _runtime_current_func
     old_line = _runtime_current_line  # Save calling line
 
@@ -287,6 +303,9 @@ def run_func(
         vars = _preserve_struct_definitions()
         _current_runtime_vars = vars  # Update current vars for debugger
         _runtime_current_func = name  # Track function for error reporting
+        declared: set[str] = set()
+        _collect_local_decls(func.get("func"), declared)
+        _function_locals = declared
 
     # Bind function arguments to the scope
     if isinstance(func.get("args"), list):
@@ -314,6 +333,7 @@ def run_func(
             out = signal.value
 
     vars = old_vars
+    _function_locals = old_function_locals
     if not is_builtin:
         _current_runtime_vars = vars  # Only restore if we changed it
         _runtime_current_func = old_func  # Restore function name
@@ -335,7 +355,7 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
     if isinstance(target, dict):
         if index in target:
             return target[index]
-        raise RuntimeError(f"Key error: {index!r}")
+        raise IndexError(f"Key error: {index!r}")
     # Ensure index is numeric for array-like targets
     if not isinstance(index, int):
         index = ensure_int(index, "Index")
@@ -385,7 +405,7 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
             error_msg = f"Index error: list index out of range: {index}"
             if isinstance(target, list):
                 error_msg += f" (length: {len(target)})"
-            raise RuntimeError(error_msg) from e
+            raise IndexError(error_msg) from e
 
     raise RuntimeError(f"Cannot index into type {type(target).__name__}")
 
@@ -573,6 +593,14 @@ def eval_expr_node(node) -> int | float | bool | str | None | Any:
         if isinstance(raw, str):
             return raw in ("true", "True", "1")
         return bool(raw)
+
+    if node.get("type") == "bytes":
+        raw = node.get("value")
+        if isinstance(raw, bytes):
+            return raw
+        if isinstance(raw, str):
+            return raw.encode("latin-1")
+        return b""
 
     if node.get("type") == "addr":
         return _make_pointer(node.get("value"))
@@ -943,7 +971,7 @@ def _execute_node_var(node: dict):
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
         # Check if it's a set/list literal that needs evaluation
-        if value.get("type") in ("set", "list", "bool"):
+        if value.get("type") in ("set", "list", "bool", "bytes"):
             value = eval_expr_node(value)
         # Check if it's a runtime expression (has slice, attr, or other runtime features)
         elif (
@@ -979,12 +1007,19 @@ def _execute_node_var(node: dict):
     # Assignments alias mutable objects, matching the native/C reference
     # semantics. Fresh literals and struct constructors already produce a new
     # object for every evaluation, so no defensive copy is needed here.
-    cell = _global_vars.get(node["name"]) if _global_vars else None
-    if cell is not None:
-        cell["type"] = node["value_type"]
-        cell["value"] = value
+    name = node["name"]
+    if name in vars:
+        # Mutate the existing cell so pointers obtained with &name keep
+        # aliasing the variable after reassignment.
+        vars[name]["type"] = node["value_type"]
+        vars[name]["value"] = value
+    elif name in _function_locals:
+        vars[name] = {"type": node["value_type"], "value": value}
+    elif name in _global_vars:
+        _global_vars[name]["type"] = node["value_type"]
+        _global_vars[name]["value"] = value
     else:
-        vars[node["name"]] = {"type": node["value_type"], "value": value}
+        vars[name] = {"type": node["value_type"], "value": value}
 
 
 def _execute_node_index_assign(node: dict):

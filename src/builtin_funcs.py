@@ -12,8 +12,17 @@ AstType = list[dict[str, Any]]
 _python_modules = {}
 
 
+def _round_c(num: float) -> int:
+    """C round(): ties round away from zero, not Python's banker's rounding."""
+    return floor(num + 0.5) if num >= 0 else ceil(num - 0.5)
+
+
 def _contains(container, value) -> bool:
     """Membership test for strings, lists, sets and dictionaries."""
+    if isinstance(container, bytes):
+        if isinstance(value, str):
+            value = value.encode("latin-1")
+        return value in container
     if isinstance(container, str):
         return str(value) in container
     if isinstance(container, (list, set, dict, tuple)):
@@ -647,7 +656,7 @@ funcs: dict[  # Holy type annotations
     "round": {
         "type": "builtin",
         "args": {"num": "float"},
-        "func": round,
+        "func": _round_c,
         "return_type": "int",
         "can_eval": True,
     },

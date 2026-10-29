@@ -39,13 +39,17 @@ The target uses the numbers in Fr OS's `src/include/uapi/syscall.h`:
 | `getpid` | 5 |
 | `nanosleep` | 13 |
 
-Socket-domain numbers follow the documented 160–168 goal ABI.
+The current Fr OS tree only assigns `SYS_socket = 160` and
+`SYS_shutdown = 206`; the documented bind/connect/listen/accept/send/recv
+numbers are not in the current dispatch table yet. The target uses 161–167 for
+those goal-ABI calls, so they return `-ENOSYS` on the current kernel.
 
 ## Known target limitations
 
 The Fr OS `uapi/syscall.h` currently assigns `fstat = 69` and `getdents = 71`,
 while `docs/src/kernel/syscall-abi.md` describes a different numbering
-(`stat = 69`, `fstat = 70`, `mkdir = 71`, ...). This target follows the uapi
+(`stat = 69`, `fstat = 70`, `mkdir = 71`, ...). The new `SYS_shutdown = 206`
+also differs from the docs goal's 168. This target follows the uapi
 header because that is what the kernel actually dispatches. Path-based
 filesystem operations that have no current uapi number (`mkdir`, `rmdir`,
 `unlink`, `rename`, `chdir`, `getcwd`) return `-1` in the runtime until the
@@ -56,6 +60,20 @@ binary is valid.
 Fr OS userland forbids YMM/ZMM because its context switch uses the legacy
 FXSAVE/FXRSTOR image. The compiler's AVX2 vectorizer is deliberately disabled
 for this target; use `--target linux` for the AVX2 path.
+
+## Fr OS updates observed
+
+The latest Fr OS tree adds termios/TCSETS handling, user signal dispositions and
+delivery, `uname`/`sysinfo`, `getrlimit`/`setrlimit`, fd flags with `dup3` and
+`fcntl`, keyboard/mouse input state, graphics presentation, and a `shutdown`
+syscall at number 206. The target follows the current `uapi/syscall.h` for all
+of these (notably `SYS_shutdown = 206`).
+
+`open` is still a stub returning `-ENOENT`, and the current dispatch table only
+assigns `SYS_socket = 160`; the documented bind/connect/listen/accept/send/recv
+numbers are future ABI. The compiler keeps those calls behind the goal-ABI
+numbers so they will start working when the kernel installs them, but they
+return `-ENOSYS` today.
 
 ## Checking an image
 

@@ -1063,6 +1063,7 @@ _IMPURE_OPS = frozenset({
     Op.PRINT, Op.PRINTLN, Op.INPUT, Op.STORE_GLOBAL,
     Op.STORE_FIELD, Op.LOAD_FIELD, Op.LIST_SET, Op.LIST_APPEND,
     Op.LIST_GET, Op.PTR_STORE, Op.PTR_LOAD, Op.LOAD_GLOBAL,
+    Op.DIV, Op.MOD, Op.FDIV, Op.LIST_ELEM_ADDR,
     Op.RAISE, Op.TRY_BEGIN, Op.TRY_END,
 })
 
@@ -1323,6 +1324,14 @@ def specialize_calls(
                 if target is None or target is func or target.is_extern:
                     continue
                 if "__spec_" in target.name:
+                    continue
+                # Recursive/mutually-recursive functions must not be cloned
+                # per call: each clone would recurse with a new constant and
+                # create an unbounded specialization chain.
+                if any(
+                    call.op == Op.CALL and call.imm_str == target.name
+                    for call in target.all_instructions()
+                ):
                     continue
                 if len(target.blocks) < 2:
                     continue

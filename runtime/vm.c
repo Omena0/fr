@@ -941,7 +941,7 @@ void string_intern_destroy(StringIntern *intern) {
 void value_free(Value v);
 Value value_copy(Value v);
 void list_free(List *list);
-void vm_runtime_error(VM *vm, const char *message, int char_pos);
+bool vm_runtime_error(VM *vm, const char *message, int char_pos);
 
 // Safe parsing helpers (use strtol family instead of unsafe ato* functions)
 static inline int64_t safe_atoll(const char *str)
@@ -1024,6 +1024,14 @@ Value value_make_void()
     v.type = VAL_VOID;
     v.as.boolean = false;  // Void should be falsy in boolean context
     return v;
+}
+
+static double value_as_double(Value v)
+{
+    if (v.type == VAL_F64) return v.as.f64;
+    if (v.type == VAL_INT) return (double)v.as.int64;
+    if (v.type == VAL_BIGINT && v.as.bigint) return mpz_get_d(*v.as.bigint);
+    return 0.0;
 }
 
 // List helper functions
@@ -1113,7 +1121,9 @@ Value list_get(List *list, int index) {
         }
 
         if (g_current_vm) {
-            vm_runtime_error(g_current_vm, error_msg, char_pos);
+            if (vm_runtime_error(g_current_vm, error_msg, char_pos)) {
+                return value_make_int_si(0);
+            }
         } else {
             fprintf(stderr, "Error: %s\n", error_msg);
         }
@@ -1174,7 +1184,9 @@ void list_set(List *list, int index, Value value) {
         }
 
         if (g_current_vm) {
-            vm_runtime_error(g_current_vm, error_msg, char_pos);
+            if (vm_runtime_error(g_current_vm, error_msg, char_pos)) {
+                return;
+            }
         } else {
             fprintf(stderr, "Error: %s\n", error_msg);
         }
@@ -1794,7 +1806,7 @@ void vm_free(VM *vm)
 }
 
 // Helper function to format runtime errors with debug information
-void vm_runtime_error(VM *vm, const char *message, int char_pos) {
+bool vm_runtime_error(VM *vm, const char *message, int char_pos) {
     // Check if there's an active exception handler
     if (vm->exception_handler_count > 0) {
         // Find the most recent handler
@@ -1853,7 +1865,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
             handler->exc_type = NULL;
             vm->exception_handler_count--;
 
-            return;  // Continue execution at handler
+            return true;  // Continue execution at handler
         }
 
         // Handler doesn't match - pop it and continue searching or error
@@ -1864,8 +1876,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
         // Recursively check for other handlers
         // Use display_message to avoid showing the [Type] marker
         if (vm->exception_handler_count > 0) {
-            vm_runtime_error(vm, display_message, char_pos);
-            return;
+            return vm_runtime_error(vm, display_message, char_pos);
         }
 
         // No more handlers - will fall through to error printing
@@ -1914,6 +1925,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
     }
 
     exit(1);
+    return false;
 }
 
 // Stack operations - inline for performance with always_inline hint
@@ -4463,6 +4475,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
     {
         // Create a list of argument strings
         List *argv_list = malloc(sizeof(List));
+        argv_list->refcount = 1;
         argv_list->length = vm->prog_argc;
         argv_list->capacity = (vm->prog_argc > 0) ? vm->prog_argc : 1;  // At least capacity of 1
         argv_list->items = malloc(sizeof(Value) * argv_list->capacity);
@@ -5375,24 +5388,21 @@ L_BUILTIN_SQRT: // OP_BUILTIN_SQRT
 L_SIN: // OP_SIN
 {
     Value v = vm_pop(vm);
-    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
-    vm_push(vm, value_make_f64(sin(d)));
+    vm_push(vm, value_make_f64(sin(value_as_double(v))));
     value_free(v);
     DISPATCH();
 }
 L_COS: // OP_COS
 {
     Value v = vm_pop(vm);
-    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
-    vm_push(vm, value_make_f64(cos(d)));
+    vm_push(vm, value_make_f64(cos(value_as_double(v))));
     value_free(v);
     DISPATCH();
 }
 L_TAN: // OP_TAN
 {
     Value v = vm_pop(vm);
-    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
-    vm_push(vm, value_make_f64(tan(d)));
+    vm_push(vm, value_make_f64(tan(value_as_double(v))));
     value_free(v);
     DISPATCH();
 }
@@ -7804,6 +7814,7 @@ L_FILE_LISTDIR: // OP_FILE_LISTDIR - List directory contents (path -> list)
     }
 
     List *list = malloc(sizeof(List));
+    list->refcount = 1;
     list->capacity = 16;
     list->length = 0;
     list->items = malloc(sizeof(Value) * list->capacity);

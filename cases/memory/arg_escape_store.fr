@@ -1,0 +1,21 @@
+// !7
+
+struct P {
+    int x
+}
+
+list saved = []
+
+void keep(P p) {
+    saved.append(p)
+}
+
+void make() {
+    P local = P(7)
+    keep(local)
+}
+
+void main() {
+    make()
+    println(str(saved[0].x))
+}

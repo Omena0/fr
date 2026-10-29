@@ -76,11 +76,13 @@ longjmp:
 runtime_scope_push:
     movq fr_scope_depth(%rip), %rax
     cmpq $1024, %rax
-    jae 1f
+    jae 2f
     leaq fr_scope_heads(%rip), %r11
     movq $0, (%r11,%rax,8)
     incq %rax
     movq %rax, fr_scope_depth(%rip)
-1:
+    ret
+2:
+    incq fr_scope_overflow(%rip)
     ret
 .size runtime_scope_push, .-runtime_scope_push

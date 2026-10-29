@@ -1,0 +1,15 @@
+// !2
+// !3
+
+struct P {
+    int x
+}
+
+void main() {
+    P p = P(1)
+    P* q = &p
+    q.x = 2
+    println(str(q.x))
+    q.x = 3
+    println(str(p.x))
+}

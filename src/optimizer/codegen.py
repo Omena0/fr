@@ -58,7 +58,7 @@ def asm_peephole(text: str) -> str:
         i = 0
         while i + 1 < len(lines):
             m = re.match(
-                r"^(\s*)(lea|mov|movsd|movq|add|sub|xor|addsd|subsd|mulsd|divsd)\s+([a-z0-9]+),\s*(.+)$",
+                r"^(\s*)(lea|mov|movsd|movq)\s+([a-z0-9]+),\s*(.+)$",
                 lines[i],
             )
             m2 = re.match(r"^(\s*)mov(?:sd|q)?\s+([a-z0-9]+),\s*([a-z0-9]+)$", lines[i + 1])
@@ -386,6 +386,19 @@ class CodeGen:
             if length_val.defining_inst.op != Op.LIST_LEN:
                 continue
             if index_phi.defining_inst is None or index_phi.defining_inst.op != Op.PHI:
+                continue
+            # The generated vector loop scans from index zero. Only accept a
+            # loop whose phi starts at a literal zero.
+            from optimizer.passes import _get_const_value
+            outside_init = None
+            for operand, pred in zip(
+                index_phi.defining_inst.operands,
+                index_phi.defining_inst.target_blocks,
+            ):
+                if pred not in loop.blocks:
+                    outside_init = operand
+                    break
+            if outside_init is None or _get_const_value(outside_init) != 0:
                 continue
             list_val = length_val.defining_inst.operands[0]
             if not isinstance(list_val, Value):
@@ -1408,9 +1421,14 @@ class CodeGen:
                 self._emit("    mov rax, [rax + 8]")
                 self._emit(f"    movq {dst}, rax")
             elif lst.startswith("["):
-                # dst doubles as the temporary list pointer: no scratch clobber.
-                self._emit_int_move(lst, dst)
-                self._emit(f"    mov {dst}, [{dst} + 8]")
+                if dst.startswith("["):
+                    self._emit(f"    mov r11, {lst}")
+                    self._emit("    mov r10, [r11 + 8]")
+                    self._emit(f"    mov {dst}, r10")
+                else:
+                    # dst doubles as the temporary list pointer: no scratch clobber.
+                    self._emit_int_move(lst, dst)
+                    self._emit(f"    mov {dst}, [{dst} + 8]")
             elif dst == lst:
                 self._emit(f"    mov {dst}, [{dst} + 8]")
             else:
@@ -1979,7 +1997,9 @@ class CodeGen:
                 if val_loc.startswith("xmm"):
                     self._emit(f"    movsd [rbp - {stack_offset - offset}], {val_loc}")
                 else:
-                    self._emit(f"    mov [rbp - {stack_offset - offset}], {val_loc}")
+                    self._emit_int_move(
+                        val_loc, f"[rbp - {stack_offset - offset}]"
+                    )
             self._emit_lea(dst, f"[rbp - {stack_offset}]")
             return
 

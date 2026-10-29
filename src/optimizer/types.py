@@ -302,5 +302,10 @@ class EscapeAnalysis:
         return self.get_escape(value) == self.NO_ESCAPE
 
     def can_stack_alloc(self, value: Value) -> bool:
-        """Can this allocation be placed on the stack?"""
-        return self.get_escape(value) <= self.ARG_ESCAPE
+        """Can this allocation be placed on the stack?
+
+        ARG_ESCAPE only says the value reaches a call. The callee may store
+        the pointer in a global/list/field, so without a callee-summary this
+        case must stay heap-allocated.
+        """
+        return self.get_escape(value) == self.NO_ESCAPE

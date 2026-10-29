@@ -151,31 +151,34 @@ str http_serialize_request(str host, str method, str path, str body) {
 }
 
 void http_send_response(int sock, HttpResponse response) {
-    sendall(sock, http_serialize_response(response).encode())
+    sendall(sock, http_serialize_response(response).encode("latin-1"))
 }
 
 void http_send_request(int sock, str host, str method, str path, str body) {
-    sendall(sock, http_serialize_request(host, method, path, body).encode())
+    sendall(sock, http_serialize_request(host, method, path, body).encode("latin-1"))
 }
 
 str http_read_all(int sock) {
-    str raw = ""
+    // Accumulate bytes, not decoded chunks: a multi-byte UTF-8 sequence or a
+    // binary body can be split across recv boundaries.
+    bytes raw = b""
     while (true) {
         bytes chunk = sock.recv(4096)
         if (len(chunk) == 0) { break }
-        raw = raw + chunk.decode()
+        raw = raw + chunk
     }
-    return raw
+    return raw.decode("latin-1")
 }
 
 str http_read_headers(int sock) {
-    str raw = ""
-    while (not contains(raw, "\r\n\r\n")) {
+    bytes raw = b""
+    bytes marker = "\r\n\r\n".encode("latin-1")
+    while (not contains(raw, marker)) {
         bytes chunk = sock.recv(4096)
         if (len(chunk) == 0) { break }
-        raw = raw + chunk.decode()
+        raw = raw + chunk
     }
-    return raw
+    return raw.decode("latin-1")
 }
 
 HttpRequest http_read_request(int sock) {
@@ -188,7 +191,7 @@ HttpRequest http_read_request(int sock) {
         while (len(request.body) < wanted) {
             bytes chunk = sock.recv(4096)
             if (len(chunk) == 0) { break }
-            request.body = request.body + chunk.decode()
+            request.body = request.body + chunk.decode("latin-1")
         }
     }
     return request

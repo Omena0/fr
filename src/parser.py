@@ -1547,6 +1547,7 @@ def parse_var(
     Returns:
         Variable AST node or SkipNode if const
     """
+    is_declaration = var_type is not None
     stream.strip()
 
     if not stream.consume("="):
@@ -1584,6 +1585,7 @@ def parse_var(
     node = make_node(
         stream, type="var", name=name, value_type=var_type, value=value, mods=mods
     )
+    node["declaration"] = is_declaration
     if list_capacity is not None or list_elem_type is not None:
         node["list_capacity"] = list_capacity
         node["list_elem_type"] = list_elem_type
@@ -3135,6 +3137,7 @@ def parse_any(
                 value=binary_expr,
                 mods=[],
             )
+            node["declaration"] = False
             node["line"] = stmt_line
             return node
 

@@ -628,6 +628,7 @@ typedef struct FrObjHeader {
 #define FR_MAX_SCOPES 1024
 FrObjHeader* fr_scope_heads[FR_MAX_SCOPES];
 int64_t fr_scope_depth = 0;
+int64_t fr_scope_overflow = 0;
 
 static bool fr_obj_valid(void* ptr) {
     if (!ptr || !heap_base) return false;
@@ -692,6 +693,10 @@ void runtime_retain_transfer(void* ptr) {
 }
 
 void runtime_scope_pop(void) {
+    if (fr_scope_overflow > 0) {
+        fr_scope_overflow--;
+        return;
+    }
     if (fr_scope_depth <= 0) return;
     int depth = --fr_scope_depth;
     FrObjHeader* header = fr_scope_heads[depth];
@@ -706,6 +711,7 @@ void runtime_scope_pop(void) {
 
 void runtime_scope_unwind(int64_t depth) {
     if (depth < 0) depth = 0;
+    while (fr_scope_overflow > 0) runtime_scope_pop();
     while (fr_scope_depth > depth) runtime_scope_pop();
 }
 
@@ -796,6 +802,7 @@ double round(double x) {
 double runtime_floor(double x) { return floor(x); }
 double runtime_ceil(double x) { return ceil(x); }
 double runtime_round(double x) { return round(x); }
+int64_t runtime_round_int(double x) { return (int64_t)round(x); }
 
 double runtime_sin(double x) {
     double r;
@@ -812,7 +819,7 @@ double runtime_cos(double x) {
 double runtime_tan(double x) {
     if (x == 0.0) return 0.0;
     double r;
-    __asm__ __volatile__("fptan" : "=t"(r) : "0"(x) : "st(1)");
+    __asm__ __volatile__("fptan\n\tfstp %%st(0)" : "=t"(r) : "0"(x) : "st(1)");
     return r;
 }
 
@@ -1039,6 +1046,8 @@ RuntimeList* runtime_str_split(const char* str, const char* delim) {
 char* runtime_str_repeat(const char* str, int64_t count) {
     if (count <= 0) return fr_strdup("");
     size_t len = (size_t)strlen(str);
+    size_t max = (size_t)-1;
+    if (len != 0 && (size_t)count > (max - 1) / len) return NULL;
     char* result = (char*)malloc(len * (size_t)count + 1);
     if (!result) return NULL;
     char* out = result;
@@ -1250,6 +1259,12 @@ void runtime_list_set_int_at(RuntimeList* list, int64_t index, int64_t value,
         strcat(msg, ")");
         runtime_error_at(msg, line);
     }
+    if (list->elem_type == 4) {
+        if (list->items[index] == value) return;
+        runtime_retain((void*)value);
+        runtime_scope_forget((void*)value);
+        runtime_release((void*)list->items[index]);
+    }
     list->items[index] = value;
 }
 
@@ -1432,6 +1447,26 @@ int64_t runtime_dict_contains(RuntimeDict* dict, int64_t key) {
 
 int64_t runtime_dict_len(RuntimeDict* dict) { return dict ? dict->length : 0; }
 
+void runtime_dict_set_typed(RuntimeDict* dict, int64_t key, int64_t value,
+                            int64_t key_type) {
+    if (!dict) return;
+    if (dict->key_type == -1) dict->key_type = (int)key_type;
+    runtime_dict_set(dict, key, value);
+}
+
+int64_t runtime_dict_get_typed(RuntimeDict* dict, int64_t key, int64_t key_type) {
+    if (!dict) return 0;
+    if (dict->key_type == -1) dict->key_type = (int)key_type;
+    return runtime_dict_get(dict, key);
+}
+
+int64_t runtime_dict_contains_typed(RuntimeDict* dict, int64_t key,
+                                    int64_t key_type) {
+    if (!dict) return 0;
+    if (dict->key_type == -1) dict->key_type = (int)key_type;
+    return runtime_dict_contains(dict, key);
+}
+
 RuntimeSet* runtime_set_new(void) {
     RuntimeSet* set = (RuntimeSet*)fr_obj_alloc(sizeof(RuntimeSet), FR_OBJ_SET, 0);
     if (!set) return NULL;
@@ -1470,7 +1505,8 @@ void runtime_set_add(RuntimeSet* set, int64_t value) {
 }
 
 void runtime_set_add_typed(RuntimeSet* set, int64_t value, int elem_type) {
-    if (set && set->elem_type == -1) set->elem_type = elem_type;
+    if (!set) return;
+    if (set->elem_type == -1) set->elem_type = elem_type;
     runtime_set_add(set, value);
 }
 
@@ -1537,6 +1573,17 @@ char* runtime_set_to_str(RuntimeSet* set) {
 
 void int64_to_str(int64_t value, char* buffer);
 
+static void fr_append_bounded(char* dst, const char* src, size_t cap) {
+    if (!dst || !src || cap == 0) return;
+    size_t used = strlen(dst);
+    if (used >= cap - 1) return;
+    size_t room = cap - 1 - used;
+    size_t n = strlen(src);
+    if (n > room) n = room;
+    memcpy(dst + used, src, n);
+    dst[used + n] = '\0';
+}
+
 #define MAX_EXCEPTION_HANDLERS 256
 typedef struct {
     char* exc_type;
@@ -1565,10 +1612,10 @@ void runtime_error_at(const char* message, int line) {
     char line_str[32];
     fr_int64_to_buf(line, line_str);
     strcpy(full, "?");
-    strcat(full, line_str);
-    strcat(full, ",0:");
-    strcat(full, message);
-    strcat(full, "\n");
+    fr_append_bounded(full, line_str, sizeof(full));
+    fr_append_bounded(full, ",0:", sizeof(full));
+    fr_append_bounded(full, message, sizeof(full));
+    fr_append_bounded(full, "\n", sizeof(full));
     fr_fputs(full, 2);
     fr_exit(1);
 }
@@ -1609,10 +1656,10 @@ void runtime_exception_raise(const char* exc_type, const char* message) {
     }
     char full[1024];
     strcpy(full, "[");
-    strcat(full, exc_type);
-    strcat(full, "] ");
-    strcat(full, message);
-    strcat(full, "\n");
+    fr_append_bounded(full, exc_type, sizeof(full));
+    fr_append_bounded(full, "] ", sizeof(full));
+    fr_append_bounded(full, message, sizeof(full));
+    fr_append_bounded(full, "\n", sizeof(full));
     fr_fputs(full, 2);
     fr_exit(1);
 }
@@ -1632,12 +1679,12 @@ void runtime_exception_raise_at(const char* exc_type, const char* message,
     char line_str[32];
     fr_int64_to_buf(line, line_str);
     strcpy(full, "?");
-    strcat(full, line_str);
-    strcat(full, ",0:[");
-    strcat(full, exc_type);
-    strcat(full, "] ");
-    strcat(full, message);
-    strcat(full, "\n");
+    fr_append_bounded(full, line_str, sizeof(full));
+    fr_append_bounded(full, ",0:[", sizeof(full));
+    fr_append_bounded(full, exc_type, sizeof(full));
+    fr_append_bounded(full, "] ", sizeof(full));
+    fr_append_bounded(full, message, sizeof(full));
+    fr_append_bounded(full, "\n", sizeof(full));
     fr_fputs(full, 2);
     fr_exit(1);
 }
@@ -1808,7 +1855,7 @@ char* runtime_input(void) {
 #define SYS_SENDTO     165
 #define SYS_RECVFROM   166
 #define SYS_SETSOCKOPT 167
-#define SYS_SHUTDOWN   168
+#define SYS_SHUTDOWN   206   /* current Fr OS uapi; docs goal says 168 */
 #else
 #define SYS_SOCKET     41
 #define SYS_CONNECT    42
@@ -2301,6 +2348,7 @@ void runtime_init(void) {
     init_heap();
     runtime_exception_init();
     fr_scope_depth = 0;
+    fr_scope_overflow = 0;
 }
 
 int64_t _fr_global_vars[256] = {0};

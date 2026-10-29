@@ -1,0 +1,12 @@
+// !1
+// !true
+// !1
+
+void main() {
+    dict d = {}
+    int key = 1048577
+    d[key] = 1
+    println(str(d[key]))
+    println(key in d)
+    println(str(d[1048577]))
+}

@@ -1,0 +1,6 @@
+// !true
+
+void main() {
+    list entries = listdir("/tmp")
+    println(len(entries) > 0)
+}

@@ -543,6 +543,8 @@ class BytecodeCompiler:
             return "f64"
         if expr_type_field in ("string", "str"):
             return "str"
+        if expr_type_field == "bytes":
+            return "bytes"
         if expr_type_field == "bool":
             return "bool"
 
@@ -557,6 +559,8 @@ class BytecodeCompiler:
                 return "f64"
             if var_type in ("str", "string"):
                 return "str"
+            if var_type == "bytes":
+                return "bytes"
             return "bool" if var_type == "bool" else var_type
 
         # Member access (struct field)
@@ -617,9 +621,11 @@ class BytecodeCompiler:
                 return "i64"
             if func_name in {"bool", "exists", "isfile", "isdir", "contains"}:
                 return "bool"
+            if func_name == "encode":
+                return "bytes"
             if func_name in {"str", "upper", "lower", "strip", "replace",
                              "join", "basename", "dirname", "pathjoin",
-                             "getcwd", "abspath", "encode", "decode"}:
+                             "getcwd", "abspath", "decode"}:
                 return "str"
             if func_name in {"split", "listdir"}:
                 return "list"
@@ -1221,8 +1227,8 @@ class BytecodeCompiler:
                 if (
                     is_string_op
                     or expr_type in {"str", "string"}
-                    or left_type in ("str", "string")
-                    or right_type in ("str", "string")
+                    or left_type in ("str", "string", "bytes")
+                    or right_type in ("str", "string", "bytes")
                 ):
                     type_suffix = "_STR"
                 # If either operand is a float, use float operations
@@ -1835,8 +1841,9 @@ class BytecodeCompiler:
                 return
 
             # Load the struct (auto-dereference pointer-typed variables)
+            is_pointer_target = str(self.var_types.get(target_name, "")).startswith("*")
             self.emit_load(target_name)
-            if str(self.var_types.get(target_name, "")).startswith("*"):
+            if is_pointer_target:
                 self.emit("DEREF")
 
             target_struct = self.get_expr_struct_type({"id": target_name})
@@ -1863,8 +1870,13 @@ class BytecodeCompiler:
             # Set field and get modified struct back
             self.emit(f"STRUCT_SET {field_idx}")
 
-            # Store modified struct back
-            self.emit_store(target_name)
+            # A pointer target is already a reference: STRUCT_SET mutated it.
+            # Storing the returned struct into the pointer variable would
+            # clobber the pointer itself.
+            if is_pointer_target:
+                self.emit("POP")
+            else:
+                self.emit_store(target_name)
         elif node_type == "return":
             value = node.get("value")
 

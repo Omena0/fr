@@ -1,0 +1,11 @@
+// !8
+// !9
+
+void main() {
+    int value = 7
+    int* p = &value
+    value = value + 1
+    println(str(*p))
+    value = value + 1
+    println(str(*p))
+}

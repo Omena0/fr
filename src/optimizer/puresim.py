@@ -158,13 +158,18 @@ class PureInterpreter:
         if op == Op.MUL:
             return int(args[0]) * int(args[1])
         if op == Op.DIV:
-            if int(args[1]) == 0:
+            a, b = int(args[0]), int(args[1])
+            if b == 0:
                 raise SimulationError("division by zero")
-            return int(int(args[0]) / int(args[1]))
+            q = abs(a) // abs(b)
+            return q if (a < 0) == (b < 0) else -q
         if op == Op.MOD:
-            if int(args[1]) == 0:
+            a, b = int(args[0]), int(args[1])
+            if b == 0:
                 raise SimulationError("division by zero")
-            return int(args[0]) % int(args[1])
+            q = abs(a) // abs(b)
+            q = q if (a < 0) == (b < 0) else -q
+            return a - q * b
         if op == Op.NEG:
             return -args[0]
         if op in (Op.FADD, Op.FSUB, Op.FMUL, Op.FDIV, Op.FNEG):
@@ -231,7 +236,8 @@ class PureInterpreter:
         if op == Op.CEIL:
             return math.ceil(float(args[0]))
         if op == Op.ROUND:
-            return round(float(args[0]))
+            x = float(args[0])
+            return math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
         if op == Op.POW:
             return args[0] ** args[1]
         if op == Op.CALL:
@@ -268,7 +274,8 @@ class PureInterpreter:
             if name == "ceil":
                 return math.ceil(float(args[0]))
             if name == "round":
-                return round(float(args[0]))
+                x = float(args[0])
+                return math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
             raise SimulationError(f"unsupported builtin {name}")
         raise SimulationError(f"unsupported op {op}")
 
