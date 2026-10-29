@@ -293,7 +293,8 @@ class Instruction:
 
     __slots__ = ('op', 'result', 'operands', 'block', 'source_line',
                  'imm_int', 'imm_str', 'imm_float', 'target_blocks',
-                 'stack_alloc', 'pure_call', 'arg_ranges', 'no_zero_check')
+                 'stack_alloc', 'pure_call', 'arg_ranges', 'no_zero_check',
+                 'elided', 'fused_compare', 'fused_operands')
 
     def __init__(self, op: Op, operands: list[Value] = None,
                  result_type: ValueType = None, source_line: int = None):
@@ -311,6 +312,9 @@ class Instruction:
         self.pure_call = False    # CALL/CALL_BUILTIN proven side-effect free
         self.arg_ranges = None    # per-argument ranges inferred at this call
         self.no_zero_check = False  # divisor proven non-zero
+        self.elided = False         # skipped by codegen (folded into branch)
+        self.fused_compare = None   # comparison folded into BRANCH
+        self.fused_operands = None
 
         # Create result value if the instruction produces one
         if result_type is not None and result_type != IRType.VOID:

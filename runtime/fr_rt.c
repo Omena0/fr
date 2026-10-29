@@ -57,6 +57,15 @@ extern void longjmp(void* buffer, int value) __attribute__((noreturn));
 #define SYS_FORK       57
 #define SYS_EXIT       60
 #define SYS_WAIT4      61
+#define SYS_GETCWD     79
+#define SYS_CHDIR      80
+#define SYS_RENAME     82
+#define SYS_MKDIR      83
+#define SYS_RMDIR      84
+#define SYS_UNLINK     87
+#define SYS_GETPID     39
+#define SYS_GETDENTS64 217
+#define SYS_NEWFSTATAT 262
 #define SYS_OPENAT     257
 
 #define AT_FDCWD       (-100)
@@ -775,6 +784,7 @@ double runtime_cos(double x) {
 }
 
 double runtime_tan(double x) {
+    if (x == 0.0) return 0.0;
     double r;
     __asm__ __volatile__("fptan" : "=t"(r) : "0"(x) : "st(1)");
     return r;
@@ -1923,6 +1933,212 @@ int64_t runtime_socket_setsockopt(int64_t fd, const char* level,
 
 int64_t runtime_socket_shutdown(int64_t fd, int64_t how) {
     return syscall3(SYS_SHUTDOWN, fd, how, 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Filesystem helpers                                                         */
+/* ------------------------------------------------------------------------- */
+
+#define FR_S_IFMT   0xF000
+#define FR_S_IFREG  0x8000
+#define FR_S_IFDIR  0x4000
+#define FR_O_DIRECTORY 0x10000
+
+static int64_t fr_stat_path(const char* path, unsigned char* buf) {
+    memset(buf, 0, 160);
+    return syscall6(SYS_NEWFSTATAT, AT_FDCWD, (int64_t)path,
+                    (int64_t)buf, 0, 0, 0);
+}
+
+static int fr_stat_mode(const unsigned char* buf) {
+    int mode;
+    memcpy(&mode, buf + 24, sizeof(mode));
+    return mode;
+}
+
+static int64_t fr_stat_size(const unsigned char* buf) {
+    int64_t size;
+    memcpy(&size, buf + 48, sizeof(size));
+    return size;
+}
+
+int64_t runtime_exists(const char* path) {
+    unsigned char buf[160];
+    return fr_stat_path(path, buf) == 0 ? 1 : 0;
+}
+
+int64_t runtime_isfile(const char* path) {
+    unsigned char buf[160];
+    if (fr_stat_path(path, buf) != 0) return 0;
+    return (fr_stat_mode(buf) & FR_S_IFMT) == FR_S_IFREG ? 1 : 0;
+}
+
+int64_t runtime_isdir(const char* path) {
+    unsigned char buf[160];
+    if (fr_stat_path(path, buf) != 0) return 0;
+    return (fr_stat_mode(buf) & FR_S_IFMT) == FR_S_IFDIR ? 1 : 0;
+}
+
+int64_t runtime_getsize(const char* path) {
+    unsigned char buf[160];
+    if (fr_stat_path(path, buf) != 0) return -1;
+    return fr_stat_size(buf);
+}
+
+char* runtime_getcwd(void) {
+    char* buffer = (char*)malloc(4096);
+    if (!buffer) return fr_strdup("");
+    int64_t n = syscall3(SYS_GETCWD, (int64_t)buffer, 4096, 0);
+    if (n <= 0) {
+        free(buffer);
+        return fr_strdup("");
+    }
+    return buffer;
+}
+
+int64_t runtime_chdir(const char* path) {
+    return syscall1(SYS_CHDIR, (int64_t)path);
+}
+
+int64_t runtime_mkdir(const char* path) {
+    return syscall3(SYS_MKDIR, (int64_t)path, 0777, 0);
+}
+
+int64_t runtime_rmdir(const char* path) {
+    return syscall1(SYS_RMDIR, (int64_t)path);
+}
+
+int64_t runtime_remove(const char* path) {
+    return syscall1(SYS_UNLINK, (int64_t)path);
+}
+
+int64_t runtime_rename(const char* old_path, const char* new_path) {
+    return syscall3(SYS_RENAME, (int64_t)old_path, (int64_t)new_path, 0);
+}
+
+int64_t runtime_makedirs(const char* path) {
+    if (!path || !*path) return -1;
+    char* copy = fr_strdup(path);
+    if (!copy) return -1;
+    size_t len = strlen(copy);
+    for (size_t i = 1; i <= len; i++) {
+        if (copy[i] == '/' || copy[i] == '\0') {
+            char saved = copy[i];
+            copy[i] = '\0';
+            if (copy[0]) runtime_mkdir(copy);
+            copy[i] = saved;
+        }
+    }
+    free(copy);
+    return 0;
+}
+
+char* runtime_basename(const char* path) {
+    if (!path || !*path) return fr_strdup("");
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    size_t start = len;
+    while (start > 0 && path[start - 1] != '/') start--;
+    size_t out_len = len - start;
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) return fr_strdup("");
+    memcpy(out, path + start, out_len);
+    out[out_len] = '\0';
+    return out;
+}
+
+char* runtime_dirname(const char* path) {
+    if (!path || !*path) return fr_strdup(".");
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    while (len > 0 && path[len - 1] != '/') len--;
+    if (len == 0) return fr_strdup(".");
+    while (len > 1 && path[len - 1] == '/') len--;
+    char* out = (char*)malloc(len + 1);
+    if (!out) return fr_strdup(".");
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return out;
+}
+
+char* runtime_pathjoin(RuntimeList* parts) {
+    if (!parts || parts->length == 0) return fr_strdup("");
+    size_t total = 1;
+    for (int64_t i = 0; i < parts->length; i++) {
+        total += (size_t)strlen((const char*)parts->items[i]) + 1;
+    }
+    char* out = (char*)malloc(total);
+    if (!out) return fr_strdup("");
+    char* p = out;
+    for (int64_t i = 0; i < parts->length; i++) {
+        const char* part = (const char*)parts->items[i];
+        if (!part || !*part) continue;
+        size_t len = (size_t)strlen(part);
+        int need_sep = (p != out && p[-1] != '/' && part[0] != '/');
+        if (need_sep) *p++ = '/';
+        if (p != out && p[-1] == '/' && part[0] == '/') part++;
+        len = (size_t)strlen(part);
+        memcpy(p, part, len);
+        p += len;
+    }
+    *p = '\0';
+    return out;
+}
+
+char* runtime_abspath(const char* path) {
+    if (!path || !*path) return runtime_getcwd();
+    if (path[0] == '/') return fr_strdup(path);
+    char* cwd = runtime_getcwd();
+    size_t a = (size_t)strlen(cwd);
+    size_t b = (size_t)strlen(path);
+    char* out = (char*)malloc(a + b + 2);
+    if (!out) {
+        free(cwd);
+        return fr_strdup(path);
+    }
+    memcpy(out, cwd, a);
+    out[a] = '/';
+    memcpy(out + a + 1, path, b + 1);
+    free(cwd);
+    return out;
+}
+
+RuntimeList* runtime_listdir(const char* path) {
+    RuntimeList* list = runtime_list_new();
+    if (list) list->elem_type = 1;
+    if (!path) return list;
+
+    int64_t fd = syscall6(SYS_OPENAT, AT_FDCWD, (int64_t)path,
+                          O_RDONLY | FR_O_DIRECTORY, 0, 0, 0);
+    if (fd < 0) return list;
+
+    char* buffer = (char*)malloc(32768);
+    if (!buffer) {
+        syscall1(SYS_CLOSE, fd);
+        return list;
+    }
+    for (;;) {
+        int64_t n = syscall3(SYS_GETDENTS64, fd, (int64_t)buffer, 32768);
+        if (n <= 0) break;
+        int64_t off = 0;
+        while (off < n) {
+            uint16_t reclen;
+            memcpy(&reclen, buffer + off + 16, sizeof(reclen));
+            if (reclen == 0) break;
+            const char* name = buffer + off + 19;
+            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                runtime_list_append_int(list, (int64_t)fr_strdup(name));
+            }
+            off += reclen;
+        }
+    }
+    free(buffer);
+    syscall1(SYS_CLOSE, fd);
+    return list;
+}
+
+int64_t runtime_getpid(void) {
+    return syscall1(SYS_GETPID, 0);
 }
 
 /* ------------------------------------------------------------------------- */

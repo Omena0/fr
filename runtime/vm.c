@@ -3395,6 +3395,12 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_BUILTIN_LEN;
             else if (strcmp(token, "BUILTIN_SQRT") == 0)
                 inst.op = OP_BUILTIN_SQRT;
+            else if (strcmp(token, "SIN") == 0 || strcmp(token, "BUILTIN_SIN") == 0)
+                inst.op = OP_SIN;
+            else if (strcmp(token, "COS") == 0 || strcmp(token, "BUILTIN_COS") == 0)
+                inst.op = OP_COS;
+            else if (strcmp(token, "TAN") == 0 || strcmp(token, "BUILTIN_TAN") == 0)
+                inst.op = OP_TAN;
             else if (strcmp(token, "BUILTIN_ROUND") == 0)
                 inst.op = OP_BUILTIN_ROUND;
             else if (strcmp(token, "BUILTIN_FLOOR") == 0)
@@ -4529,6 +4535,9 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_BUILTIN_STR] = &&L_BUILTIN_STR,
         [OP_BUILTIN_LEN] = &&L_BUILTIN_LEN,
         [OP_BUILTIN_SQRT] = &&L_BUILTIN_SQRT,
+        [OP_SIN] = &&L_SIN,
+        [OP_COS] = &&L_COS,
+        [OP_TAN] = &&L_TAN,
         [OP_BUILTIN_ROUND] = &&L_BUILTIN_ROUND,
         [OP_BUILTIN_FLOOR] = &&L_BUILTIN_FLOOR,
         [OP_BUILTIN_CEIL] = &&L_BUILTIN_CEIL,
@@ -5362,6 +5371,30 @@ L_BUILTIN_SQRT: // OP_BUILTIN_SQRT
         value_free(v);
         DISPATCH();
     }
+}
+L_SIN: // OP_SIN
+{
+    Value v = vm_pop(vm);
+    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
+    vm_push(vm, value_make_f64(sin(d)));
+    value_free(v);
+    DISPATCH();
+}
+L_COS: // OP_COS
+{
+    Value v = vm_pop(vm);
+    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
+    vm_push(vm, value_make_f64(cos(d)));
+    value_free(v);
+    DISPATCH();
+}
+L_TAN: // OP_TAN
+{
+    Value v = vm_pop(vm);
+    double d = v.type == VAL_F64 ? v.as.f64 : mpz_get_d(*v.as.bigint);
+    vm_push(vm, value_make_f64(tan(d)));
+    value_free(v);
+    DISPATCH();
 }
 L_BUILTIN_ROUND: // OP_BUILTIN_ROUND
 {
@@ -8953,7 +8986,8 @@ L_FUSED_GET_STORE_LOAD: // OP_FUSED_GET_STORE_LOAD
         if (struct_val.type != VAL_STRUCT ||
             field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
         {
-            fprintf(stderr, "Error: Invalid fused struct field access\n");
+            fprintf(stderr, "Error: Invalid fused struct field access (field %d, type %d)\n",
+                    field_idx, struct_val.type == VAL_STRUCT ? struct_val.as.struct_val->field_count : -1);
             exit(1);
         }
         Value field_val = value_copy(struct_val.as.struct_val->fields[field_idx]);

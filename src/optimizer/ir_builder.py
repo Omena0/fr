@@ -672,7 +672,11 @@ class IRBuilder:
 
         if op == "NEG":
             a = _pop()
-            inst = _make_inst(Op.NEG, [a], IRType.INT64)
+            inst = _make_inst(
+                Op.NEG,
+                [a],
+                IRType.FLOAT64 if a.type == IRType.FLOAT64 else IRType.INT64,
+            )
             if inst.result:
                 _push(inst.result)
             return
@@ -880,6 +884,25 @@ class IRBuilder:
             return
 
         # ── Const-fused comparison ──
+
+        if op in (
+            "CMP_LT_CONST_F64", "CMP_GT_CONST_F64", "CMP_LE_CONST_F64",
+            "CMP_GE_CONST_F64", "CMP_EQ_CONST_F64", "CMP_NE_CONST_F64",
+        ) and args:
+            a = _pop()
+            c = self._make_const(IRType.FLOAT64, float(args[0]), block, source_line)
+            cmp_map = {
+                "CMP_LT_CONST_F64": Op.LT,
+                "CMP_GT_CONST_F64": Op.GT,
+                "CMP_LE_CONST_F64": Op.LE,
+                "CMP_GE_CONST_F64": Op.GE,
+                "CMP_EQ_CONST_F64": Op.EQ,
+                "CMP_NE_CONST_F64": Op.NE,
+            }
+            inst = _make_inst(cmp_map[op], [a, c], IRType.BOOL)
+            if inst.result:
+                _push(inst.result)
+            return
 
         if op == "CMP_LT_CONST" and args:
             a = _pop()
@@ -1613,6 +1636,12 @@ class IRBuilder:
                     var_versions[idx] = inst.result
             return
 
+        if op == "GETPID":
+            inst = _make_inst(Op.CALL_BUILTIN, [], IRType.INT64, imm_str="getpid")
+            if inst.result:
+                _push(inst.result)
+            return
+
         # ── File I/O, set, dict, etc. → CALL_BUILTIN ──
 
         if op.startswith("FILE_"):
@@ -1622,6 +1651,22 @@ class IRBuilder:
                 "FILE_WRITE": ("fwrite", 2, IRType.INT64),
                 "FILE_READ": ("fread", 2, IRType.STRING),
                 "FILE_CLOSE": ("fclose", 1, IRType.VOID),
+                "FILE_EXISTS": ("exists", 1, IRType.BOOL),
+                "FILE_ISFILE": ("isfile", 1, IRType.BOOL),
+                "FILE_ISDIR": ("isdir", 1, IRType.BOOL),
+                "FILE_LISTDIR": ("listdir", 1, ListType(IRType.STRING)),
+                "FILE_MKDIR": ("mkdir", 1, IRType.VOID),
+                "FILE_MAKEDIRS": ("makedirs", 1, IRType.VOID),
+                "FILE_REMOVE": ("remove", 1, IRType.VOID),
+                "FILE_RMDIR": ("rmdir", 1, IRType.VOID),
+                "FILE_RENAME": ("rename", 2, IRType.VOID),
+                "FILE_GETSIZE": ("getsize", 1, IRType.INT64),
+                "FILE_GETCWD": ("getcwd", 0, IRType.STRING),
+                "FILE_CHDIR": ("chdir", 1, IRType.VOID),
+                "FILE_ABSPATH": ("abspath", 1, IRType.STRING),
+                "FILE_BASENAME": ("basename", 1, IRType.STRING),
+                "FILE_DIRNAME": ("dirname", 1, IRType.STRING),
+                "FILE_JOIN": ("pathjoin", 1, IRType.STRING),
             }
             if op in file_map:
                 name, n_args, ret_type = file_map[op]

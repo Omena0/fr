@@ -22,7 +22,7 @@ pip install frscript
 - **HTTP library** - A working HTTP/1.1 server/client library in `examples/http/http_lib.fr`, running on all three backends.
 - **Multiprocessing**. - Easy threading with fork() and wait().
 - **Python integration** - You can use any Python libraries with Frscript.
-- **Aggressive optimization** - Purity call-graph analysis, interprocedural ranges, call-site specialization, SROA/escape analysis, pure-function lookup tables and SSA/bytecode optimizations.
+- **Aggressive optimization** - Purity call-graph analysis, interprocedural ranges, call-site specialization, pure constant-call folding, LICM, SROA/escape analysis, pure-function lookup tables, inline list fast paths and assembly peepholes.
 - **Deterministic memory** - Reference-counted native structs/lists/sets with function-scope cleanup, plus SROA and stack allocation for non-escaping values.
 - **Modern memory model** - Reference-semantics structs/lists/sets, scope-based reference counting, automatic stack allocation for non-escaping values, and a free-list native allocator.
 - **Opt-in pointers** - `int*`, `&value`, `*p`, pointer fields and pointer parameters, lowered directly to addresses in native code.

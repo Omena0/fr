@@ -1,0 +1,6 @@
+// !AB
+
+void main() {
+    print("A")
+    print("B")
+}

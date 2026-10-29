@@ -1,0 +1,9 @@
+// !true
+// !true
+// !true
+
+void main() {
+    println(sin(0.0) == 0.0)
+    println(cos(0.0) == 1.0)
+    println(tan(0.0) == 0.0)
+}

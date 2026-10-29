@@ -113,6 +113,8 @@ def _try_fold(inst: Instruction):
     if op == Op.MOD and len(const_vals) == 2 and const_vals[1] != 0:
         return (const_vals[0] % const_vals[1], IRType.INT64)
     if op == Op.NEG and len(const_vals) == 1:
+        if inst.operands and inst.operands[0].type == IRType.FLOAT64:
+            return (-float(const_vals[0]), IRType.FLOAT64)
         return (-const_vals[0], IRType.INT64)
 
     # Float arithmetic
@@ -387,6 +389,15 @@ def _make_const_int(val: int, inst: Instruction) -> Value:
 
 
 # ── DCE: Dead Code Elimination ─────────────────────────────────
+
+
+def rebuild_uses(func: Function) -> None:
+    for value in func.all_values():
+        value.uses = []
+    for inst in func.all_instructions():
+        for operand in inst.operands:
+            if isinstance(operand, Value) and inst not in operand.uses:
+                operand.uses.append(inst)
 
 
 def dce(func: Function) -> bool:
@@ -940,6 +951,18 @@ def propagate_list_types(module: Module) -> bool:
                         if inst.op == Op.LIST_GET and inst.result.type != elem:
                             inst.result.type = elem
                             changed = True
+                elif inst.op == Op.PHI and inst.result is not None and inst.operands:
+                    operand_types = [op.type for op in inst.operands if isinstance(op, Value)]
+                    if operand_types:
+                        new_type = operand_types[0]
+                        if new_type == IRType.INT64:
+                            for t in operand_types[1:]:
+                                if t != IRType.INT64:
+                                    new_type = t
+                                    break
+                        if inst.result.type != new_type:
+                            inst.result.type = new_type
+                            changed = True
                 elif inst.op == Op.LIST_APPEND and len(inst.operands) >= 2:
                     lst, val = inst.operands[0], inst.operands[1]
                     new_type, did = refine(lst.type, ListType(val.type))
@@ -964,6 +987,9 @@ def propagate_list_types(module: Module) -> bool:
                         idx = inst.imm_int or 0
                         if idx < len(base.type.field_types):
                             field_type = base.type.field_types[idx]
+                            if inst.result.type != field_type:
+                                inst.result.type = field_type
+                                changed = True
                             if (
                                 isinstance(field_type, ListType)
                                 and isinstance(inst.result.type, ListType)
@@ -1324,6 +1350,66 @@ def specialize_calls(
     return changed
 
 
+def licm(func: Function) -> bool:
+    """Hoist loop-invariant, side-effect-free instructions to the entry block.
+
+    Constants and parameters (and values already in entry) are available
+    everywhere, so they are safe to move; memory reads and calls are never
+    hoisted.
+    """
+    if func.entry is None:
+        return False
+    try:
+        loops = FunctionAnalysis(func).loops.loops
+    except Exception:
+        return False
+    if not loops:
+        return False
+
+    entry = func.entry
+    changed = False
+    for loop in loops:
+        # Values available at entry: params/constants/entry-defined.
+        invariant: set[int] = set()
+        for block in func.blocks:
+            if block is entry:
+                for inst in block.instructions:
+                    if inst.result is not None:
+                        invariant.add(inst.result.id)
+        for param in func.params:
+            invariant.add(param.id)
+
+        hoisted: list[Instruction] = []
+        for block in loop.blocks:
+            if block is entry:
+                continue
+            for inst in list(block.instructions):
+                if inst.result is None or inst.op in (
+                    Op.PHI, Op.JUMP, Op.BRANCH, Op.RETURN, Op.RETURN_VOID
+                ):
+                    continue
+                if inst.has_side_effects or inst.op in (
+                    Op.ALLOC_LIST, Op.ALLOC_STRUCT, Op.ALLOCA,
+                    Op.CALL, Op.CALL_BUILTIN, Op.CALL_EXTERN,
+                    Op.DIV, Op.MOD, Op.FDIV,
+                ):
+                    continue
+                if all(
+                    isinstance(op, Value) and op.id in invariant
+                    for op in inst.operands
+                ):
+                    block.instructions.remove(inst)
+                    inst.block = entry
+                    insert_at = len(entry.instructions)
+                    if entry.terminator is not None:
+                        insert_at -= 1
+                    entry.instructions.insert(insert_at, inst)
+                    invariant.add(inst.result.id)
+                    hoisted.append(inst)
+                    changed = True
+    return changed
+
+
 def remove_unused_functions(module: Module) -> bool:
     """Remove functions unreachable from the entry point."""
     by_name = {f.name: f for f in module.functions}
@@ -1352,6 +1438,68 @@ def remove_unused_functions(module: Module) -> bool:
     before = len(module.functions)
     module.functions = [f for f in module.functions if f.name in reachable]
     return len(module.functions) != before
+
+
+def fold_pure_constant_calls(
+    module: Module, config: OptimizerConfig | None = None
+) -> bool:
+    """Evaluate pure calls with constant arguments at compile time."""
+    from optimizer.puresim import evaluate_function, _UNKNOWN
+
+    cfg = config or OptimizerConfig.from_env()
+    funcs = {f.name: f for f in module.functions}
+    changed = False
+    for func in module.functions:
+        for block in func.blocks:
+            for inst in list(block.instructions):
+                if inst.op != Op.CALL or not inst.imm_str:
+                    continue
+                target = funcs.get(inst.imm_str)
+                if target is None or not _is_pure_function(target):
+                    continue
+                if len(inst.operands) != len(target.params):
+                    continue
+                args = []
+                ok = True
+                for operand in inst.operands:
+                    info = _const_info(operand)
+                    if info is None or info[0] not in (
+                        IRType.INT64, IRType.FLOAT64, IRType.BOOL, IRType.STRING
+                    ):
+                        ok = False
+                        break
+                    args.append(info[1])
+                if not ok or inst.result is None:
+                    continue
+                result = evaluate_function(module, target, args, cfg)
+                if result is _UNKNOWN:
+                    continue
+                if isinstance(result, bool):
+                    inst.op = Op.CONST_BOOL
+                    inst.imm_int = 1 if result else 0
+                    inst.result.type = IRType.BOOL
+                elif isinstance(result, int):
+                    inst.op = Op.CONST_INT
+                    inst.imm_int = result
+                    inst.result.type = IRType.INT64
+                elif isinstance(result, float):
+                    inst.op = Op.CONST_FLOAT
+                    inst.imm_float = result
+                    inst.result.type = IRType.FLOAT64
+                elif isinstance(result, str):
+                    inst.op = Op.CONST_STR
+                    inst.imm_str = result
+                    inst.result.type = IRType.STRING
+                    if result not in module.string_constants:
+                        module.string_constants.append(result)
+                else:
+                    continue
+                for operand in inst.operands:
+                    if isinstance(operand, Value) and inst in operand.uses:
+                        operand.uses.remove(inst)
+                inst.operands = []
+                changed = True
+    return changed
 
 
 def _is_pure_function(func: Function) -> bool:
@@ -1522,12 +1670,18 @@ def run_passes(
 
             if level >= 2:
                 changed |= cse(func)
+                changed |= licm(func)
                 changed |= sroa(func, escape)
                 changed |= tco(func)
 
         if level >= 2:
             changed |= inline_small_functions(module, cfg.inline_max_inst)
             changed |= specialize_calls(module, cfg)
+            for func in module.functions:
+                if not func.is_extern:
+                    rebuild_uses(func)
+            changed |= mark_purity(module)
+            changed |= fold_pure_constant_calls(module, cfg)
             if changed:
                 analyze_module_ranges(module, cfg)
         changed |= mark_purity(module)
@@ -1539,6 +1693,7 @@ def run_passes(
     # Final DCE cleanup
     for func in module.functions:
         if not func.is_extern:
+            rebuild_uses(func)
             dce(func)
 
     remove_unused_functions(module)

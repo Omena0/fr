@@ -1,0 +1,33 @@
+// !true
+// !4
+// !true
+// !true
+// !moved.txt
+// !false
+// !false
+
+void main() {
+    str base = "/tmp/fr_cov_" + str(getpid())
+    str nested = pathjoin([base, "a", "b"])
+    makedirs(nested)
+    println(isdir(nested))
+
+    str file = pathjoin([base, "data.txt"])
+    int handle = fopen(file, "w")
+    fwrite(handle, "test")
+    fclose(handle)
+    println(str(getsize(file)))
+    println(contains(listdir(base), "data.txt"))
+
+    str moved = pathjoin([base, "moved.txt"])
+    rename(file, moved)
+    println(exists(moved))
+    println(basename(moved))
+    println(dirname(moved) != base)
+
+    remove(moved)
+    rmdir(nested)
+    rmdir(pathjoin([base, "a"]))
+    rmdir(base)
+    println(exists(base))
+}

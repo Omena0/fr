@@ -36,6 +36,67 @@ from optimizer.regalloc import (
 )
 
 
+CALLER_SAVED_XMM = [f"xmm{i}" for i in range(16)]
+
+
+def asm_peephole(text: str) -> str:
+    """Small post-allocation peephole pass for redundant temp copies."""
+    import re
+
+    lines = text.split("\n")
+    scratch = {f"r{i}" for i in range(8, 12)} | {f"xmm{i}" for i in range(8, 16)}
+
+    def is_reg(s: str) -> bool:
+        return bool(re.fullmatch(r"(r[0-9]+|xmm[0-9]+)", s))
+
+    changed = True
+    while changed:
+        changed = False
+        # Count register occurrences globally; a temp used exactly twice is a
+        # definition plus one consumer and can often be renamed into place.
+        counts = {r: len(re.findall(rf"\b{r}\b", text)) for r in scratch}
+        i = 0
+        while i + 1 < len(lines):
+            m = re.match(
+                r"^(\s*)(lea|mov|movsd|movq|add|sub|xor|addsd|subsd|mulsd|divsd)\s+([a-z0-9]+),\s*(.+)$",
+                lines[i],
+            )
+            m2 = re.match(r"^(\s*)mov(?:sd|q)?\s+([a-z0-9]+),\s*([a-z0-9]+)$", lines[i + 1])
+            if m and m2:
+                _, op, tmp, rest = m.groups()
+                _, dst, src = m2.groups()
+                if (
+                    tmp == src
+                    and tmp in scratch
+                    and counts.get(tmp) == 2
+                    and is_reg(dst)
+                    and dst != tmp
+                    and not re.search(rf"\b{re.escape(dst)}\b", rest)
+                ):
+                    lines[i] = f"{m.group(1)}{op} {dst}, {rest}"
+                    del lines[i + 1]
+                    text = "\n".join(lines)
+                    changed = True
+                    break
+            i += 1
+
+    # Simple identity cleanup.
+    cleaned = []
+    for line in lines:
+        st = line.strip()
+        m = re.match(r"^(\s*)mov\s+([a-z0-9]+),\s*\2$", line)
+        if m:
+            continue
+        m = re.match(r"^(\s*)lea\s+([a-z0-9]+),\s*\[([a-z0-9]+) \+ 0\]$", line)
+        if m:
+            cleaned.append(f"{m.group(1)}mov {m.group(2)}, {m.group(3)}")
+            continue
+        if re.match(r"^\s*(add|sub)\s+[a-z0-9]+,\s*0$", line):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 class CodeGen:
     """Emit x86_64 assembly from register-allocated IR."""
 
@@ -103,7 +164,7 @@ class CodeGen:
         if self._module_needs_bss():
             self._emit_bss()
 
-        return "\n".join(self.lines) + "\n"
+        return asm_peephole("\n".join(self.lines)) + "\n"
 
     def _emit(self, line: str):
         self.lines.append(line)
@@ -275,8 +336,27 @@ class CodeGen:
         self._emit(f"{miss_label}:")
         return ret_label
 
+    def _fold_compare_branches(self, func: Function):
+        compares = {Op.LT, Op.GT, Op.LE, Op.GE, Op.EQ, Op.NE}
+        for block in func.blocks:
+            for i in range(len(block.instructions) - 1):
+                inst = block.instructions[i]
+                nxt = block.instructions[i + 1]
+                if (
+                    inst.op in compares
+                    and inst.result is not None
+                    and nxt.op == Op.BRANCH
+                    and nxt.operands
+                    and nxt.operands[0] is inst.result
+                    and len(inst.result.uses) == 1
+                ):
+                    inst.elided = True
+                    nxt.fused_compare = inst.op
+                    nxt.fused_operands = list(inst.operands)
+
     def _emit_function(self, func: Function):
         """Emit a complete function with prologue, body, epilogue."""
+        self._fold_compare_branches(func)
         alloc = allocate_registers(func)
         asm_name = self._asm_func_name(func.name)
 
@@ -284,9 +364,8 @@ class CodeGen:
         self._compute_caller_saves(func, alloc)
 
         callee_save_size = len(alloc.used_callee_saved) * 8
-        # Every user function gets a runtime allocation scope for deterministic
-        # reference-counted cleanup, so all functions are call sites.
-        has_calls = True
+        needs_scope = self._func_needs_scope(func)
+        has_calls = self._func_has_calls(func) or needs_scope
         has_spills = alloc.frame_size > 0
         has_callee_saves = callee_save_size > 0
 
@@ -342,7 +421,8 @@ class CodeGen:
         elif has_calls:
             self._emit("    sub rsp, 8")
 
-        self._emit_call_aligned("runtime_scope_push")
+        if needs_scope:
+            self._emit_call_aligned("runtime_scope_push")
 
         lookup_ret = None
         if func.lookup_table and func.params:
@@ -372,14 +452,14 @@ class CodeGen:
             Op.LIST_GET,
             Op.LIST_SET,
             Op.LIST_APPEND,
-            Op.LIST_LEN,
             Op.ALLOC_STRUCT,
             Op.ALLOCA,
             Op.LIST_ELEM_ADDR,
             Op.STR_CONCAT,
             Op.TO_STR,
-            Op.TO_BOOL,
-            Op.SQRT,
+            Op.STORE_FIELD,
+            Op.STORE_GLOBAL,
+            Op.PTR_STORE,
             Op.SIN,
             Op.COS,
             Op.TAN,
@@ -401,10 +481,10 @@ class CodeGen:
         hold values that are live across the call and must be pushed/popped."""
         caller_saved_set = frozenset(CALLER_SAVED_GPRS)
 
-        # Build a mapping: value_id → assigned register (only caller-saved)
+        # Build a mapping: value_id → assigned register (caller-saved GPR/XMM)
         val_to_cs_reg: dict[int, str] = {}
         for vid, reg in alloc.reg_map.items():
-            if reg in caller_saved_set:
+            if reg in caller_saved_set or reg in CALLER_SAVED_XMM:
                 val_to_cs_reg[vid] = reg
 
         if not val_to_cs_reg:
@@ -441,6 +521,8 @@ class CodeGen:
                         continue
                     if iv.start <= cp and iv.end > cp:
                         reg = val_to_cs_reg[iv.value.id]
+                        if inst.op == Op.LIST_GET and reg not in ("rax", "r10", "r11"):
+                            continue
                         if reg not in save_regs:
                             save_regs.append(reg)
 
@@ -457,15 +539,36 @@ class CodeGen:
         self._emit(f".{asm_name}_{block.label}:")
 
         for inst in block.instructions:
+            if getattr(inst, "elided", False):
+                continue
             # Save/restore caller-saved registers around call instructions
             save_regs = (
                 self._get_caller_saves(inst) if inst.op in self._CALL_OPS else []
             )
-            for reg in save_regs:
-                self._emit(f"    push {reg}")
+            save_bytes = 0
+            gprs = [r for r in save_regs if not r.startswith("xmm")]
+            xmms = [r for r in save_regs if r.startswith("xmm")]
+            save_bytes = len(gprs) * 8 + len(xmms) * 8
+            save_bytes = (save_bytes + 15) & ~15
+            if save_bytes:
+                self._emit(f"    sub rsp, {save_bytes}")
+                off = 0
+                for reg in gprs:
+                    self._emit(f"    mov [rsp + {off}], {reg}")
+                    off += 8
+                for reg in xmms:
+                    self._emit(f"    movsd [rsp + {off}], {reg}")
+                    off += 8
             self._emit_instruction(func, block, inst, alloc)
-            for reg in reversed(save_regs):
-                self._emit(f"    pop {reg}")
+            if save_bytes:
+                off = 0
+                for reg in gprs:
+                    self._emit(f"    mov {reg}, [rsp + {off}]")
+                    off += 8
+                for reg in xmms:
+                    self._emit(f"    movsd {reg}, [rsp + {off}]")
+                    off += 8
+                self._emit(f"    add rsp, {save_bytes}")
 
         # If this block doesn't end with a terminator (falls through to next),
         # emit PHI copies for the fall-through successor
@@ -492,7 +595,10 @@ class CodeGen:
                 else:
                     self._emit(f"    xor {_dword(dst)}, {_dword(dst)}")
             else:
-                self._emit(f"    mov {dst}, {val}")
+                if dst.startswith("["):
+                    self._emit(f"    mov qword ptr {dst}, {val}")
+                else:
+                    self._emit(f"    mov {dst}, {val}")
             return
 
         if op == Op.CONST_FLOAT:
@@ -509,16 +615,22 @@ class CodeGen:
         if op == Op.CONST_STR:
             dst = self._loc(inst.result, alloc)
             label = self._get_string_label(inst.imm_str or "")
-            self._emit(f"    lea {dst}, [rip + {label}]")
+            self._emit_lea(dst, f"[rip + {label}]")
             return
 
         if op == Op.CONST_BOOL:
             dst = self._loc(inst.result, alloc)
             val = inst.imm_int or 0
             if val == 0:
-                self._emit(f"    xor {_dword(dst)}, {_dword(dst)}")
+                if dst.startswith("["):
+                    self._emit(f"    mov qword ptr {dst}, 0")
+                else:
+                    self._emit(f"    xor {_dword(dst)}, {_dword(dst)}")
             else:
-                self._emit(f"    mov {dst}, 1")
+                if dst.startswith("["):
+                    self._emit(f"    mov qword ptr {dst}, 1")
+                else:
+                    self._emit(f"    mov {dst}, 1")
             return
 
         # ── Integer arithmetic ──
@@ -600,6 +712,19 @@ class CodeGen:
         if op == Op.NEG:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
+            if is_float_type(inst.result.type) or (
+                inst.operands and is_float_type(inst.operands[0].type)
+            ):
+                a_xmm = a if a.startswith("xmm") else "xmm14"
+                if not a.startswith("xmm"):
+                    self._emit(f"    movq {a_xmm}, {a}")
+                self._emit("    xorpd xmm15, xmm15")
+                self._emit(f"    subsd xmm15, {a_xmm}")
+                if dst.startswith("xmm"):
+                    self._emit(f"    movsd {dst}, xmm15")
+                else:
+                    self._emit(f"    movq {dst}, xmm15")
+                return
             if dst != a:
                 self._emit(f"    mov {dst}, {a}")
             self._emit(f"    neg {dst}")
@@ -621,12 +746,12 @@ class CodeGen:
                 # Check for division by zero — raise exception if divisor is 0.0
                 b = self._loc(inst.operands[1], alloc)
                 skip_label = self._new_label("fdiv_ok")
-                self._emit(f"    xorpd xmm15, xmm15")
+                zero_label = self._get_float_label(0.0)
                 if b.startswith("xmm"):
-                    self._emit(f"    ucomisd {b}, xmm15")
+                    self._emit(f"    ucomisd {b}, [rip + {zero_label}]")
                 else:
                     self._emit(f"    movq xmm14, {b}")
-                    self._emit(f"    ucomisd xmm14, xmm15")
+                    self._emit(f"    ucomisd xmm14, [rip + {zero_label}]")
                 self._emit(f"    jne {skip_label}")
                 # Divisor is zero — report through runtime_error_at so handlers and
                 # test-mode error formatting behave exactly like the other VMs.
@@ -684,7 +809,11 @@ class CodeGen:
         if op == Op.NOT:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
-            self._emit(f"    test {a}, {a}")
+            if a.startswith("["):
+                self._emit(f"    mov r11, {a}")
+                self._emit("    test r11, r11")
+            else:
+                self._emit(f"    test {a}, {a}")
             self._emit(f"    setz al")
             self._emit(f"    movzx {dst}, al")
             return
@@ -771,9 +900,13 @@ class CodeGen:
             else:
                 base_ref = base
             if dst.startswith("xmm"):
-                self._emit(f"    movsd {dst}, [{base_ref} + {offset}]")
+                if dst.startswith("["):
+                    self._emit(f"    movsd xmm15, [{base_ref} + {offset}]")
+                    self._emit(f"    movsd {dst}, xmm15")
+                else:
+                    self._emit(f"    movsd {dst}, [{base_ref} + {offset}]")
             else:
-                self._emit(f"    mov {dst}, [{base_ref} + {offset}]")
+                self._emit_int_move(f"[{base_ref} + {offset}]", dst)
             return
 
         if op == Op.STORE_FIELD:
@@ -806,8 +939,15 @@ class CodeGen:
             else:
                 base_ref = base
             if val.startswith("xmm"):
-                self._emit(f"    movsd [{base_ref} + {offset}], {val}")
+                if val.startswith("["):
+                    self._emit(f"    movsd xmm15, {val}")
+                    self._emit(f"    movsd [{base_ref} + {offset}], xmm15")
+                else:
+                    self._emit(f"    movsd [{base_ref} + {offset}], {val}")
             else:
+                if val.startswith("["):
+                    self._emit(f"    mov r10, {val}")
+                    val = "r10"
                 self._emit(f"    mov [{base_ref} + {offset}], {val}")
             return
 
@@ -816,7 +956,7 @@ class CodeGen:
         if op == Op.ADDR_GLOBAL:
             dst = self._loc(inst.result, alloc)
             name = inst.imm_str or "unknown"
-            self._emit(f"    lea {dst}, [rip + _fr_global_{name}]")
+            self._emit_lea(dst, f"[rip + _fr_global_{name}]")
             self.module.global_vars[name] = IRType.INT64
             return
 
@@ -837,9 +977,13 @@ class CodeGen:
             else:
                 ptr_ref = ptr
             if dst.startswith("xmm"):
-                self._emit(f"    movsd {dst}, [{ptr_ref}]")
+                if dst.startswith("["):
+                    self._emit(f"    movsd xmm15, [{ptr_ref}]")
+                    self._emit(f"    movsd {dst}, xmm15")
+                else:
+                    self._emit(f"    movsd {dst}, [{ptr_ref}]")
             else:
-                self._emit(f"    mov {dst}, [{ptr_ref}]")
+                self._emit_int_move(f"[{ptr_ref}]", dst)
             return
 
         if op == Op.PTR_STORE:
@@ -867,8 +1011,15 @@ class CodeGen:
             else:
                 ptr_ref = ptr
             if val.startswith("xmm"):
-                self._emit(f"    movsd [{ptr_ref}], {val}")
+                if val.startswith("["):
+                    self._emit(f"    movsd xmm15, {val}")
+                    self._emit(f"    movsd [{ptr_ref}], xmm15")
+                else:
+                    self._emit(f"    movsd [{ptr_ref}], {val}")
             else:
+                if val.startswith("["):
+                    self._emit(f"    mov r10, {val}")
+                    val = "r10"
                 self._emit(f"    mov [{ptr_ref}], {val}")
             return
 
@@ -881,7 +1032,7 @@ class CodeGen:
                 base_ref = "r11"
             else:
                 base_ref = base
-            self._emit(f"    lea {dst}, [{base_ref} + {offset}]")
+            self._emit_lea(dst, f"[{base_ref} + {offset}]")
             return
 
         if op == Op.LIST_ELEM_ADDR:
@@ -938,24 +1089,59 @@ class CodeGen:
             return
 
         if op == Op.LIST_GET:
-            # Check if indexing a string → use runtime_str_get_char
             list_type = inst.operands[0].type if inst.operands else None
             if list_type == IRType.STRING:
                 self._emit_runtime_call("runtime_str_get_char", inst, alloc, 2)
             else:
+                dst = self._loc(inst.result, alloc) if inst.result else "rax"
                 a = self._loc(inst.operands[0], alloc)
                 b = self._loc(inst.operands[1], alloc)
                 line = inst.source_line or 0
-                if a != "rdi":
-                    self._emit(f"    mov rdi, {a}")
-                if b != "rsi":
-                    self._emit(f"    mov rsi, {b}")
+                slow = self._new_label("list_get_slow")
+                done = self._new_label("list_get_done")
+                # Stage operands so loading scratch registers never clobbers
+                # a list/index that happened to live in r10/r11/rax.
+                self._emit("    sub rsp, 16")
+                if a.startswith("["):
+                    self._emit(f"    mov rax, {a}")
+                    self._emit("    mov [rsp], rax")
+                else:
+                    self._emit(f"    mov [rsp], {a}")
+                if b.startswith("["):
+                    self._emit(f"    mov rax, {b}")
+                    self._emit("    mov [rsp + 8], rax")
+                else:
+                    self._emit(f"    mov [rsp + 8], {b}")
+                self._emit("    mov r11, [rsp]")
+                self._emit("    mov r10, [r11 + 8]")
+                self._emit("    mov rax, [rsp + 8]")
+                self._emit("    test rax, rax")
+                self._emit(f"    js {slow}")
+                self._emit("    cmp rax, r10")
+                self._emit(f"    jae {slow}")
+                self._emit("    mov r11, [r11]")
+                if dst.startswith("xmm"):
+                    self._emit(f"    movq {dst}, [r11 + rax * 8]")
+                elif dst.startswith("["):
+                    self._emit(f"    mov r10, [r11 + rax * 8]")
+                    self._emit(f"    mov {dst}, r10")
+                else:
+                    self._emit(f"    mov {dst}, [r11 + rax * 8]")
+                self._emit("    add rsp, 16")
+                self._emit(f"    jmp {done}")
+                self._emit(f"{slow}:")
+                self._emit("    mov rdi, [rsp]")
+                self._emit("    mov rsi, [rsp + 8]")
                 self._emit(f"    mov rdx, {line}")
                 self._emit_call_aligned("runtime_list_get_int_at")
-                if inst.result:
-                    dst = self._loc(inst.result, alloc)
-                    if dst != "rax":
-                        self._emit(f"    mov {dst}, rax")
+                if dst.startswith("xmm"):
+                    self._emit(f"    movq {dst}, rax")
+                elif dst.startswith("["):
+                    self._emit(f"    mov {dst}, rax")
+                elif dst != "rax":
+                    self._emit(f"    mov {dst}, rax")
+                self._emit("    add rsp, 16")
+                self._emit(f"{done}:")
             return
 
         if op == Op.LIST_SET:
@@ -980,7 +1166,21 @@ class CodeGen:
             return
 
         if op == Op.LIST_LEN:
-            self._emit_runtime_call("runtime_list_len", inst, alloc, 1)
+            dst = self._loc(inst.result, alloc)
+            lst = self._loc(inst.operands[0], alloc)
+            if dst.startswith("xmm"):
+                # Unusual: length is integer but the allocator picked an XMM.
+                self._emit(f"    mov rax, {lst}" if lst.startswith("[") else f"    mov rax, {lst}")
+                self._emit("    mov rax, [rax + 8]")
+                self._emit(f"    movq {dst}, rax")
+            elif lst.startswith("["):
+                # dst doubles as the temporary list pointer: no scratch clobber.
+                self._emit_int_move(lst, dst)
+                self._emit(f"    mov {dst}, [{dst} + 8]")
+            elif dst == lst:
+                self._emit(f"    mov {dst}, [{dst} + 8]")
+            else:
+                self._emit(f"    mov {dst}, [{lst} + 8]")
             return
 
         # ── Control flow ──
@@ -996,11 +1196,41 @@ class CodeGen:
             return
 
         if op == Op.BRANCH:
-            cond = self._loc(inst.operands[0], alloc)
-            self._emit(f"    test {cond}, {cond}")
-            # Branch: if false → jump to false label, else fall through to next block
             false_label = inst.imm_str
             asm_name = self._asm_func_name(func.name)
+            if inst.fused_compare is not None and inst.fused_operands:
+                a = self._loc(inst.fused_operands[0], alloc)
+                b = self._loc(inst.fused_operands[1], alloc)
+                a_type = inst.fused_operands[0].type
+                b_type = inst.fused_operands[1].type
+                is_float = is_float_type(a_type) or is_float_type(b_type)
+                if is_float:
+                    a_xmm = a if a.startswith("xmm") else "xmm14"
+                    b_xmm = b if b.startswith("xmm") else "xmm15"
+                    if not a.startswith("xmm"):
+                        self._emit(f"    movq {a_xmm}, {a}")
+                    if not b.startswith("xmm"):
+                        self._emit(f"    movq {b_xmm}, {b}")
+                    self._emit(f"    ucomisd {a_xmm}, {b_xmm}")
+                    inv = {
+                        Op.LT: "jae", Op.GT: "jbe", Op.LE: "ja",
+                        Op.GE: "jb", Op.EQ: "jne", Op.NE: "je",
+                    }
+                else:
+                    self._emit(f"    cmp {a}, {b}")
+                    inv = {
+                        Op.LT: "jge", Op.GT: "jle", Op.LE: "jg",
+                        Op.GE: "jl", Op.EQ: "jne", Op.NE: "je",
+                    }
+                branch_cc = inv.get(inst.fused_compare, "je")
+            else:
+                cond = self._loc(inst.operands[0], alloc)
+                if cond.startswith("["):
+                    self._emit(f"    mov rax, {cond}")
+                    self._emit("    test rax, rax")
+                else:
+                    self._emit(f"    test {cond}, {cond}")
+                branch_cc = "jz"
             # We need PHI copies for the false branch (jumped to) and the
             # true branch (fall-through to the next block).
             # For the false branch, emit copies before the jz:
@@ -1010,7 +1240,7 @@ class CodeGen:
                 # Use a trampoline: jump to a copy block, then to target
                 tramp_label = f".{asm_name}_phi_tramp_{self._next_label()}"
                 done_label = f".{asm_name}_phi_done_{self._next_label()}"
-                self._emit(f"    jz {tramp_label}")
+                self._emit(f"    {branch_cc} {tramp_label}")
                 # Fall-through (true) path — emit PHI copies for the next block
                 true_block = self._get_fall_through_block(func, block)
                 if true_block:
@@ -1021,7 +1251,7 @@ class CodeGen:
                 self._emit(f"    jmp .{asm_name}_{false_label}")
                 self._emit(f"{done_label}:")
             else:
-                self._emit(f"    jz .{asm_name}_{false_label}")
+                self._emit(f"    {branch_cc} .{asm_name}_{false_label}")
                 # Fall-through (true) path
                 true_block = self._get_fall_through_block(func, block)
                 if true_block:
@@ -1287,7 +1517,7 @@ class CodeGen:
                 if xdst != dst:
                     self._emit(f"    movsd {dst}, {xdst}")
             else:
-                self._emit(f"    mov {dst}, [rip + _fr_global_{name}]")
+                self._emit_int_move(f"[rip + _fr_global_{name}]", dst)
             self.module.global_vars.setdefault(name, typ)
             return
 
@@ -1305,6 +1535,9 @@ class CodeGen:
             elif val.startswith("xmm"):
                 self._emit(f"    movsd [rip + _fr_global_{name}], {val}")
             else:
+                if val.startswith("["):
+                    self._emit(f"    mov r10, {val}")
+                    val = "r10"
                 self._emit(f"    mov [rip + _fr_global_{name}], {val}")
             self.module.global_vars.setdefault(name, val_type)
             return
@@ -1350,12 +1583,43 @@ class CodeGen:
 
         if dst == a:
             self._emit(f"    {mnemonic} {dst}, {b}")
-        elif dst == b and mnemonic in ("add", "and", "or", "xor"):
+            return
+        if dst == b and mnemonic in ("add", "and", "or", "xor"):
             # Commutative — swap
             self._emit(f"    {mnemonic} {dst}, {a}")
-        else:
-            self._emit(f"    mov {dst}, {a}")
-            self._emit(f"    {mnemonic} {dst}, {b}")
+            return
+
+        if mnemonic in ("add", "sub"):
+            from optimizer.passes import _get_const_value
+
+            ca = _get_const_value(inst.operands[0])
+            cb = _get_const_value(inst.operands[1])
+            if (
+                not a.startswith("[")
+                and not dst.startswith("[")
+                and not dst.startswith("xmm")
+            ):
+                if cb is not None and isinstance(cb, int):
+                    delta = cb if mnemonic == "add" else -cb
+                    if -2**31 <= delta < 2**31:
+                        self._emit(f"    lea {dst}, [{a} + {delta}]")
+                        return
+                if mnemonic == "add" and ca is not None and isinstance(ca, int):
+                    if not b.startswith("["):
+                        self._emit(f"    lea {dst}, [{b} + {ca}]")
+                        return
+                if mnemonic == "add" and not b.startswith("["):
+                    self._emit(f"    lea {dst}, [{a} + {b}]")
+                    return
+
+        if dst.startswith("[") and a.startswith("["):
+            self._emit(f"    mov r10, {a}")
+            a = "r10"
+        if dst.startswith("[") and b.startswith("["):
+            self._emit(f"    mov r11, {b}")
+            b = "r11"
+        self._emit_int_move(a, dst)
+        self._emit(f"    {mnemonic} {dst}, {b}")
 
     def _emit_float_binop(self, inst: Instruction, alloc: RegAllocation, mnemonic: str):
         """Emit a binary float operation."""
@@ -1424,7 +1688,11 @@ class CodeGen:
                 self._emit(f"    movq {b_xmm}, {b}")
             self._emit(f"    ucomisd {a_xmm}, {b_xmm}")
         else:
-            self._emit(f"    cmp {a}, {b}")
+            if a.startswith("[") and b.startswith("["):
+                self._emit(f"    mov rax, {a}")
+                self._emit(f"    cmp rax, {b}")
+            else:
+                self._emit(f"    cmp {a}, {b}")
 
         cc_map = {
             Op.LT: "setl",
@@ -1446,9 +1714,14 @@ class CodeGen:
             }
 
         cc = cc_map.get(inst.op, "sete")
-        dst_byte = _byte(dst)
-        self._emit(f"    {cc} {dst_byte}")
-        self._emit(f"    movzx {dst}, {dst_byte}")
+        if dst.startswith("["):
+            self._emit(f"    {cc} al")
+            self._emit("    movzx rax, al")
+            self._emit(f"    mov {dst}, rax")
+        else:
+            dst_byte = _byte(dst)
+            self._emit(f"    {cc} {dst_byte}")
+            self._emit(f"    movzx {dst}, {dst_byte}")
 
     def _emit_struct_alloc(self, inst: Instruction, alloc: RegAllocation):
         """Allocate a struct through the runtime allocator.
@@ -1473,7 +1746,7 @@ class CodeGen:
                     self._emit(f"    movsd [rbp - {stack_offset - offset}], {val_loc}")
                 else:
                     self._emit(f"    mov [rbp - {stack_offset - offset}], {val_loc}")
-            self._emit(f"    lea {dst}, [rbp - {stack_offset}]")
+            self._emit_lea(dst, f"[rbp - {stack_offset}]")
             return
 
         array_size = n_fields * 8
@@ -1679,6 +1952,33 @@ class CodeGen:
                     else:
                         self._emit(f"    mov {dst}, rax")
 
+    def _emit_lea(self, dst: str, expr: str):
+        if dst.startswith("["):
+            self._emit(f"    lea r11, {expr}")
+            self._emit(f"    mov {dst}, r11")
+        else:
+            self._emit(f"    lea {dst}, {expr}")
+
+    def _emit_int_move(self, src: str, dst: str):
+        if src == dst:
+            return
+        if src.startswith("[") and dst.startswith("["):
+            self._emit(f"    mov r11, {src}")
+            self._emit(f"    mov {dst}, r11")
+        else:
+            self._emit(f"    mov {dst}, {src}")
+
+    def _emit_float_move(self, src: str, dst: str):
+        if src == dst:
+            return
+        if src.startswith("[") and dst.startswith("["):
+            self._emit(f"    movsd xmm15, {src}")
+            self._emit(f"    movsd {dst}, xmm15")
+        elif src.startswith("xmm"):
+            self._emit(f"    movsd {dst}, {src}")
+        else:
+            self._emit(f"    movq {dst}, {src}")
+
     def _emit_parallel_int_moves(self, moves: list[tuple[str, str]]):
         """Emit register moves handling conflicts where a target is another move's source."""
         remaining = [(s, d) for s, d in moves if s != d]
@@ -1690,7 +1990,7 @@ class CodeGen:
                     src2 == dst for j, (src2, _) in enumerate(remaining) if j != i
                 )
                 if not conflict:
-                    self._emit(f"    mov {dst}, {src}")
+                    self._emit_int_move(src, dst)
                     remaining.pop(i)
                     progress = True
                     break
@@ -1710,7 +2010,7 @@ class CodeGen:
                     src2 == dst for j, (src2, _) in enumerate(remaining) if j != i
                 )
                 if not conflict:
-                    self._emit(f"    movsd {dst}, {src}")
+                    self._emit_float_move(src, dst)
                     remaining.pop(i)
                     progress = True
                     break
@@ -1722,21 +2022,23 @@ class CodeGen:
 
     def _emit_epilogue(self, func: Function, alloc: RegAllocation):
         callee_save_size = len(alloc.used_callee_saved) * 8
-        has_calls = True
+        needs_scope = self._func_needs_scope(func)
+        has_calls = self._func_has_calls(func) or needs_scope
         has_spills = alloc.frame_size > 0 or bool(
             getattr(self, "_stack_alloc_offsets", {})
         )
         has_callee_saves = callee_save_size > 0
 
-        # Drop this frame's allocation scope before tearing down the frame.
-        # Preserve both ABI return registers across the runtime call.
-        self._emit("    sub rsp, 16")
-        self._emit("    mov [rsp], rax")
-        self._emit("    movsd [rsp + 8], xmm0")
-        self._emit_call_aligned("runtime_scope_pop")
-        self._emit("    mov rax, [rsp]")
-        self._emit("    movsd xmm0, [rsp + 8]")
-        self._emit("    add rsp, 16")
+        if needs_scope:
+            # Drop this frame's allocation scope before tearing down the frame.
+            # Preserve both ABI return registers across the runtime call.
+            self._emit("    sub rsp, 16")
+            self._emit("    mov [rsp], rax")
+            self._emit("    movsd [rsp + 8], xmm0")
+            self._emit_call_aligned("runtime_scope_pop")
+            self._emit("    mov rax, [rsp]")
+            self._emit("    movsd xmm0, [rsp + 8]")
+            self._emit("    add rsp, 16")
 
         if has_spills:
             save_offset = alloc.frame_size
@@ -1758,6 +2060,24 @@ class CodeGen:
             self._emit("    ret")
         else:
             self._emit("    ret")
+
+    def _func_needs_scope(self, func: Function) -> bool:
+        """True only when this function creates manage objects itself."""
+        managed_builtins = {
+            "set_new",
+            "dict_new",
+            "str_split",
+            "listdir",
+        }
+        for block in func.blocks:
+            for inst in block.instructions:
+                if inst.op == Op.ALLOC_LIST or inst.op == Op.ALLOCA:
+                    return True
+                if inst.op == Op.ALLOC_STRUCT and not getattr(inst, "stack_alloc", False):
+                    return True
+                if inst.op == Op.CALL_BUILTIN and (inst.imm_str or "") in managed_builtins:
+                    return True
+        return False
 
     def _func_has_calls(self, func: Function) -> bool:
         for block in func.blocks:

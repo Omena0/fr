@@ -23,6 +23,9 @@ builtin_map = {
     "input": "INPUT",
     "len": "BUILTIN_LEN",
     "sqrt": "BUILTIN_SQRT",
+    "sin": "SIN",
+    "cos": "COS",
+    "tan": "TAN",
     "round": "BUILTIN_ROUND",
     "floor": "BUILTIN_FLOOR",
     "ceil": "BUILTIN_CEIL",
@@ -343,16 +346,37 @@ class BytecodeCompiler:
         self.temp_local_types[temp_name] = field_type
         return temp_name
 
+    def _collect_assigned_vars(self, node: Any, out: set[str]) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "var" and node.get("name"):
+                out.add(node["name"])
+            elif node.get("type") == "field_assign":
+                target = node.get("target")
+                if isinstance(target, str):
+                    out.add(target)
+                elif isinstance(target, dict) and "id" in target:
+                    out.add(target["id"])
+            for value in node.values():
+                self._collect_assigned_vars(value, out)
+        elif isinstance(node, list):
+            for item in node:
+                self._collect_assigned_vars(item, out)
+
     def _build_struct_field_cache(self, stmt: dict) -> Dict[tuple[str, str], str]:
         """Build per-statement cache mapping for repeated struct field reads."""
         counts: Dict[tuple[str, str], int] = {}
         writes: set[tuple[str, str]] = set()
+        assigned: set[str] = set()
         self._collect_struct_field_reads(stmt, counts)
         self._collect_struct_field_writes(stmt, writes)
+        self._collect_assigned_vars(stmt, assigned)
 
         cache: Dict[tuple[str, str], str] = {}
         for (var_name, field_name), count in counts.items():
             if count <= 0 or (var_name, field_name) in writes:
+                continue
+            if var_name in assigned:
+                # The cache prologue would read an uninitialized / stale value.
                 continue
             field_type = self._get_struct_field_type(var_name, field_name)
             if not field_type:
@@ -583,6 +607,22 @@ class BytecodeCompiler:
                     func_name = func_info
                 elif isinstance(func_info, dict) and "id" in func_info:
                     func_name = func_info["id"]
+
+            if func_name in {
+                "sqrt", "sin", "cos", "tan", "PI", "float", "pow", "str_to_float"
+            }:
+                return "f64"
+            if func_name in {"int", "str_to_int", "round", "floor", "ceil", "len",
+                             "getpid", "getsize"}:
+                return "i64"
+            if func_name in {"bool", "exists", "isfile", "isdir", "contains"}:
+                return "bool"
+            if func_name in {"str", "upper", "lower", "strip", "replace",
+                             "join", "basename", "dirname", "pathjoin",
+                             "getcwd", "abspath", "encode", "decode"}:
+                return "str"
+            if func_name in {"split", "listdir"}:
+                return "list"
 
             # Check if we have the function signature from C imports
             if func_name and func_name in self.c_functions:

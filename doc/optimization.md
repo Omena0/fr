@@ -13,13 +13,19 @@ source → parse-time evaluation/memoization → bytecode → SSA IR
 1. **Parse time** – literal folding, constant-function evaluation and memo tables.
    Information that is constant here is already reflected in the bytecode.
 2. **SSA local passes** – SCCP, algebraic simplification, branch simplification,
-   DCE, CSE, SROA, tail calls, linear block merging.
+   DCE, CSE, LICM, SROA, tail calls, linear block merging.
 3. **Whole-program passes** – call graph purity, interprocedural range
-   propagation, call-site specialization, dead function removal.
+   propagation, call-site specialization, pure constant-call folding, dead
+   function removal.
 4. **Compile-time simulation** – pure scalar functions are interpreted under a
    strict budget and the results become embedded lookup tables.
 5. **Code generation** – range facts remove proven-impossible division checks,
-   and lookup-table fast paths run before the normal function body.
+   and lookup-table fast paths run before the normal function body. Non-
+   allocating leaf functions omit allocation-scope calls; comparisons fused into
+   branches avoid setcc/test sequences; `lea` handles integer add/sub copies;
+   list length and valid list indexing are inlined; live XMM values are
+   preserved across calls; and a final assembly peephole removes redundant
+   temporary copies.
 
 ## Purity
 
@@ -58,6 +64,14 @@ branch folding, unreachable-block removal, linear-block merging and DCE. A
 branch containing side effects that is impossible for this call disappears from
 the clone. If the clone collapses to one block, the normal inliner merges it
 into the caller, so the caller jumps directly past the eliminated checks.
+
+## Pure constant-call folding and LICM
+
+Calls to pure functions whose arguments are all compile-time constants are
+evaluated by the budgeted interpreter and replaced with constants. Loop-
+invariant arithmetic, loads proven safe from loop-local mutation, and list
+length operations are hoisted by LICM. Calls with non-constant arguments still
+fall back to the lookup-table fast path.
 
 ## Pure-function lookup tables
 
