@@ -434,11 +434,13 @@ class CodeGen:
                 for iv in intervals:
                     if iv.value.id not in val_to_cs_reg:
                         continue
-                    # Value must be defined before this call and used after
-                    if iv.start < cp and iv.end > cp + 1:
+                    # A value defined by this call is not live before it;
+                    # everything else live across the call must be preserved.
+                    defining = getattr(iv.value, "defining_inst", None)
+                    if defining is inst:
+                        continue
+                    if iv.start <= cp and iv.end > cp:
                         reg = val_to_cs_reg[iv.value.id]
-                        # Don't save argument registers that are being passed
-                        # to this call (they're already set up)
                         if reg not in save_regs:
                             save_regs.append(reg)
 
@@ -1504,7 +1506,12 @@ class CodeGen:
         func_name = self._asm_func_name(inst.imm_str)
         args = inst.operands
 
-        # Set up arguments in ABI registers
+        # Set up arguments in ABI registers. Use parallel move resolution:
+        # setting rdi before moving the old rdi to rsi would otherwise clobber
+        # an argument (common with host/port/path style calls).
+        int_moves: list[tuple[str, str]] = []
+        float_moves: list[tuple[str, str]] = []
+        float_from_gpr: list[tuple[str, str]] = []
         int_idx = 0
         float_idx = 0
         for arg in args:
@@ -1515,19 +1522,22 @@ class CodeGen:
                     if float_idx < len(FLOAT_ARG_REGS)
                     else None
                 )
-                if target:
+                if target and arg_loc != target:
                     if arg_loc.startswith("xmm"):
-                        if arg_loc != target:
-                            self._emit(f"    movsd {target}, {arg_loc}")
+                        float_moves.append((arg_loc, target))
                     else:
-                        self._emit(f"    movq {target}, {arg_loc}")
+                        float_from_gpr.append((arg_loc, target))
                 float_idx += 1
             else:
                 target = ARG_REGS[int_idx] if int_idx < len(ARG_REGS) else None
-                if target:
-                    if arg_loc != target:
-                        self._emit(f"    mov {target}, {arg_loc}")
+                if target and arg_loc != target:
+                    int_moves.append((arg_loc, target))
                 int_idx += 1
+
+        self._emit_parallel_int_moves(int_moves)
+        self._emit_parallel_float_moves(float_moves)
+        for src, target in float_from_gpr:
+            self._emit(f"    movq {target}, {src}")
 
         self._emit_call_aligned(func_name)
 
@@ -1594,37 +1604,18 @@ class CodeGen:
 
         rt_name = runtime_map.get(name, f"runtime_{name}")
         n_args = len(inst.operands)
-
-        # Set up args — handle float/int register type mismatches
-        for i, arg in enumerate(inst.operands):
-            arg_loc = self._loc(arg, alloc)
-            if i < len(ARG_REGS):
-                target_reg = ARG_REGS[i]
-                if arg_loc != target_reg:
-                    if arg_loc.startswith("xmm"):
-                        self._emit(f"    movq {target_reg}, {arg_loc}")
-                    elif target_reg.startswith("xmm"):
-                        self._emit(f"    movq {target_reg}, {arg_loc}")
-                    else:
-                        self._emit(f"    mov {target_reg}, {arg_loc}")
-
-        self._emit_call_aligned(rt_name)
-
-        if inst.result:
-            dst = self._loc(inst.result, alloc)
-            ret_type = inst.result.type
-            if ret_type == IRType.FLOAT64:
-                # Float return value comes in xmm0
-                if dst != "xmm0":
-                    if dst.startswith("xmm"):
-                        self._emit(f"    movsd {dst}, xmm0")
-                    else:
-                        self._emit(f"    movq {dst}, xmm0")
-            elif dst != "rax":
-                if dst.startswith("xmm"):
-                    self._emit(f"    movq {dst}, rax")
-                else:
-                    self._emit(f"    mov {dst}, rax")
+        float_ret = inst.result is not None and inst.result.type == IRType.FLOAT64
+        float_args = [
+            i for i, arg in enumerate(inst.operands) if arg.type == IRType.FLOAT64
+        ]
+        self._emit_runtime_call(
+            rt_name,
+            inst,
+            alloc,
+            n_args,
+            float_args=float_args,
+            float_ret=float_ret,
+        )
 
     def _emit_runtime_call(
         self,

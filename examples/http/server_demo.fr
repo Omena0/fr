@@ -1,0 +1,26 @@
+import http_lib
+
+void main() {
+    int server = socket("inet", "stream")
+    setsockopt(server, "SOL_SOCKET", "SO_REUSEADDR", 1)
+    bind(server, "127.0.0.1", 18081)
+    listen(server, 8)
+
+    int client = server.accept()
+    HttpRequest request = http_read_request(client)
+
+    HttpResponse response = HttpResponse(200, "", [])
+    response.headers.append("Content-Type: text/plain")
+    if (request.path == "/hello") {
+        response.body = "Hello, " + http_get_header(request.headers, "user-agent")
+    } else if (request.path == "/echo" && request.method == "POST") {
+        response.body = request.body
+    } else {
+        response.status = 404
+        response.body = "Not Found"
+    }
+
+    http_send_response(client, response)
+    sclose(client)
+    sclose(server)
+}

@@ -49,6 +49,23 @@ def _parse_type(type_str: str, module: Module) -> ValueType:
     return _TYPE_MAP.get(type_str, IRType.INT64)
 
 
+def _unescape_bytecode_string(s: str) -> str:
+    """Decode the C-style escapes used by the bytecode writer."""
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch != "\\" or i + 1 >= len(s):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = s[i + 1]
+        mapping = {"n": "\n", "r": "\r", "t": "\t", "0": "\0"}
+        out.append(mapping.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
 def _parse_line(line: str) -> tuple[str, list[str]]:
     """Parse a bytecode line into (opcode, args)."""
     line = line.strip()
@@ -412,7 +429,9 @@ class IRBuilder:
 
         if op == "CONST_STR":
             for a in (args if args else [""]):
-                v = self._make_const(IRType.STRING, a, block, source_line)
+                v = self._make_const(
+                    IRType.STRING, _unescape_bytecode_string(a), block, source_line
+                )
                 _push(v)
             return
 
@@ -467,7 +486,12 @@ class IRBuilder:
         if op == "STORE_CONST_STR":
             for i in range(0, len(args) - 1, 2):
                 idx = int(args[i])
-                val = self._make_const(IRType.STRING, args[i + 1], block, source_line)
+                val = self._make_const(
+                    IRType.STRING,
+                    _unescape_bytecode_string(args[i + 1]),
+                    block,
+                    source_line,
+                )
                 var_versions[idx] = val
             return
 
@@ -787,6 +811,20 @@ class IRBuilder:
                 "LOAD2_CMP_NE": Op.NE,
             }
             ir_op = cmp_map.get(op, Op.LT)
+            if op in ("LOAD2_CMP_EQ", "LOAD2_CMP_NE") and (
+                a.type == IRType.STRING or b.type == IRType.STRING
+            ):
+                inst = _make_inst(
+                    Op.CALL_BUILTIN, [a, b], IRType.BOOL, imm_str="str_eq"
+                )
+                if inst.result:
+                    if op == "LOAD2_CMP_NE":
+                        not_inst = _make_inst(Op.NOT, [inst.result], IRType.BOOL)
+                        if not_inst.result:
+                            _push(not_inst.result)
+                    else:
+                        _push(inst.result)
+                return
             inst = _make_inst(ir_op, [a, b], IRType.BOOL)
             if inst.result:
                 _push(inst.result)
@@ -822,16 +860,21 @@ class IRBuilder:
                 _push(inst.result)
             return
 
-        if op == "CMP_EQ":
+        if op in ("CMP_EQ", "CMP_NE"):
             b, a = _pop(), _pop()
-            inst = _make_inst(Op.EQ, [a, b], IRType.BOOL)
-            if inst.result:
-                _push(inst.result)
-            return
-
-        if op == "CMP_NE":
-            b, a = _pop(), _pop()
-            inst = _make_inst(Op.NE, [a, b], IRType.BOOL)
+            if a.type == IRType.STRING or b.type == IRType.STRING:
+                inst = _make_inst(
+                    Op.CALL_BUILTIN, [a, b], IRType.BOOL, imm_str="str_eq"
+                )
+                if inst.result:
+                    if op == "CMP_NE":
+                        not_inst = _make_inst(Op.NOT, [inst.result], IRType.BOOL)
+                        if not_inst.result:
+                            _push(not_inst.result)
+                    else:
+                        _push(inst.result)
+                return
+            inst = _make_inst(Op.EQ if op == "CMP_EQ" else Op.NE, [a, b], IRType.BOOL)
             if inst.result:
                 _push(inst.result)
             return
@@ -1156,8 +1199,14 @@ class IRBuilder:
         if op == "LIST_GET":
             idx = _pop()
             lst = _pop()
-            # String indexing returns a string character
-            result_type = IRType.STRING if lst.type == IRType.STRING else IRType.INT64
+            # String indexing returns a string character; typed lists return
+            # their element type so downstream calls/prints get the right ABI.
+            if isinstance(lst.type, ListType):
+                result_type = lst.type.elem_type
+            elif lst.type == IRType.STRING:
+                result_type = IRType.STRING
+            else:
+                result_type = IRType.INT64
             inst = _make_inst(Op.LIST_GET, [lst, idx], result_type)
             if inst.result:
                 _push(inst.result)
@@ -1186,7 +1235,8 @@ class IRBuilder:
 
         if op == "LIST_POP":
             lst = _pop()
-            inst = _make_inst(Op.CALL_BUILTIN, [lst], IRType.INT64, imm_str="list_pop")
+            result_type = lst.type.elem_type if isinstance(lst.type, ListType) else IRType.INT64
+            inst = _make_inst(Op.CALL_BUILTIN, [lst], result_type, imm_str="list_pop")
             # LIST_POP in bytecode pushes (modified_list, popped_value)
             # The list is modified in-place, so push list back first, then result
             _push(lst)
@@ -1257,8 +1307,8 @@ class IRBuilder:
             return
 
         if op == "CONST_BYTES":
-            # Treat as a string constant for now
-            text = args[0] if args else ""
+            # Bytes share the escaped string payload representation.
+            text = _unescape_bytecode_string(args[0]) if args else ""
             v = self._make_const(IRType.STRING, text, block, source_line)
             _push(v)
             return
@@ -1619,14 +1669,27 @@ class IRBuilder:
                 if inst.result:
                     _push(inst.result)
             elif op == "DICT_SET":
-                builtin_args = [_pop(), _pop()]
+                value = _pop()
+                key = _pop()
+                d = _pop()
                 _make_inst(
-                    Op.CALL_BUILTIN, builtin_args, IRType.VOID, imm_str=builtin_name
+                    Op.CALL_BUILTIN, [d, key, value], IRType.VOID, imm_str=builtin_name
                 )
-            elif op in ("DICT_GET", "DICT_CONTAINS"):
-                builtin_args = [_pop()]
+                # The bytecode leaves the dictionary for the following STORE.
+                _push(d)
+            elif op == "DICT_GET":
+                key = _pop()
+                d = _pop()
                 inst = _make_inst(
-                    Op.CALL_BUILTIN, builtin_args, IRType.INT64, imm_str=builtin_name
+                    Op.CALL_BUILTIN, [d, key], IRType.INT64, imm_str=builtin_name
+                )
+                if inst.result:
+                    _push(inst.result)
+            elif op == "DICT_CONTAINS":
+                key = _pop()
+                d = _pop()
+                inst = _make_inst(
+                    Op.CALL_BUILTIN, [d, key], IRType.BOOL, imm_str=builtin_name
                 )
                 if inst.result:
                     _push(inst.result)
@@ -1708,6 +1771,80 @@ class IRBuilder:
             inst = _make_inst(Op.SELECT, [cond, true_val, false_val], IRType.INT64)
             if inst.result:
                 _push(inst.result)
+            return
+
+        # ── Sockets ──
+        if op == "SOCKET_CREATE":
+            typ = _pop()
+            family = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [family, typ], IRType.INT64, imm_str="socket_create"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op in ("SOCKET_CONNECT", "SOCKET_BIND"):
+            port = _pop()
+            host = _pop()
+            sock = _pop()
+            name = "socket_connect" if op == "SOCKET_CONNECT" else "socket_bind"
+            _make_inst(Op.CALL_BUILTIN, [sock, host, port], IRType.VOID, imm_str=name)
+            return
+        if op == "SOCKET_LISTEN":
+            backlog = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN, [sock, backlog], IRType.VOID, imm_str="socket_listen"
+            )
+            return
+        if op == "SOCKET_ACCEPT":
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock], IRType.INT64, imm_str="socket_accept"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_SEND":
+            data = _pop()
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock, data], IRType.INT64, imm_str="socket_send"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_SENDALL":
+            data = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN, [sock, data], IRType.VOID, imm_str="socket_sendall"
+            )
+            return
+        if op == "SOCKET_RECV":
+            size = _pop()
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock, size], IRType.STRING, imm_str="socket_recv"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_CLOSE":
+            sock = _pop()
+            _make_inst(Op.CALL_BUILTIN, [sock], IRType.VOID, imm_str="socket_close")
+            return
+        if op == "SOCKET_SETSOCKOPT":
+            value = _pop()
+            option = _pop()
+            level = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN,
+                [sock, level, option, value],
+                IRType.VOID,
+                imm_str="socket_setsockopt",
+            )
             return
 
         # ── Extern calls (C FFI) ──
@@ -1963,6 +2100,25 @@ class IRBuilder:
                         func, block, old_val, phi_val, block_entry_vars, block_exit_vars
                     )
                     changed = True
+
+        # Loop exits can inherit the back-edge value even though that value is
+        # not defined on the exit path. Re-point each successor's incoming
+        # version at the header PHI when the old value is not defined there.
+        for block in func.blocks:
+            for phi in block.phi_nodes:
+                var_idx = phi.imm_int
+                if phi.result is None:
+                    continue
+                for succ in block.successors:
+                    incoming = block_entry_vars.get(succ.label, {}).get(var_idx)
+                    if incoming is None or incoming is phi.result:
+                        continue
+                    defining = getattr(incoming, "defining_inst", None)
+                    if defining is not None and defining.block is succ:
+                        continue
+                    self._replace_val_in_block_and_succs(
+                        func, succ, incoming, phi.result, block_entry_vars, block_exit_vars
+                    )
 
     def _replace_val_in_block_and_succs(
         self, func, start_block, old_val, new_val, block_entry_vars, block_exit_vars

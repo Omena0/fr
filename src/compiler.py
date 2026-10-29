@@ -38,6 +38,7 @@ builtin_map = {
     "split": "STR_SPLIT",
     "join": "STR_JOIN",
     "replace": "STR_REPLACE",
+    "contains": "CONTAINS",
     "abs": "ABS",
     "pow": "POW",
     "min": "MIN",
@@ -76,6 +77,7 @@ builtin_map = {
     "listen": "SOCKET_LISTEN",
     "accept": "SOCKET_ACCEPT",
     "send": "SOCKET_SEND",
+    "sendall": "SOCKET_SENDALL",
     "recv": "SOCKET_RECV",
     "sclose": "SOCKET_CLOSE",
     "setsockopt": "SOCKET_SETSOCKOPT",
@@ -1194,6 +1196,12 @@ class BytecodeCompiler:
                 else:
                     type_suffix = "_F64"
 
+                if type_suffix == "_STR" and op in ("Eq", "==", "NotEq", "!="):
+                    self.emit("STR_EQ")
+                    if op in ("NotEq", "!="):
+                        self.emit("NOT")
+                    return
+
                 op_map = {
                     "Add": f"ADD{type_suffix}",
                     "+": f"ADD{type_suffix}",  # Support literal '+' operator
@@ -1719,14 +1727,21 @@ class BytecodeCompiler:
             # Parenthesized/dereferenced lvalue: compile the target expression
             # directly instead of treating it as a variable name.
             if isinstance(target_name, dict):
-                field_idx = next(
-                    (
-                        struct_def["field_map"][field_name]
-                        for struct_def in self.struct_defs.values()
-                        if field_name in struct_def["field_map"]
-                    ),
-                    -1,
-                )
+                target_struct = self.get_expr_struct_type(target_name)
+                field_idx = -1
+                if target_struct and target_struct in self.struct_defs:
+                    field_idx = self.struct_defs[target_struct]["field_map"].get(
+                        field_name, -1
+                    )
+                if field_idx < 0:
+                    field_idx = next(
+                        (
+                            struct_def["field_map"][field_name]
+                            for struct_def in self.struct_defs.values()
+                            if field_name in struct_def["field_map"]
+                        ),
+                        -1,
+                    )
                 if field_idx < 0:
                     raise ValueError(f"Unknown field: {field_name}")
                 self.compile_expr(target_name, None)
@@ -1784,14 +1799,21 @@ class BytecodeCompiler:
             if str(self.var_types.get(target_name, "")).startswith("*"):
                 self.emit("DEREF")
 
-            field_idx = next(
-                (
-                    struct_def["field_map"][field_name]
-                    for struct_def in self.struct_defs.values()
-                    if field_name in struct_def["field_map"]
-                ),
-                -1,
-            )
+            target_struct = self.get_expr_struct_type({"id": target_name})
+            field_idx = -1
+            if target_struct and target_struct in self.struct_defs:
+                field_idx = self.struct_defs[target_struct]["field_map"].get(
+                    field_name, -1
+                )
+            if field_idx < 0:
+                field_idx = next(
+                    (
+                        struct_def["field_map"][field_name]
+                        for struct_def in self.struct_defs.values()
+                        if field_name in struct_def["field_map"]
+                    ),
+                    -1,
+                )
             if field_idx < 0:
                 raise ValueError(f"Unknown field: {field_name}")
 

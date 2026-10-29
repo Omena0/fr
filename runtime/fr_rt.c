@@ -577,6 +577,7 @@ void* calloc(size_t count, size_t size) {
 #define FR_OBJ_LIST 2
 #define FR_OBJ_SET 3
 #define FR_OBJ_RAW 4
+#define FR_OBJ_DICT 5
 
 typedef struct FrObjHeader {
     uint64_t magic;
@@ -1329,6 +1330,72 @@ typedef struct {
     int elem_type;
 } RuntimeSet;
 
+typedef struct {
+    int64_t* keys;
+    int64_t* values;
+    int64_t length;
+    int64_t capacity;
+    int key_type; /* -1 unknown, 0 int, 1 string */
+} RuntimeDict;
+
+RuntimeDict* runtime_dict_new(void) {
+    RuntimeDict* dict = (RuntimeDict*)fr_obj_alloc(sizeof(RuntimeDict), FR_OBJ_DICT, 0);
+    if (!dict) return NULL;
+    dict->capacity = 8;
+    dict->length = 0;
+    dict->key_type = -1;
+    dict->keys = (int64_t*)malloc((size_t)dict->capacity * sizeof(int64_t));
+    dict->values = (int64_t*)malloc((size_t)dict->capacity * sizeof(int64_t));
+    if (!dict->keys || !dict->values) return NULL;
+    return dict;
+}
+
+static bool runtime_dict_key_eq(RuntimeDict* dict, int64_t a, int64_t b) {
+    if (dict->key_type == 1) return strcmp((const char*)a, (const char*)b) == 0;
+    return a == b;
+}
+
+void runtime_dict_set(RuntimeDict* dict, int64_t key, int64_t value) {
+    if (!dict) return;
+    if (dict->key_type == -1) dict->key_type = key > 0x100000 ? 1 : 0;
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_eq(dict, dict->keys[i], key)) {
+            dict->values[i] = value;
+            return;
+        }
+    }
+    if (dict->length >= dict->capacity) {
+        int64_t cap = dict->capacity * 2;
+        int64_t* keys = (int64_t*)realloc(dict->keys, (size_t)cap * sizeof(int64_t));
+        int64_t* values = (int64_t*)realloc(dict->values, (size_t)cap * sizeof(int64_t));
+        if (!keys || !values) return;
+        dict->keys = keys;
+        dict->values = values;
+        dict->capacity = cap;
+    }
+    dict->keys[dict->length] = key;
+    dict->values[dict->length] = value;
+    dict->length++;
+}
+
+int64_t runtime_dict_get(RuntimeDict* dict, int64_t key) {
+    if (!dict) return 0;
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_eq(dict, dict->keys[i], key)) return dict->values[i];
+    }
+    return 0;
+}
+
+int64_t runtime_dict_contains(RuntimeDict* dict, int64_t key) {
+    if (!dict) return 0;
+    for (int64_t i = 0; i < dict->length; i++) {
+        if (runtime_dict_key_eq(dict, dict->keys[i], key)) return 1;
+    }
+    return 0;
+}
+
+int64_t runtime_dict_len(RuntimeDict* dict) { return dict ? dict->length : 0; }
+
 RuntimeSet* runtime_set_new(void) {
     RuntimeSet* set = (RuntimeSet*)fr_obj_alloc(sizeof(RuntimeSet), FR_OBJ_SET, 0);
     if (!set) return NULL;
@@ -1687,6 +1754,178 @@ char* runtime_input(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Sockets (Linux syscalls)                                                   */
+/* ------------------------------------------------------------------------- */
+
+#define SYS_SOCKET     41
+#define SYS_CONNECT    42
+#define SYS_ACCEPT     43
+#define SYS_SENDTO     44
+#define SYS_RECVFROM   45
+#define SYS_SHUTDOWN   48
+#define SYS_BIND       49
+#define SYS_LISTEN     50
+#define SYS_SETSOCKOPT 54
+
+#define AF_INET_       2
+#define SOCK_STREAM_   1
+#define SOCK_DGRAM_    2
+#define SOL_SOCKET_    1
+#define SO_REUSEADDR_  2
+#define SO_KEEPALIVE_  9
+#define SO_BROADCAST_  6
+#define SO_RCVBUF_     8
+#define SO_SNDBUF_     7
+#define IPPROTO_TCP_   6
+#define IPPROTO_IP_    0
+#define MSG_NOSIGNAL_  0x4000
+
+typedef struct {
+    uint16_t family;
+    uint16_t port;   /* network byte order */
+    uint32_t addr;   /* network byte order */
+    uint8_t zero[8];
+} FrSockaddrIn;
+
+static bool fr_streq_ci(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if (ca != cb) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static uint16_t fr_htons(uint16_t v) {
+    return (uint16_t)((v << 8) | (v >> 8));
+}
+
+static int fr_parse_ipv4(const char* host, uint32_t* out) {
+    if (!host || !*host) { *out = 0; return 0; }
+    if (fr_streq_ci(host, "localhost")) {
+        *out = fr_htons((uint16_t)(127 | (0 << 8))); /* 127.0.0.1 bytes */
+        *out = ((uint32_t)127) | ((uint32_t)0 << 8) | ((uint32_t)0 << 16) | ((uint32_t)1 << 24);
+        return 0;
+    }
+    uint32_t parts[4] = {0, 0, 0, 0};
+    int part = 0;
+    for (const char* p = host; *p; p++) {
+        if (*p == '.') {
+            part++;
+            if (part > 3) return -1;
+        } else if (*p >= '0' && *p <= '9') {
+            parts[part] = parts[part] * 10 + (uint32_t)(*p - '0');
+            if (parts[part] > 255) return -1;
+        } else {
+            return -1;
+        }
+    }
+    if (part != 3) return -1;
+    *out = parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+    return 0;
+}
+
+int64_t runtime_socket_create(const char* family, const char* type) {
+    int fam = AF_INET_;
+    if (family && fr_streq_ci(family, "inet6")) fam = 10;
+    else if (family && fr_streq_ci(family, "unix")) fam = 1;
+    int typ = SOCK_STREAM_;
+    if (type && fr_streq_ci(type, "dgram")) typ = SOCK_DGRAM_;
+    else if (type && fr_streq_ci(type, "raw")) typ = 3;
+
+    int64_t fd = syscall3(SYS_SOCKET, fam, typ, 0);
+    if (fd >= 0) {
+        int one = 1;
+        syscall6(SYS_SETSOCKOPT, fd, SOL_SOCKET_, SO_REUSEADDR_,
+                 (int64_t)&one, sizeof(one), 0);
+    }
+    return fd;
+}
+
+int64_t runtime_socket_connect(int64_t fd, const char* host, int64_t port) {
+    FrSockaddrIn addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.family = AF_INET_;
+    addr.port = fr_htons((uint16_t)port);
+    if (fr_parse_ipv4(host, &addr.addr) != 0) return -1;
+    return syscall3(SYS_CONNECT, fd, (int64_t)&addr, sizeof(addr));
+}
+
+int64_t runtime_socket_bind(int64_t fd, const char* host, int64_t port) {
+    FrSockaddrIn addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.family = AF_INET_;
+    addr.port = fr_htons((uint16_t)port);
+    if (fr_parse_ipv4(host, &addr.addr) != 0) return -1;
+    return syscall3(SYS_BIND, fd, (int64_t)&addr, sizeof(addr));
+}
+
+int64_t runtime_socket_listen(int64_t fd, int64_t backlog) {
+    return syscall3(SYS_LISTEN, fd, backlog, 0);
+}
+
+int64_t runtime_socket_accept(int64_t fd) {
+    return syscall3(SYS_ACCEPT, fd, 0, 0);
+}
+
+int64_t runtime_socket_send(int64_t fd, const char* data) {
+    if (!data) return 0;
+    size_t len = (size_t)strlen(data);
+    size_t sent = 0;
+    while (sent < len) {
+        int64_t n = syscall6(SYS_SENDTO, fd, (int64_t)(data + sent),
+                             (int64_t)(len - sent), MSG_NOSIGNAL_, 0, 0);
+        if (n <= 0) break;
+        sent += (size_t)n;
+    }
+    return (int64_t)sent;
+}
+
+int64_t runtime_socket_sendall(int64_t fd, const char* data) {
+    return runtime_socket_send(fd, data);
+}
+
+char* runtime_socket_recv(int64_t fd, int64_t size) {
+    if (fd < 0) return fr_strdup("");
+    if (size <= 0) size = 4096;
+    char* buffer = (char*)malloc((size_t)size + 1);
+    if (!buffer) return fr_strdup("");
+    int64_t n = syscall6(SYS_RECVFROM, fd, (int64_t)buffer, size, 0, 0, 0);
+    if (n < 0) n = 0;
+    buffer[n] = '\0';
+    return buffer;
+}
+
+int64_t runtime_socket_close(int64_t fd) {
+    if (fd < 0) return -1;
+    return syscall1(SYS_CLOSE, fd);
+}
+
+int64_t runtime_socket_setsockopt(int64_t fd, const char* level,
+                                  const char* option, int64_t value) {
+    int lev = SOL_SOCKET_;
+    if (level && fr_streq_ci(level, "IPPROTO_TCP")) lev = IPPROTO_TCP_;
+    else if (level && fr_streq_ci(level, "IPPROTO_IP")) lev = IPPROTO_IP_;
+
+    int opt = SO_REUSEADDR_;
+    if (option && fr_streq_ci(option, "SO_KEEPALIVE")) opt = SO_KEEPALIVE_;
+    else if (option && fr_streq_ci(option, "SO_BROADCAST")) opt = SO_BROADCAST_;
+    else if (option && fr_streq_ci(option, "SO_RCVBUF")) opt = SO_RCVBUF_;
+    else if (option && fr_streq_ci(option, "SO_SNDBUF")) opt = SO_SNDBUF_;
+
+    int val = (int)value;
+    return syscall6(SYS_SETSOCKOPT, fd, lev, opt, (int64_t)&val,
+                    sizeof(val), 0);
+}
+
+int64_t runtime_socket_shutdown(int64_t fd, int64_t how) {
+    return syscall3(SYS_SHUTDOWN, fd, how, 0);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Init / globals                                                             */
 /* ------------------------------------------------------------------------- */
 
@@ -1726,6 +1965,10 @@ void runtime_release(void* ptr) {
             }
         }
         free(set->items);
+    } else if (header->kind == FR_OBJ_DICT) {
+        RuntimeDict* dict = (RuntimeDict*)(header + 1);
+        free(dict->keys);
+        free(dict->values);
     }
     free(header);
 }

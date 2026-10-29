@@ -895,6 +895,127 @@ def simplify_branches(func: Function) -> bool:
     return changed
 
 
+# ── Type propagation for generic list types ─────────────────────
+
+def propagate_list_types(module: Module) -> bool:
+    """Refine generic ``list`` parameter/return/field types from call sites.
+
+    The bytecode type name only says ``list``; element types appear later in
+    the IR (literals, split results, field constructors). Propagating them
+    makes ``contains``, printing and list element access use the right ABI.
+    """
+    funcs = {f.name: f for f in module.functions}
+    changed_any = False
+
+    def refine(current, incoming):
+        if not isinstance(current, ListType) or not isinstance(incoming, ListType):
+            return current, False
+        if current.elem_type == IRType.INT64 and incoming.elem_type != IRType.INT64:
+            return incoming, True
+        return current, False
+
+    for _ in range(8):
+        changed = False
+        # Call-site parameters.
+        for func in module.functions:
+            for inst in func.all_instructions():
+                if inst.op != Op.CALL or not inst.imm_str:
+                    continue
+                target = funcs.get(inst.imm_str)
+                if target is None:
+                    continue
+                for param, arg in zip(target.params, inst.operands):
+                    new_type, did = refine(param.type, arg.type)
+                    if did:
+                        param.type = new_type
+                        changed = True
+
+        # Instruction results and generic list mutations.
+        for func in module.functions:
+            for inst in func.all_instructions():
+                if inst.op in (Op.LIST_GET,) and inst.result is not None:
+                    lst = inst.operands[0] if inst.operands else None
+                    if isinstance(lst, Value) and isinstance(lst.type, ListType):
+                        elem = lst.type.elem_type
+                        if inst.op == Op.LIST_GET and inst.result.type != elem:
+                            inst.result.type = elem
+                            changed = True
+                elif inst.op == Op.LIST_APPEND and len(inst.operands) >= 2:
+                    lst, val = inst.operands[0], inst.operands[1]
+                    new_type, did = refine(lst.type, ListType(val.type))
+                    if did:
+                        lst.type = new_type
+                        changed = True
+                elif (
+                    inst.op == Op.CALL_BUILTIN
+                    and inst.imm_str in ("contains", "str_contains")
+                    and len(inst.operands) >= 1
+                ):
+                    container = inst.operands[0]
+                    new_name = (
+                        "str_contains" if container.type == IRType.STRING else "contains"
+                    )
+                    if inst.imm_str != new_name:
+                        inst.imm_str = new_name
+                        changed = True
+                elif inst.op == Op.LOAD_FIELD and inst.result is not None:
+                    base = inst.operands[0] if inst.operands else None
+                    if isinstance(base, Value) and isinstance(base.type, StructType):
+                        idx = inst.imm_int or 0
+                        if idx < len(base.type.field_types):
+                            field_type = base.type.field_types[idx]
+                            if (
+                                isinstance(field_type, ListType)
+                                and isinstance(inst.result.type, ListType)
+                                and field_type.elem_type == IRType.INT64
+                                and inst.result.type.elem_type != IRType.INT64
+                            ):
+                                base.type.field_types[idx] = inst.result.type
+                                changed = True
+                elif inst.op == Op.ALLOC_STRUCT and inst.result is not None:
+                    if isinstance(inst.result.type, StructType):
+                        for idx, operand in enumerate(inst.operands):
+                            if idx >= len(inst.result.type.field_types):
+                                break
+                            field_type = inst.result.type.field_types[idx]
+                            if (
+                                isinstance(field_type, ListType)
+                                and isinstance(operand.type, ListType)
+                                and field_type.elem_type == IRType.INT64
+                                and operand.type.elem_type != IRType.INT64
+                            ):
+                                inst.result.type.field_types[idx] = operand.type
+                                changed = True
+
+        # Return types and RETURN operand refinement.
+        for func in module.functions:
+            if func.is_extern:
+                continue
+            for inst in func.all_instructions():
+                if inst.op != Op.RETURN or not inst.operands:
+                    continue
+                new_type, did = refine(func.return_type, inst.operands[0].type)
+                if did:
+                    func.return_type = new_type
+                    # Existing call sites already carry the old generic return
+                    # type; update them so the new element type propagates
+                    # through locals and struct fields.
+                    for caller in module.functions:
+                        for call in caller.all_instructions():
+                            if (
+                                call.op == Op.CALL
+                                and call.imm_str == func.name
+                                and call.result is not None
+                            ):
+                                call.result.type = new_type
+                    changed = True
+
+        if not changed:
+            break
+        changed_any = True
+    return changed_any
+
+
 # ── Side-effect / purity analysis ───────────────────────────────
 
 # Builtins that cannot observe or mutate program state. Calls to these are
@@ -1041,7 +1162,12 @@ def _clone_specialized(
     for old_param, new_param, spec in zip(target.params, params, specs):
         if spec[0] == "const":
             _, ctype, cvalue = spec
-            inst = Instruction(Op.CONST_INT, [], ctype, None)
+            const_op = {
+                IRType.STRING: Op.CONST_STR,
+                IRType.FLOAT64: Op.CONST_FLOAT,
+                IRType.BOOL: Op.CONST_BOOL,
+            }.get(ctype, Op.CONST_INT)
+            inst = Instruction(const_op, [], ctype, None)
             if ctype == IRType.INT64:
                 inst.imm_int = int(cvalue)
             elif ctype == IRType.FLOAT64:
@@ -1362,6 +1488,7 @@ def run_passes(
         return False
 
     cfg = config or OptimizerConfig.from_env()
+    propagate_list_types(module)
     overall_changed = False
 
     # Escape analysis is interprocedural-ish (it summarizes call sites), so

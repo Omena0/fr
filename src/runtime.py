@@ -158,6 +158,14 @@ class ContinueException(Exception):
         super().__init__()
 
 
+class ReturnSignal(Exception):
+    """Internal control-flow signal used to unwind a function cleanly."""
+
+    def __init__(self, value):
+        self.value = value
+        super().__init__()
+
+
 # Helper functions
 def is_struct_def(obj: Any) -> bool:
     """Check if an object is a struct definition"""
@@ -300,7 +308,10 @@ def run_func(
         if not all(isinstance(item, dict) for item in func_body):
             raise RuntimeError("Invalid function body.")
 
-        out = run_scope(cast(AstType, func_body), level + 1)
+        try:
+            out = run_scope(cast(AstType, func_body), level + 1)
+        except ReturnSignal as signal:
+            out = signal.value
 
     vars = old_vars
     if not is_builtin:
@@ -320,8 +331,12 @@ class CompiletimeEvalException(Exception): ...
 
 
 def _get_indexed_value(target: Any, index: Any) -> Any:
-    """Get value from target at index, handling various types"""
-    # Ensure index is numeric
+    """Get value from target at index, handling lists and dictionaries."""
+    if isinstance(target, dict):
+        if index in target:
+            return target[index]
+        raise RuntimeError(f"Key error: {index!r}")
+    # Ensure index is numeric for array-like targets
     if not isinstance(index, int):
         index = ensure_int(index, "Index")
 
@@ -552,6 +567,12 @@ def eval_expr_node(node) -> int | float | bool | str | None | Any:
 
     if not isinstance(node, dict):
         return node
+
+    if node.get("type") == "bool":
+        raw = node.get("value")
+        if isinstance(raw, str):
+            return raw in ("true", "True", "1")
+        return bool(raw)
 
     if node.get("type") == "addr":
         return _make_pointer(node.get("value"))
@@ -922,7 +943,7 @@ def _execute_node_var(node: dict):
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
         # Check if it's a set/list literal that needs evaluation
-        if value.get("type") in ("set", "list"):
+        if value.get("type") in ("set", "list", "bool"):
             value = eval_expr_node(value)
         # Check if it's a runtime expression (has slice, attr, or other runtime features)
         elif (
@@ -936,6 +957,9 @@ def _execute_node_var(node: dict):
             value = eval_expr_node(value)
         else:
             value = value["value"]
+
+    if node.get("value_type") == "dict" and isinstance(value, (set, list)) and not value:
+        value = {}
 
     # Static lists are fixed-size and pre-filled with type-appropriate
     # zero values: list name[capacity:type] = []
@@ -973,8 +997,16 @@ def _execute_node_index_assign(node: dict):
     if cell is None:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
     target = cell["value"]
-    index = ensure_int(eval_expr(node["index"]), "Index")
+    index = eval_expr(node["index"])
     value = eval_expr(node["value"])
+
+    if isinstance(target, dict):
+        target[index] = value
+        return
+    if isinstance(index, str):
+        index = ensure_int(index, "Index")
+    else:
+        index = ensure_int(index, "Index")
 
     if isinstance(target, list):
         if index < 0 or index >= len(target):
@@ -1235,8 +1267,10 @@ def run_scope(ast: AstType, level=0):
         # Handle call expressions from AST first (e.g. method calls like obj.method())
         # These don't have a 'type' key, just 'func' and 'args'
         if "func" in node and "args" in node and "type" not in node:
-            # Execute the expression but discard the result since this is used as a statement
-            result = eval_expr(node)
+            # Execute the expression but discard its value. Assigning it to
+            # `result` would make an if/loop body look like it returned and
+            # skip the remaining statements in the scope.
+            eval_expr(node)
             continue
 
         node_type = node["type"]
@@ -1274,9 +1308,8 @@ def run_scope(ast: AstType, level=0):
                 raise RuntimeError("Cannot assign through a non-pointer value")
             pointer.set(eval_expr(node.get("value")))
         elif node_type == NODE_TYPE_CALL:
-            result = run_func(node["name"], node["args"], level)
-            if len(ast) == 1:
-                return result
+            # A bare call statement does not return from the enclosing scope.
+            run_func(node["name"], node["args"], level)
         elif node_type == NODE_TYPE_IF:
             result = _execute_node_if(node)
             if result is not None:
@@ -1302,7 +1335,7 @@ def run_scope(ast: AstType, level=0):
         elif node_type == NODE_TYPE_ASSERT:
             _execute_node_assert(node)
         elif node_type == NODE_TYPE_RETURN:
-            return eval_expr(node["value"])
+            raise ReturnSignal(eval_expr(node["value"]))
         elif node_type == NODE_TYPE_RAISE:
             _execute_node_raise(node)
         else:

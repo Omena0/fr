@@ -1,0 +1,14 @@
+// !true
+// !true
+// !false
+
+import ../../examples/http/http_lib
+
+void main() {
+    HttpResponse res = HttpResponse(200, "hello", [])
+    res.headers.append("Content-Type: text/plain")
+    str raw = http_serialize_response(res)
+    println(contains(raw, "Content-Length: 5"))
+    println(contains(raw, "Connection: close"))
+    println(contains(raw, "X-Missing: yes"))
+}

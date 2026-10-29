@@ -766,6 +766,25 @@ def _normalize_operators(text: str) -> str:
 
 def _ast_to_dict(node):
     """Convert AST node to dictionary representation."""
+    if isinstance(node, ast.Name) and node.id in ("true", "false"):
+        return {"type": "bool", "value": node.id}
+
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, bool):
+            return {"type": "bool", "value": value}
+        if isinstance(value, str):
+            return {"type": "string", "value": value}
+        if isinstance(value, bytes):
+            return {
+                "type": "bytes",
+                "value": value.decode("utf-8", errors="replace"),
+            }
+        if isinstance(value, int):
+            return {"type": "int", "value": value}
+        if isinstance(value, float):
+            return {"type": "float", "value": value}
+
     if not node._fields:
         return str(get_type(node))
 
@@ -1376,6 +1395,12 @@ def parse_expr(text: str):
             ):  # Variable reference - keep as expr_dict
                 if _is_large_int(evaluated):
                     return expr_dict
+                if isinstance(evaluated, bytes):
+                    # Bytecode represents bytes as an escaped string payload.
+                    return {
+                        "type": "bytes",
+                        "value": evaluated.decode("utf-8", errors="replace"),
+                    }
                 return evaluated
 
         except Exception:
@@ -2846,7 +2871,7 @@ def parse_any(
                 stream.strip()
                 field_name = stream.consume_word()
                 stream.strip()
-                if stream.peek(1) == "=":
+                if stream.peek(1) == "=" and stream.peek(2) != "=":
                     stream.consume("=")
                     stream.strip()
                     value = _consume_expression(stream).strip().rstrip(";")
@@ -2874,7 +2899,7 @@ def parse_any(
             depth = len(word) - len(word.lstrip("*"))
             target_text = word[depth:].strip()
             stream.strip()
-            if target_text and stream.peek(1) == "=":
+            if target_text and stream.peek(1) == "=" and stream.peek(2) != "=":
                 stream.consume("=")
                 stream.strip()
                 value = _consume_expression(stream).strip().rstrip(";")
@@ -2888,7 +2913,7 @@ def parse_any(
                 return node
 
         # Field assignment: obj.field = value (word is "obj.field")
-        if "." in word and stream.peek(1) == "=":
+        if "." in word and stream.peek(1) == "=" and stream.peek(2) != "=":
             parts = word.rsplit(".", 1)
             if len(parts) == 2:
                 target_text, field = parts
@@ -3207,6 +3232,19 @@ def parse_any(
                         )
 
                     stream.consume("else")
+                    stream.strip()
+                    # Accept both ``elif`` and the common ``else if`` spelling.
+                    if stream.peek_word() == "if":
+                        stream.consume("if")
+                        args = parse_args(stream, check_comma=False)
+                        arg_value = args[0][0] if args else ""
+                        condition = parse_expr(arg_value)
+                        scope = parse_scope(stream, level + 1)
+                        node["elifs"].append(
+                            {"type": "elif", "condition": condition, "scope": scope}
+                        )
+                        continue
+
                     scope = parse_scope(stream, level + 1)
                     node["else"] = scope
 
@@ -3426,7 +3464,7 @@ def parse_any(
                     return {
                         "type": "for_in",
                         "var": varname,
-                        "iterable": parse_literal(iterable_expr),
+                        "iterable": parse_expr(iterable_expr),
                         "scope": scope,
                         "line": for_line,
                     }

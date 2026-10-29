@@ -12,12 +12,46 @@ AstType = list[dict[str, Any]]
 _python_modules = {}
 
 
+def _contains(container, value) -> bool:
+    """Membership test for strings, lists, sets and dictionaries."""
+    if isinstance(container, str):
+        return str(value) in container
+    if isinstance(container, (list, set, dict, tuple)):
+        return value in container
+    return False
+
+
 # I/O helper functions
+def _format_output(value) -> str:
+    """Format values the same way the bytecode/native runtimes do."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_output(v) for v in value) + "]"
+    if isinstance(value, set):
+        return "{" + ", ".join(_format_output(v) for v in value) + "}"
+    if isinstance(value, dict):
+        return "{" + ", ".join(
+            f"{_format_output(k)}: {_format_output(v)}" for k, v in value.items()
+        ) + "}"
+    if value is None:
+        return "None"
+    return str(value)
+
+
 def _print(text: str) -> None:
-    """Print text without newline"""
+    """Print a value without newline."""
     import sys as _sys
 
-    _sys.stdout.write(str(text))
+    _sys.stdout.write(_format_output(text))
+    _sys.stdout.flush()
+
+
+def _println(text: str) -> None:
+    """Print a value followed by a newline."""
+    import sys as _sys
+
+    _sys.stdout.write(_format_output(text) + "\n")
     _sys.stdout.flush()
 
 
@@ -358,6 +392,15 @@ def _socket_send(sock_id: int, data: bytes):
     return sock.send(data)
 
 
+def _socket_sendall(sock_id: int, data: bytes):
+    """Send all bytes, retrying partial writes."""
+    if sock_id not in _socket_map:
+        raise RuntimeError(f"Invalid socket ID: {sock_id}")
+    sock = _socket_map[sock_id]
+    sock.sendall(data)
+    return None
+
+
 def _socket_recv(sock_id: int, size=4096):
     """Receive data from socket"""
     if sock_id not in _socket_map:
@@ -569,7 +612,7 @@ funcs: dict[  # Holy type annotations
     "println": {
         "type": "builtin",
         "args": {"text": "string"},
-        "func": print,
+        "func": _println,
         "return_type": "none",
         "can_eval": False,
     },
@@ -705,6 +748,13 @@ funcs: dict[  # Holy type annotations
         "can_eval": True,
     },
     # String manipulation
+    "contains": {
+        "type": "builtin",
+        "args": {"container": "any", "value": "any"},
+        "func": _contains,
+        "return_type": "bool",
+        "can_eval": True,
+    },
     "upper": {
         "type": "builtin",
         "args": {"text": "string"},
@@ -1050,6 +1100,13 @@ funcs: dict[  # Holy type annotations
         "args": {"sock_id": "int", "data": "bytes"},
         "func": _socket_send,
         "return_type": "int",
+        "can_eval": False,
+    },
+    "sendall": {
+        "type": "builtin",
+        "args": {"sock_id": "int", "data": "bytes"},
+        "func": _socket_sendall,
+        "return_type": "none",
         "can_eval": False,
     },
     "recv": {

@@ -1,0 +1,12 @@
+// !false
+// !true
+// !true
+// !false
+void main() {
+    str a = "hello"
+    str b = "world"
+    println(a == b)
+    println(a != b)
+    println(a == "hello")
+    println(a != "hello")
+}
