@@ -48,6 +48,31 @@ extern int64_t syscall6(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3,
 extern int _setjmp(void* buffer);
 extern void longjmp(void* buffer, int value) __attribute__((noreturn));
 
+#ifdef FR_TARGET_FR_OS
+/* Fr OS uapi/syscall.h (the source of truth in the OS tree). */
+#define SYS_READ       66
+#define SYS_WRITE      67
+#define SYS_CLOSE      65
+#define SYS_LSEEK      68
+#define SYS_MMAP       32
+#define SYS_NANOSLEEP  13
+#define SYS_FORK       0
+#define SYS_EXIT       2
+#define SYS_WAIT4      4
+#define SYS_GETPID     5
+#define SYS_OPEN       64
+#define SYS_FSTAT      69
+#define SYS_GETDENTS   71
+#define SYS_GETCWD     (-1)  /* not in the current Fr OS uapi */
+#define SYS_CHDIR      (-1)
+#define SYS_RENAME     (-1)
+#define SYS_MKDIR      (-1)
+#define SYS_RMDIR      (-1)
+#define SYS_UNLINK     (-1)
+#define SYS_GETDENTS64 SYS_GETDENTS
+#define SYS_NEWFSTATAT (-1)
+#define SYS_OPENAT     SYS_OPEN
+#else
 #define SYS_READ       0
 #define SYS_WRITE      1
 #define SYS_CLOSE      3
@@ -67,6 +92,7 @@ extern void longjmp(void* buffer, int value) __attribute__((noreturn));
 #define SYS_GETDENTS64 217
 #define SYS_NEWFSTATAT 262
 #define SYS_OPENAT     257
+#endif
 
 #define AT_FDCWD       (-100)
 #define O_RDONLY       0
@@ -1693,8 +1719,12 @@ static int fr_open_flags(const char* mode) {
 
 int64_t runtime_fopen(const char* path, const char* mode) {
     int flags = fr_open_flags(mode);
+#ifdef FR_TARGET_FR_OS
+    return syscall3(SYS_OPEN, (int64_t)path, flags, 0666);
+#else
     int64_t fd = syscall6(SYS_OPENAT, AT_FDCWD, (int64_t)path, flags, 0666, 0, 0);
     return fd;
+#endif
 }
 
 int64_t runtime_fwrite(int64_t fd, const char* data) {
@@ -1767,6 +1797,19 @@ char* runtime_input(void) {
 /* Sockets (Linux syscalls)                                                   */
 /* ------------------------------------------------------------------------- */
 
+#ifdef FR_TARGET_FR_OS
+/* Socket domain per docs/src/syscalls (the current Fr OS header only assigns
+ * SYS_socket; the remaining numbers are the documented goal ABI). */
+#define SYS_SOCKET     160
+#define SYS_BIND       161
+#define SYS_CONNECT    162
+#define SYS_LISTEN     163
+#define SYS_ACCEPT     164
+#define SYS_SENDTO     165
+#define SYS_RECVFROM   166
+#define SYS_SETSOCKOPT 167
+#define SYS_SHUTDOWN   168
+#else
 #define SYS_SOCKET     41
 #define SYS_CONNECT    42
 #define SYS_ACCEPT     43
@@ -1776,6 +1819,7 @@ char* runtime_input(void) {
 #define SYS_BIND       49
 #define SYS_LISTEN     50
 #define SYS_SETSOCKOPT 54
+#endif
 
 #define AF_INET_       2
 #define SOCK_STREAM_   1
@@ -1946,19 +1990,35 @@ int64_t runtime_socket_shutdown(int64_t fd, int64_t how) {
 
 static int64_t fr_stat_path(const char* path, unsigned char* buf) {
     memset(buf, 0, 160);
+#ifdef FR_TARGET_FR_OS
+    int64_t fd = syscall3(SYS_OPEN, (int64_t)path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+    int64_t rc = syscall3(SYS_FSTAT, fd, (int64_t)buf, 0);
+    syscall1(SYS_CLOSE, fd);
+    return rc;
+#else
     return syscall6(SYS_NEWFSTATAT, AT_FDCWD, (int64_t)path,
                     (int64_t)buf, 0, 0, 0);
+#endif
 }
 
 static int fr_stat_mode(const unsigned char* buf) {
     int mode;
+#ifdef FR_TARGET_FR_OS
+    memcpy(&mode, buf + 32, sizeof(mode)); /* struct kstat.mode */
+#else
     memcpy(&mode, buf + 24, sizeof(mode));
+#endif
     return mode;
 }
 
 static int64_t fr_stat_size(const unsigned char* buf) {
     int64_t size;
+#ifdef FR_TARGET_FR_OS
+    memcpy(&size, buf + 0, sizeof(size)); /* struct kstat.size */
+#else
     memcpy(&size, buf + 48, sizeof(size));
+#endif
     return size;
 }
 
@@ -1986,6 +2046,9 @@ int64_t runtime_getsize(const char* path) {
 }
 
 char* runtime_getcwd(void) {
+#ifdef FR_TARGET_FR_OS
+    return fr_strdup("");
+#else
     char* buffer = (char*)malloc(4096);
     if (!buffer) return fr_strdup("");
     int64_t n = syscall3(SYS_GETCWD, (int64_t)buffer, 4096, 0);
@@ -1994,29 +2057,59 @@ char* runtime_getcwd(void) {
         return fr_strdup("");
     }
     return buffer;
+#endif
 }
 
 int64_t runtime_chdir(const char* path) {
+#ifdef FR_TARGET_FR_OS
+    (void)path;
+    return -1;
+#else
     return syscall1(SYS_CHDIR, (int64_t)path);
+#endif
 }
 
 int64_t runtime_mkdir(const char* path) {
+#ifdef FR_TARGET_FR_OS
+    (void)path;
+    return -1;
+#else
     return syscall3(SYS_MKDIR, (int64_t)path, 0777, 0);
+#endif
 }
 
 int64_t runtime_rmdir(const char* path) {
+#ifdef FR_TARGET_FR_OS
+    (void)path;
+    return -1;
+#else
     return syscall1(SYS_RMDIR, (int64_t)path);
+#endif
 }
 
 int64_t runtime_remove(const char* path) {
+#ifdef FR_TARGET_FR_OS
+    (void)path;
+    return -1;
+#else
     return syscall1(SYS_UNLINK, (int64_t)path);
+#endif
 }
 
 int64_t runtime_rename(const char* old_path, const char* new_path) {
+#ifdef FR_TARGET_FR_OS
+    (void)old_path; (void)new_path;
+    return -1;
+#else
     return syscall3(SYS_RENAME, (int64_t)old_path, (int64_t)new_path, 0);
+#endif
 }
 
 int64_t runtime_makedirs(const char* path) {
+#ifdef FR_TARGET_FR_OS
+    (void)path;
+    return -1;
+#else
     if (!path || !*path) return -1;
     char* copy = fr_strdup(path);
     if (!copy) return -1;
@@ -2031,6 +2124,7 @@ int64_t runtime_makedirs(const char* path) {
     }
     free(copy);
     return 0;
+#endif
 }
 
 char* runtime_basename(const char* path) {
@@ -2108,8 +2202,12 @@ RuntimeList* runtime_listdir(const char* path) {
     if (list) list->elem_type = 1;
     if (!path) return list;
 
+#ifdef FR_TARGET_FR_OS
+    int64_t fd = syscall3(SYS_OPEN, (int64_t)path, O_RDONLY | FR_O_DIRECTORY, 0);
+#else
     int64_t fd = syscall6(SYS_OPENAT, AT_FDCWD, (int64_t)path,
                           O_RDONLY | FR_O_DIRECTORY, 0, 0, 0);
+#endif
     if (fd < 0) return list;
 
     char* buffer = (char*)malloc(32768);
@@ -2125,7 +2223,17 @@ RuntimeList* runtime_listdir(const char* path) {
             uint16_t reclen;
             memcpy(&reclen, buffer + off + 16, sizeof(reclen));
             if (reclen == 0) break;
+#ifdef FR_TARGET_FR_OS
+            uint8_t namlen;
+            memcpy(&namlen, buffer + off + 19, 1);
+            char namebuf[256];
+            size_t copy_len = namlen < sizeof(namebuf) - 1 ? namlen : sizeof(namebuf) - 1;
+            memcpy(namebuf, buffer + off + 20, copy_len);
+            namebuf[copy_len] = '\0';
+            const char* name = namebuf;
+#else
             const char* name = buffer + off + 19;
+#endif
             if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
                 runtime_list_append_int(list, (int64_t)fr_strdup(name));
             }

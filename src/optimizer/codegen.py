@@ -100,9 +100,10 @@ def asm_peephole(text: str) -> str:
 class CodeGen:
     """Emit x86_64 assembly from register-allocated IR."""
 
-    def __init__(self, module: Module, opt_level: int = 2):
+    def __init__(self, module: Module, opt_level: int = 2, target: str = "linux"):
         self.module = module
         self.opt_level = opt_level
+        self.target = target
         self.lines: list[str] = []
         self.string_labels: dict[str, str] = {}
         self.float_labels: dict[float, str] = {}
@@ -356,6 +357,10 @@ class CodeGen:
 
     def _find_vector_loops(self, func: Function):
         """Find simple list-reduction loops suitable for AVX2 vectorization."""
+        if self.target != "linux":
+            # Fr OS carries only the legacy FXSAVE XMM state across a context
+            # switch; YMM is explicitly forbidden by tools/verify_isa.py.
+            return {}
         from optimizer.analysis import FunctionAnalysis
 
         try:
@@ -2362,67 +2367,21 @@ class CodeGen:
                     self._emit(f"    .quad {int(value)}")
 
     def _emit_bss(self):
-        """Emit BSS section (heap, globals)."""
+        """Emit BSS globals. Managed allocation lives in the runtime heap."""
+        if not self.module.global_vars:
+            return
         self._emit("")
         self._emit(".section .bss")
-
-        if self.module.global_vars:
-            for name in self.module.global_vars:
-                self._emit(f"_fr_global_{name}:")
-                self._emit(f"    .quad 0")
-
-        if self._module_needs_heap():
-            self._emit(".globl _fr_heap_ptr")
-            self._emit("_fr_heap_ptr:")
+        for name in self.module.global_vars:
+            self._emit(f".globl _fr_global_{name}")
+            self._emit(f"_fr_global_{name}:")
             self._emit("    .quad 0")
-            self._emit(".globl _fr_heap")
-            self._emit("_fr_heap:")
-            self._emit("    .space 16777216")
-
-        self._emit(".globl struct_heap_base")
-        self._emit("struct_heap_base:")
-        self._emit("    .quad 0")
-        self._emit(".globl struct_heap_ptr")
-        self._emit("struct_heap_ptr:")
-        self._emit("    .quad 0")
-
-        if self._module_needs_structs():
-            self._emit(".globl struct_data")
-            self._emit("struct_data:")
-            self._emit("    .space 67108864")
-
-        if self.module.global_vars:
-            self._emit(".globl global_vars")
-            self._emit("global_vars:")
-            self._emit("    .space 2048")
+        self._emit(".globl global_vars")
+        self._emit("global_vars:")
+        self._emit("    .space 2048")
 
     def _module_needs_bss(self) -> bool:
-        return True
-
-    def _module_needs_heap(self) -> bool:
-        for func in self.module.functions:
-            for block in func.blocks:
-                for inst in block.instructions:
-                    if inst.op in {
-                        Op.ALLOC_LIST,
-                        Op.LIST_APPEND,
-                        Op.STR_CONCAT,
-                        Op.TO_STR,
-                        Op.TO_BOOL,
-                        Op.SQRT,
-                        Op.SIN,
-                        Op.COS,
-                        Op.TAN,
-                        Op.ABS,
-                        Op.FLOOR,
-                        Op.CEIL,
-                        Op.ROUND,
-                        Op.POW,
-                        Op.MIN,
-                        Op.MAX,
-                    }:
-                        return True
-        return False
+        return bool(self.module.global_vars)
 
     def _module_needs_structs(self) -> bool:
         for func in self.module.functions:
@@ -2479,7 +2438,7 @@ def _byte(reg: str) -> str:
     return byte_map.get(reg, "al")
 
 
-def generate_asm(module: Module, opt_level: int = 2) -> str:
+def generate_asm(module: Module, opt_level: int = 2, target: str = "linux") -> str:
     """Generate x86_64 assembly from an IR module."""
-    gen = CodeGen(module, opt_level)
+    gen = CodeGen(module, opt_level, target)
     return gen.emit()

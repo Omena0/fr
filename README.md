@@ -20,6 +20,7 @@ pip install frscript
 - **Compiled language** - Fast by design
 - **File and Socket I/O** - Low-level file operations and sockets.
 - **HTTP library** - A working HTTP/1.1 server/client library in `examples/http/http_lib.fr`, running on all three backends.
+- **Fr OS target** - `fr native ... --target fr-os` emits a static Fr OS userspace ELF using the Fr OS syscall ABI and user ISA profile.
 - **Multiprocessing**. - Easy threading with fork() and wait().
 - **Python integration** - You can use any Python libraries with Frscript.
 - **Aggressive optimization** - Purity call-graph analysis, interprocedural ranges, call-site specialization, pure constant-call folding, LICM, SROA/escape analysis, pure-function lookup tables, inline list fast paths and assembly peepholes.
