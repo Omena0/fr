@@ -1,0 +1,93 @@
+// N-body benchmark with a larger body count to exercise list/struct memory.
+// Generate 128 bodies, then run 1,000 simulation steps.
+
+struct Body {
+    float x
+    float y
+    float z
+    float vx
+    float vy
+    float vz
+    float mass
+}
+
+float energy(list bodies) {
+    float e = 0.0
+    int i = 0
+    while (i < len(bodies)) {
+        Body a = bodies[i]
+        e = e + 0.5 * a.mass * (a.vx * a.vx + a.vy * a.vy + a.vz * a.vz)
+        int j = i + 1
+        while (j < len(bodies)) {
+            Body b = bodies[j]
+            float dx = a.x - b.x
+            float dy = a.y - b.y
+            float dz = a.z - b.z
+            float d = sqrt(dx * dx + dy * dy + dz * dz)
+            e = e - (a.mass * b.mass) / d
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return e
+}
+
+void advance(list bodies, float dt, int steps) {
+    int s = 0
+    while (s < steps) {
+        int i = 0
+        while (i < len(bodies)) {
+            Body a = bodies[i]
+            int j = i + 1
+            while (j < len(bodies)) {
+                Body b = bodies[j]
+                float dx = a.x - b.x
+                float dy = a.y - b.y
+                float dz = a.z - b.z
+                float d2 = dx * dx + dy * dy + dz * dz + 0.01
+                float inv = 1.0 / (d2 * sqrt(d2))
+                a.vx = a.vx - dx * b.mass * inv
+                a.vy = a.vy - dy * b.mass * inv
+                a.vz = a.vz - dz * b.mass * inv
+                b.vx = b.vx + dx * a.mass * inv
+                b.vy = b.vy + dy * a.mass * inv
+                b.vz = b.vz + dz * a.mass * inv
+                bodies[j] = b
+                j = j + 1
+            }
+            bodies[i] = a
+            i = i + 1
+        }
+        int k = 0
+        while (k < len(bodies)) {
+            Body p = bodies[k]
+            p.x = p.x + dt * p.vx
+            p.y = p.y + dt * p.vy
+            p.z = p.z + dt * p.vz
+            bodies[k] = p
+            k = k + 1
+        }
+        s = s + 1
+    }
+}
+
+void main() {
+    list bodies = []
+    int i = 0
+    while (i < 128) {
+        float fi = float(i)
+        float mass = 0.001 + 0.01 / (fi + 1.0)
+        bodies.append(Body(
+            fi * 0.7,
+            -fi * 0.31,
+            float(i % 7) * 0.13,
+            float(i % 5) * 0.02,
+            float(i % 11) * 0.015,
+            float(i % 3) * 0.01,
+            mass
+        ))
+        i = i + 1
+    }
+    advance(bodies, 0.001, 1000)
+    println(str(energy(bodies)))
+}

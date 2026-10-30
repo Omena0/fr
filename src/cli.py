@@ -538,7 +538,7 @@ def decode_cmd(args):
 def native_cmd(args):
     """Compile bytecode to x86_64 native binary"""
     if len(args) < 1:
-        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--ssa] [--ssa-ir] [-Os]")
+        print("Usage: fr native <file.bc> [-o output] [-a|--asm] [--ssa] [--ssa-ir] [-Os] [--target linux|fr-os]")
         print("  -a, --asm:  Keep assembly file")
         print("  --ssa:      Use SSA IR superoptimizer pipeline")
         print("  --ssa-ir:   Dump SSA IR instead of generating assembly")
@@ -549,6 +549,15 @@ def native_cmd(args):
     keep_asm = "-a" in args or "--asm" in args
     dump_ir = "--ssa-ir" in args
     optimize_size = "-Os" in args
+    target = "linux"
+    for i, arg in enumerate(args):
+        if arg == "--target" and i + 1 < len(args):
+            target = args[i + 1]
+        elif arg.startswith("--target="):
+            target = arg.split("=", 1)[1]
+    if target not in ("linux", "fr-os"):
+        print(f"Error: unsupported target '{target}' (expected linux or fr-os)")
+        sys.exit(1)
 
     # Determine output filename
     if "-o" in args:
@@ -579,14 +588,16 @@ def native_cmd(args):
             opt_level = max(opt_level, 2)
 
         if dump_ir:
-            ir_text = compile_native_ssa(bytecode, opt_level=opt_level, dump_ir=True)
+            ir_text = compile_native_ssa(
+                bytecode, opt_level=opt_level, dump_ir=True, target=target
+            )
             print(ir_text)
             return
 
         optimize = ("-O" in args and "-O0" not in args) or optimize_size
         if optimize:
             print(f"Optimizer (level {opt_level})")
-        asm = compile_native_ssa(bytecode, opt_level)
+        asm = compile_native_ssa(bytecode, opt_level, target=target)
 
         # Always write assembly to temp file for building
         with open(asm_file, "w") as f:
@@ -609,18 +620,41 @@ def native_cmd(args):
 
                 c_obj = c_file.replace(".c", ".o")
                 print(f"Compiling C file: {c_file}")
-                cflags = [
-                    "-Os" if optimize_size else "-O3",
-                    "-march=native",
-                    "-mtune=native",
-                    "-fno-strict-aliasing",
-                    "-fwrapv",
-                    "-ffunction-sections",
-                    "-fdata-sections",
-                    "-fno-asynchronous-unwind-tables",
-                    "-fno-stack-protector",
-                    "-fno-builtin",
-                ]
+                if target == "fr-os":
+                    cflags = [
+                        "-Os" if optimize_size else "-O2",
+                        "-march=x86-64",
+                        "-mtune=generic",
+                        "-mno-red-zone",
+                        "-mno-avx",
+                        "-mno-avx2",
+                        "-mno-fma",
+                        "-mno-f16c",
+                        "-fno-pic",
+                        "-fno-pie",
+                        "-ffreestanding",
+                        "-fno-strict-aliasing",
+                        "-fwrapv",
+                        "-ffunction-sections",
+                        "-fdata-sections",
+                        "-fno-asynchronous-unwind-tables",
+                        "-fno-stack-protector",
+                        "-fno-builtin",
+                        "-DFR_TARGET_FR_OS",
+                    ]
+                else:
+                    cflags = [
+                        "-Os" if optimize_size else "-O3",
+                        "-march=native",
+                        "-mtune=native",
+                        "-fno-strict-aliasing",
+                        "-fwrapv",
+                        "-ffunction-sections",
+                        "-fdata-sections",
+                        "-fno-asynchronous-unwind-tables",
+                        "-fno-stack-protector",
+                        "-fno-builtin",
+                    ]
                 cflags = [f for f in cflags if f]
                 result = subprocess.run(
                     [
@@ -667,18 +701,41 @@ def native_cmd(args):
                 check=True, capture_output=True
             )
 
-            cflags = [
-                "-Os" if optimize_size else "-O3",
-                "-march=native",
-                "-mtune=native",
-                "-fno-strict-aliasing",
-                "-fwrapv",
-                "-ffunction-sections",
-                "-fdata-sections",
-                "-fno-asynchronous-unwind-tables",
-                "-fno-stack-protector",
-                "-fno-builtin",
-            ]
+            if target == "fr-os":
+                cflags = [
+                    "-Os" if optimize_size else "-O2",
+                    "-march=x86-64",
+                    "-mtune=generic",
+                    "-mno-red-zone",
+                    "-mno-avx",
+                    "-mno-avx2",
+                    "-mno-fma",
+                    "-mno-f16c",
+                    "-fno-pic",
+                    "-fno-pie",
+                    "-ffreestanding",
+                    "-fno-strict-aliasing",
+                    "-fwrapv",
+                    "-ffunction-sections",
+                    "-fdata-sections",
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-stack-protector",
+                    "-fno-builtin",
+                    "-DFR_TARGET_FR_OS",
+                ]
+            else:
+                cflags = [
+                    "-Os" if optimize_size else "-O3",
+                    "-march=native",
+                    "-mtune=native",
+                    "-fno-strict-aliasing",
+                    "-fwrapv",
+                    "-ffunction-sections",
+                    "-fdata-sections",
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-stack-protector",
+                    "-fno-builtin",
+                ]
             cflags = [f for f in cflags if f]
 
             gcc_flags = [
@@ -697,6 +754,7 @@ def native_cmd(args):
                 "-Wl,--gc-sections",
                 "-Wl,--build-id=none",
                 "-Wl,--strip-all",
+                *(["-no-pie", "-Wl,-z,noexecstack"] if target == "fr-os" else []),
                 *link_libs,
             ]
             gcc_flags = [f for f in gcc_flags if f]

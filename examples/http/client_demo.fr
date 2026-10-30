@@ -1,0 +1,7 @@
+import http_lib
+
+void main() {
+    HttpResponse hello = http_get("127.0.0.1", 18081, "/hello")
+    println(str(hello.status))
+    println(hello.body)
+}

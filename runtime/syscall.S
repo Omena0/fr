@@ -29,3 +29,60 @@ syscall6:
     syscall
     ret
 .size syscall6, .-syscall6
+
+/* Freestanding setjmp/longjmp used by the native exception machinery. */
+.global _setjmp
+.type _setjmp,@function
+_setjmp:
+    movq (%rsp), %rax
+    movq %rbx, 0(%rdi)
+    movq %rbp, 8(%rdi)
+    movq %r12, 16(%rdi)
+    movq %r13, 24(%rdi)
+    movq %r14, 32(%rdi)
+    movq %r15, 40(%rdi)
+    leaq 8(%rsp), %rcx
+    movq %rcx, 48(%rdi)
+    movq %rax, 56(%rdi)
+    xorl %eax, %eax
+    ret
+.size _setjmp, .-_setjmp
+
+.type longjmp,@function
+.global longjmp
+longjmp:
+    movq 0(%rdi), %rbx
+    movq 8(%rdi), %rbp
+    movq 16(%rdi), %r12
+    movq 24(%rdi), %r13
+    movq 32(%rdi), %r14
+    movq 40(%rdi), %r15
+    movq 48(%rdi), %rsp
+    movq 56(%rdi), %rdx
+    movl %esi, %eax
+    testl %eax, %eax
+    jne 1f
+    movl $1, %eax
+1:
+    jmp *%rdx
+.size longjmp, .-longjmp
+
+
+/* Allocation-scope push. Written in assembly so it never clobbers the
+ * System V argument registers (rdi/rsi/rdx/rcx/r8/r9) before the function
+ * body has a chance to read its parameters. */
+.global runtime_scope_push
+.type runtime_scope_push,@function
+runtime_scope_push:
+    movq fr_scope_depth(%rip), %rax
+    cmpq $1024, %rax
+    jae 2f
+    leaq fr_scope_heads(%rip), %r11
+    movq $0, (%r11,%rax,8)
+    incq %rax
+    movq %rax, fr_scope_depth(%rip)
+    ret
+2:
+    incq fr_scope_overflow(%rip)
+    ret
+.size runtime_scope_push, .-runtime_scope_push

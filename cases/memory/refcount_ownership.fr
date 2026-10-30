@@ -1,0 +1,32 @@
+// !4
+// !9
+
+struct Point {
+    int x
+}
+
+struct Box {
+    Point inner
+}
+
+list make_points(int n) {
+    list xs = []
+    int i = 0
+    while (i < n) {
+        xs.append(Point(i))
+        i = i + 1
+    }
+    return xs
+}
+
+Box make_box(int v) {
+    Point p = Point(v)
+    return Box(p)
+}
+
+void main() {
+    list xs = make_points(5)
+    println(xs[4].x)
+    Box b = make_box(9)
+    println(b.inner.x)
+}

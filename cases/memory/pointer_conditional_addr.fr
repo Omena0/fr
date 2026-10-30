@@ -1,0 +1,11 @@
+// !7
+
+int value = 7
+
+void main() {
+    int* p = 0
+    if (getpid() > 0) {
+        p = &value
+    }
+    println(str(*p))
+}

@@ -1,0 +1,11 @@
+// !2
+// !1
+int x = 1
+void f() {
+    int x = 2
+    println(str(x))
+}
+void main() {
+    f()
+    println(str(x))
+}

@@ -1,0 +1,13 @@
+// !9
+// !9
+// !10
+
+void main() {
+    int x = 5
+    int* p = &x
+    *p = 9
+    println(*p)
+    println(x)
+    *p = *p + 1
+    println(x)
+}

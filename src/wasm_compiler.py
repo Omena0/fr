@@ -57,6 +57,7 @@ class WasmCompiler:
         self.local_count = 0
         self.label_stack: List[str] = []  # Stack of labels for break/continue
         self.global_vars: Dict[int, str] = {}  # Maps global indices to types
+        self.global_names: Dict[str, int] = {}  # Maps source names to indices
         self.local_vars: Dict[int, str] = {}  # Maps local indices to types
         self.type_stack: List[str] = []  # Track types on the value stack
         self.struct_type_stack: List[Optional[int]] = (
@@ -754,6 +755,8 @@ class WasmCompiler:
                     fr_type = parts[2]
                 else:
                     fr_type = "i64"
+                if len(parts) >= 2:
+                    self.global_names[parts[1]] = global_count
                 if fr_type == "str":
                     # Allocate two globals: base for ptr, base+1 for len
                     self.global_vars[global_count] = "i32"
@@ -805,8 +808,8 @@ class WasmCompiler:
             # Track referenced globals to backfill missing declarations
             if line.startswith("LOAD_GLOBAL ") or line.startswith("STORE_GLOBAL "):
                 parts = line.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    referenced_globals.add(int(parts[1]))
+                if len(parts) >= 2:
+                    referenced_globals.add(self._global_index(parts[1]))
 
         # Ensure we declare globals for any referenced indices not explicitly declared
         if referenced_globals:
@@ -815,6 +818,16 @@ class WasmCompiler:
                 if idx not in self.global_vars:
                     # Default to i64 to safely hold packed values
                     self.global_vars[idx] = "i64"
+
+    def _global_index(self, token: str) -> int:
+        if token.isdigit():
+            return int(token)
+        if token in self.global_names:
+            return self.global_names[token]
+        idx = max(self.global_vars.keys(), default=-1) + 1
+        self.global_names[token] = idx
+        self.global_vars[idx] = "i64"
+        return idx
 
     def _map_type_to_wasm(self, fr_type: str) -> str:
         """Map fr type to WASM type"""
@@ -5045,7 +5058,7 @@ class WasmCompiler:
             self.emit(f"local.set {var_ref}_len", indent)
 
         elif opcode == "LOAD_GLOBAL":
-            global_idx = int(args[0])
+            global_idx = self._global_index(args[0])
             global_ref = f"$g{global_idx}"
 
             # Determine type
@@ -5073,7 +5086,7 @@ class WasmCompiler:
                     self.extended_type_stack[-1] = "set"
 
         elif opcode == "STORE_GLOBAL":
-            global_idx = int(args[0])
+            global_idx = self._global_index(args[0])
             global_ref = f"$g{global_idx}"
 
             # Determine type

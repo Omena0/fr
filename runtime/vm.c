@@ -262,6 +262,7 @@ static char *fr_strndup(const char *s, size_t n) {
 typedef struct Value Value;
 typedef struct List List;
 typedef struct Set Set;
+typedef struct Dict Dict;
 typedef struct Struct Struct;
 typedef struct VM VM;  // Forward declare VM
 
@@ -321,7 +322,9 @@ typedef enum
     VAL_VOID,
     VAL_LIST,   // List/Array type
     VAL_SET,    // Set type (unordered collection of unique elements)
+    VAL_DICT,   // Dictionary type
     VAL_STRUCT, // Struct/Object type
+    VAL_PTR,    // Pointer to a Value cell (address-of)
     VAL_PYOBJECT // Python object type (PyObject*)
 } ValueType;
 
@@ -331,6 +334,7 @@ typedef struct List
     Value *items; // Dynamic array of values
     int length;   // Current number of items
     int capacity; // Allocated capacity
+    int refcount; // Reference count (mutable objects are shared)
 } List;
 
 // Struct structure
@@ -339,6 +343,7 @@ typedef struct Struct
     int struct_id;    // ID identifying which struct type this is
     Value *fields;    // Dynamic array of field values
     int field_count;  // Number of fields
+    int refcount;     // Reference count (structs are reference semantics)
 } Struct;
 
 // Runtime value
@@ -354,7 +359,9 @@ typedef struct Value
         bool boolean;
         List *list;     // List pointer
         Set *set;       // Set pointer
+        Dict *dict_val; // Dictionary pointer
         Struct *struct_val; // Struct pointer
+        Value *ptr;         // Pointer to another Value cell
         PyObject *pyobj;    // Python object pointer
     } as;
 } Value;
@@ -374,7 +381,21 @@ typedef struct Set
     int length;         // Number of elements in set
     int capacity;       // Allocated capacity
     int tombstones;     // Count of deleted entries
+    int refcount;       // Reference count
 } Set;
+
+typedef struct DictEntry {
+    Value key;
+    Value value;
+    bool occupied;
+} DictEntry;
+
+struct Dict {
+    DictEntry *entries;
+    int length;
+    int capacity;
+    int refcount;
+};
 
 // Variable storage
 typedef struct
@@ -396,6 +417,8 @@ typedef enum
     OP_CONST_BOOL_MULTI, // Push multiple bool constants
     OP_LOAD,
     OP_STORE,
+    OP_LOAD_GLOBAL,
+    OP_STORE_GLOBAL,
     OP_STORE_CONST_I64,  // Store int constants directly to slots without using stack (STORE_CONST_I64 slot1 val1 slot2 val2 ...)
     OP_STORE_CONST_F64,  // Store float constants directly to slots without using stack (STORE_CONST_F64 slot1 val1 slot2 val2 ...)
     OP_STORE_CONST_BOOL, // Store bool constants directly to slots without using stack (STORE_CONST_BOOL slot1 val1 slot2 val2 ...)
@@ -476,6 +499,7 @@ typedef enum
     OP_LOAD_MULTI,       // Load multiple variables at once (LOAD_MULTI n v1 v2 ... vn)
     OP_FUSED_LOAD_STORE, // Interleaved load/store (FUSED_LOAD_STORE n src1 dst1 src2 dst2 ...)
     OP_FUSED_STORE_LOAD, // Interleaved store/load (FUSED_STORE_LOAD n dst1 src1 dst2 src2 ...)
+    OP_FUSED_GET_STORE_LOAD, // Triplets: STRUCT_GET field, STORE dst, LOAD src
     // Fused load + arithmetic operations (reduce dispatch overhead in hot loops)
     OP_LOAD2_ADD_I64, // LOAD x y, ADD_I64 -> single instruction
     OP_LOAD2_SUB_I64, // LOAD x y, SUB_I64 -> single instruction
@@ -509,6 +533,7 @@ typedef enum
     OP_LIST_NEW_F64,    // Create list with float64 values (count val1 val2 ... -> list)
     OP_LIST_NEW_STR,    // Create list with string values (count val1 val2 ... -> list)
     OP_LIST_NEW_BOOL,   // Create list with boolean values (count val1 val2 ... -> list)
+    OP_LIST_NEW_CAP,    // Create fixed-size list: LIST_NEW_CAP <capacity> <elem_type>
 
     // Set operations (hash table for O(1) operations)
     OP_SET_NEW,      // Create new empty set (-> set)
@@ -516,6 +541,13 @@ typedef enum
     OP_SET_REMOVE,   // Remove value from set (set, value -> set)
     OP_SET_CONTAINS, // Check if set contains value (set, value -> bool)
     OP_SET_LEN,      // Get set length (set -> int)
+
+    // Dictionary operations
+    OP_DICT_NEW,      // Create empty dict (-> dict)
+    OP_DICT_SET,      // Set dict[key] = value (dict, key, value -> dict)
+    OP_DICT_GET,      // Get dict[key] (dict, key -> value)
+    OP_DICT_CONTAINS, // Check key membership (dict, key -> bool)
+    OP_DICT_LEN,      // Get dict length (dict -> int)
 
     // Container membership check
     OP_CONTAINS,     // Generic membership check (container, value -> bool)
@@ -558,6 +590,12 @@ typedef enum
     // Struct operations
     OP_STRUCT_NEW,    // Create new struct instance (struct_id -> struct)
     OP_STRUCT_GET,    // Get field from struct (struct, field_idx -> value)
+    OP_ADDR_LOCAL,    // Push pointer to a local variable slot
+    OP_ADDR_GLOBAL,   // Push pointer to a global variable
+    OP_ADDR_FIELD,    // Pop struct, push pointer to field
+    OP_ADDR_ELEM,     // Pop list/index, push pointer to element
+    OP_DEREF,         // Pop pointer, push pointed-to value
+    OP_DEREF_SET,     // Pop value, pointer; store through pointer
     OP_STRUCT_SET,    // Set field in struct (struct, field_idx, value -> struct)
 
     // File I/O operations
@@ -589,6 +627,7 @@ typedef enum
     OP_SOCKET_LISTEN,     // Listen on socket (sock_id, backlog -> void)
     OP_SOCKET_ACCEPT,     // Accept connection (sock_id -> client_sock_id)
     OP_SOCKET_SEND,       // Send data (sock_id, data -> bytes_sent)
+    OP_SOCKET_SENDALL,    // Send all data (sock_id, data -> void)
     OP_SOCKET_RECV,       // Receive data (sock_id, size -> string)
     OP_SOCKET_CLOSE,      // Close socket (sock_id -> void)
     OP_SOCKET_SETSOCKOPT, // Set socket option (sock_id, level, option, value -> void)
@@ -722,6 +761,9 @@ typedef struct VM
     bool running;
 
     int exit_code;  // Exit code for the program (0 = success, 1 = error)
+    Value globals[MAX_VARS];        // Global variable storage
+    char *global_names[MAX_VARS];   // Global variable names
+    int global_count;               // Number of globals
     StructDef structs[MAX_STRUCTS];  // Struct definitions
     int struct_count;                // Number of registered structs
     int prog_argc;                   // Program argument count
@@ -899,7 +941,7 @@ void string_intern_destroy(StringIntern *intern) {
 void value_free(Value v);
 Value value_copy(Value v);
 void list_free(List *list);
-void vm_runtime_error(VM *vm, const char *message, int char_pos);
+bool vm_runtime_error(VM *vm, const char *message, int char_pos);
 
 // Safe parsing helpers (use strtol family instead of unsafe ato* functions)
 static inline int64_t safe_atoll(const char *str)
@@ -984,6 +1026,14 @@ Value value_make_void()
     return v;
 }
 
+static double value_as_double(Value v)
+{
+    if (v.type == VAL_F64) return v.as.f64;
+    if (v.type == VAL_INT) return (double)v.as.int64;
+    if (v.type == VAL_BIGINT && v.as.bigint) return mpz_get_d(*v.as.bigint);
+    return 0.0;
+}
+
 // List helper functions
 List *list_new() {
     List *list = malloc(sizeof(List));
@@ -994,6 +1044,7 @@ List *list_new() {
     }
     list->capacity = 8; // Start with capacity of 8
     list->length = 0;
+    list->refcount = 1;
     list->items = malloc(sizeof(Value) * list->capacity);
     if (!list->items)
     {
@@ -1070,7 +1121,9 @@ Value list_get(List *list, int index) {
         }
 
         if (g_current_vm) {
-            vm_runtime_error(g_current_vm, error_msg, char_pos);
+            if (vm_runtime_error(g_current_vm, error_msg, char_pos)) {
+                return value_make_int_si(0);
+            }
         } else {
             fprintf(stderr, "Error: %s\n", error_msg);
         }
@@ -1131,7 +1184,9 @@ void list_set(List *list, int index, Value value) {
         }
 
         if (g_current_vm) {
-            vm_runtime_error(g_current_vm, error_msg, char_pos);
+            if (vm_runtime_error(g_current_vm, error_msg, char_pos)) {
+                return;
+            }
         } else {
             fprintf(stderr, "Error: %s\n", error_msg);
         }
@@ -1211,6 +1266,8 @@ static bool value_equals(Value a, Value b) {
             return a.as.boolean == b.as.boolean;
         case VAL_VOID:
             return true;
+        case VAL_DICT:
+            return a.as.dict_val == b.as.dict_val;
         default:
             // For complex types, compare pointers
             return a.as.list == b.as.list;
@@ -1226,6 +1283,7 @@ Set *set_new() {
     set->capacity = 16;  // Start with capacity of 16
     set->length = 0;
     set->tombstones = 0;
+    set->refcount = 1;
     set->entries = calloc(set->capacity, sizeof(SetEntry));
     if (!set->entries) {
         fprintf(stderr, "Error: Failed to allocate set entries\n");
@@ -1370,6 +1428,86 @@ Value value_wrap_set(Set *set) {
     return v;
 }
 
+Dict *dict_new() {
+    Dict *dict = malloc(sizeof(Dict));
+    if (!dict) {
+        fprintf(stderr, "Error: Failed to allocate dict\n");
+        exit(1);
+    }
+    dict->capacity = 8;
+    dict->length = 0;
+    dict->refcount = 1;
+    dict->entries = calloc(dict->capacity, sizeof(DictEntry));
+    if (!dict->entries) {
+        fprintf(stderr, "Error: Failed to allocate dict entries\n");
+        exit(1);
+    }
+    return dict;
+}
+
+static int dict_find(Dict *dict, Value key) {
+    for (int i = 0; i < dict->length; i++) {
+        if (dict->entries[i].occupied && value_equals(dict->entries[i].key, key)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void dict_set(Dict *dict, Value key, Value value) {
+    if (!dict) return;
+    int idx = dict_find(dict, key);
+    if (idx >= 0) {
+        value_free(dict->entries[idx].value);
+        dict->entries[idx].value = value_copy(value);
+        return;
+    }
+    if (dict->length >= dict->capacity) {
+        int cap = dict->capacity * 2;
+        DictEntry *entries = realloc(dict->entries, sizeof(DictEntry) * cap);
+        if (!entries) return;
+        memset(entries + dict->capacity, 0, sizeof(DictEntry) * (cap - dict->capacity));
+        dict->entries = entries;
+        dict->capacity = cap;
+    }
+    dict->entries[dict->length].key = value_copy(key);
+    dict->entries[dict->length].value = value_copy(value);
+    dict->entries[dict->length].occupied = true;
+    dict->length++;
+}
+
+Value dict_get(Dict *dict, Value key) {
+    if (!dict) return value_make_int_si(0);
+    int idx = dict_find(dict, key);
+    if (idx < 0) return value_make_int_si(0);
+    return value_copy(dict->entries[idx].value);
+}
+
+bool dict_contains(Dict *dict, Value key) {
+    return dict && dict_find(dict, key) >= 0;
+}
+
+int dict_len(Dict *dict) { return dict ? dict->length : 0; }
+
+void dict_free(Dict *dict) {
+    if (!dict) return;
+    for (int i = 0; i < dict->length; i++) {
+        if (dict->entries[i].occupied) {
+            value_free(dict->entries[i].key);
+            value_free(dict->entries[i].value);
+        }
+    }
+    free(dict->entries);
+    free(dict);
+}
+
+Value value_make_dict() {
+    Value v;
+    v.type = VAL_DICT;
+    v.as.dict_val = dict_new();
+    return v;
+}
+
 void value_free(Value v) {
     if (v.type == VAL_BIGINT && v.as.bigint)
     {
@@ -1382,21 +1520,27 @@ void value_free(Value v) {
     }
     else if (v.type == VAL_LIST && v.as.list)
     {
-        list_free(v.as.list);
+        if (--v.as.list->refcount <= 0) list_free(v.as.list);
     }
     else if (v.type == VAL_SET && v.as.set)
     {
-        set_free(v.as.set);
+        if (--v.as.set->refcount <= 0) set_free(v.as.set);
+    }
+    else if (v.type == VAL_DICT && v.as.dict_val)
+    {
+        if (--v.as.dict_val->refcount <= 0) dict_free(v.as.dict_val);
     }
     else if (v.type == VAL_STRUCT && v.as.struct_val)
     {
-        // Free all field values
-        for (int i = 0; i < v.as.struct_val->field_count; i++)
+        if (--v.as.struct_val->refcount <= 0)
         {
-            value_free(v.as.struct_val->fields[i]);
+            for (int i = 0; i < v.as.struct_val->field_count; i++)
+            {
+                value_free(v.as.struct_val->fields[i]);
+            }
+            free(v.as.struct_val->fields);
+            free(v.as.struct_val);
         }
-        free(v.as.struct_val->fields);
-        free(v.as.struct_val);
     }
     else if (v.type == VAL_PYOBJECT && v.as.pyobj)
     {
@@ -1425,45 +1569,27 @@ Value value_copy(Value v)
     }
     else if (v.type == VAL_LIST)
     {
-        // Deep copy list
-        Value result;
-        result.type = VAL_LIST;
-        result.as.list = list_new();
-        for (int i = 0; i < v.as.list->length; i++)
-        {
-            list_append(result.as.list, v.as.list->items[i]);
-        }
-        return result;
+        v.as.list->refcount++;
+        return v;
     }
     else if (v.type == VAL_SET)
     {
-        // Deep copy set
-        Value result;
-        result.type = VAL_SET;
-        result.as.set = set_new();
-        for (int i = 0; i < v.as.set->capacity; i++)
-        {
-            if (v.as.set->entries[i].occupied)
-            {
-                set_add(result.as.set, v.as.set->entries[i].key);
-            }
-        }
-        return result;
+        v.as.set->refcount++;
+        return v;
+    }
+    else if (v.type == VAL_DICT)
+    {
+        v.as.dict_val->refcount++;
+        return v;
     }
     else if (v.type == VAL_STRUCT)
     {
-        // Deep copy struct
-        Value result;
-        result.type = VAL_STRUCT;
-        result.as.struct_val = malloc(sizeof(Struct));
-        result.as.struct_val->struct_id = v.as.struct_val->struct_id;
-        result.as.struct_val->field_count = v.as.struct_val->field_count;
-        result.as.struct_val->fields = malloc(sizeof(Value) * result.as.struct_val->field_count);
-        for (int i = 0; i < result.as.struct_val->field_count; i++)
-        {
-            result.as.struct_val->fields[i] = value_copy(v.as.struct_val->fields[i]);
-        }
-        return result;
+        v.as.struct_val->refcount++;
+        return v;
+    }
+    else if (v.type == VAL_PTR)
+    {
+        return v;
     }
     else if (v.type == VAL_PYOBJECT)
     {
@@ -1528,6 +1654,7 @@ void vm_init(VM *vm)
     vm->running = false;
     vm->exit_code = 0;
     vm->struct_count = 0;
+    vm->global_count = 0;
     vm->prog_argc = 0;
     vm->prog_argv = NULL;
     vm->loaded_libs = NULL;
@@ -1576,6 +1703,12 @@ void vm_free(VM *vm)
     {
         if (vm->exception_handlers[i].exc_type)
             free(vm->exception_handlers[i].exc_type);
+    }
+    // Free global values and names
+    for (int i = 0; i < vm->global_count; i++)
+    {
+        value_free(vm->globals[i]);
+        free(vm->global_names[i]);
     }
     // Free function names
     for (int i = 0; i < vm->func_count; i++)
@@ -1673,7 +1806,7 @@ void vm_free(VM *vm)
 }
 
 // Helper function to format runtime errors with debug information
-void vm_runtime_error(VM *vm, const char *message, int char_pos) {
+bool vm_runtime_error(VM *vm, const char *message, int char_pos) {
     // Check if there's an active exception handler
     if (vm->exception_handler_count > 0) {
         // Find the most recent handler
@@ -1732,7 +1865,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
             handler->exc_type = NULL;
             vm->exception_handler_count--;
 
-            return;  // Continue execution at handler
+            return true;  // Continue execution at handler
         }
 
         // Handler doesn't match - pop it and continue searching or error
@@ -1743,8 +1876,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
         // Recursively check for other handlers
         // Use display_message to avoid showing the [Type] marker
         if (vm->exception_handler_count > 0) {
-            vm_runtime_error(vm, display_message, char_pos);
-            return;
+            return vm_runtime_error(vm, display_message, char_pos);
         }
 
         // No more handlers - will fall through to error printing
@@ -1793,6 +1925,7 @@ void vm_runtime_error(VM *vm, const char *message, int char_pos) {
     }
 
     exit(1);
+    return false;
 }
 
 // Stack operations - inline for performance with always_inline hint
@@ -1881,6 +2014,12 @@ void value_print(Value val)
     case VAL_STRUCT:
         // Print struct in a simple format (can be improved)
         printf("<struct>");
+        break;
+    case VAL_PTR:
+        printf("<pointer>");
+        break;
+    case VAL_DICT:
+        printf("<dict>");
         break;
     case VAL_PYOBJECT:
         #if defined(FR_NO_PYTHON)
@@ -1999,6 +2138,12 @@ Value value_to_string(Value val)
     }
     case VAL_STRUCT:
         result.as.str = strdup("<struct>");
+        break;
+    case VAL_PTR:
+        result.as.str = strdup("<pointer>");
+        break;
+    case VAL_DICT:
+        result.as.str = strdup("<dict>");
         break;
     case VAL_PYOBJECT:
         #if defined(FR_NO_PYTHON)
@@ -2772,6 +2917,28 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
             // Skip this directive as it's for static analysis/debugging
             continue;
         }
+        else if (strcmp(token, ".global") == 0)
+        {
+            char *name = strtok(NULL, " ");
+            char *gtype = strtok(NULL, " ");
+            if (!name) continue;
+            if (vm->global_count >= MAX_VARS) {
+                fprintf(stderr, "Too many global variables\n");
+                return false;
+            }
+            int idx = vm->global_count++;
+            vm->global_names[idx] = strdup(name);
+            if (gtype && (strcmp(gtype, "f64") == 0 || strcmp(gtype, "float") == 0)) {
+                vm->globals[idx] = value_make_f64(0.0);
+            } else if (gtype && (strcmp(gtype, "str") == 0 || strcmp(gtype, "string") == 0)) {
+                vm->globals[idx] = value_make_str("");
+            } else if (gtype && (strcmp(gtype, "bool") == 0)) {
+                vm->globals[idx] = value_make_bool(false);
+            } else {
+                vm->globals[idx] = value_make_int_si(0);
+            }
+            continue;
+        }
         else if (strcmp(token, "LABEL") == 0)
         {
             char *name = strtok(NULL, " ");
@@ -2866,7 +3033,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                     inst.operand.ptr = multi;
                 }
             }
-            else if (strcmp(token, "CONST_STR") == 0)
+            else if (strcmp(token, "CONST_STR") == 0 ||
+                     strcmp(token, "CONST_BYTES") == 0)
             {
                 // Support CONST_STR with multiple arguments
                 char *rest_of_line = strtok(NULL, "\n");
@@ -3239,6 +3407,12 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_BUILTIN_LEN;
             else if (strcmp(token, "BUILTIN_SQRT") == 0)
                 inst.op = OP_BUILTIN_SQRT;
+            else if (strcmp(token, "SIN") == 0 || strcmp(token, "BUILTIN_SIN") == 0)
+                inst.op = OP_SIN;
+            else if (strcmp(token, "COS") == 0 || strcmp(token, "BUILTIN_COS") == 0)
+                inst.op = OP_COS;
+            else if (strcmp(token, "TAN") == 0 || strcmp(token, "BUILTIN_TAN") == 0)
+                inst.op = OP_TAN;
             else if (strcmp(token, "BUILTIN_ROUND") == 0)
                 inst.op = OP_BUILTIN_ROUND;
             else if (strcmp(token, "BUILTIN_FLOOR") == 0)
@@ -3269,8 +3443,35 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_SET_CONTAINS;
             else if (strcmp(token, "SET_LEN") == 0)
                 inst.op = OP_SET_LEN;
+            else if (strcmp(token, "DICT_NEW") == 0)
+                inst.op = OP_DICT_NEW;
+            else if (strcmp(token, "DICT_SET") == 0)
+                inst.op = OP_DICT_SET;
+            else if (strcmp(token, "DICT_GET") == 0)
+                inst.op = OP_DICT_GET;
+            else if (strcmp(token, "DICT_CONTAINS") == 0)
+                inst.op = OP_DICT_CONTAINS;
+            else if (strcmp(token, "DICT_LEN") == 0)
+                inst.op = OP_DICT_LEN;
             else if (strcmp(token, "CONTAINS") == 0)
                 inst.op = OP_CONTAINS;
+            else if (strcmp(token, "LIST_NEW_CAP") == 0)
+            {
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: LIST_NEW_CAP requires capacity and type\n");
+                    exit(1);
+                }
+                MultiInt *multi = malloc(sizeof(MultiInt) + 2 * sizeof(int));
+                multi->count = 2;
+                char *cap_str = strtok(rest_of_line, " ");
+                char *type_str = strtok(NULL, " ");
+                multi->values[0] = cap_str ? safe_atoi(cap_str) : 0;
+                multi->values[1] = type_str ? safe_atoi(type_str) : -1;
+                inst.op = OP_LIST_NEW_CAP;
+                inst.operand.ptr = multi;
+            }
             else if (strcmp(token, "LIST_NEW_I64") == 0)
             {
                 // LIST_NEW_I64 count val1 val2 val3 ...
@@ -3458,6 +3659,48 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.operand.ptr = multi;
             }
             // Struct operations
+            else if (strcmp(token, "ADDR_LOCAL") == 0)
+            {
+                char *idx_str = strtok(NULL, " \n");
+                inst.op = OP_ADDR_LOCAL;
+                inst.operand.index = idx_str ? safe_atoi(idx_str) : 0;
+            }
+            else if (strcmp(token, "ADDR_GLOBAL") == 0)
+            {
+                char *name = strtok(NULL, " \n");
+                inst.op = OP_ADDR_GLOBAL;
+                inst.operand.ptr = name ? strdup(name) : strdup("");
+            }
+            else if (strcmp(token, "ADDR_FIELD") == 0)
+            {
+                char *idx_str = strtok(NULL, " \n");
+                inst.op = OP_ADDR_FIELD;
+                inst.operand.index = idx_str ? safe_atoi(idx_str) : 0;
+            }
+            else if (strcmp(token, "ADDR_ELEM") == 0)
+            {
+                inst.op = OP_ADDR_ELEM;
+            }
+            else if (strcmp(token, "DEREF") == 0)
+            {
+                inst.op = OP_DEREF;
+            }
+            else if (strcmp(token, "DEREF_SET") == 0)
+            {
+                inst.op = OP_DEREF_SET;
+            }
+            else if (strcmp(token, "LOAD_GLOBAL") == 0)
+            {
+                char *name = strtok(NULL, " \n");
+                inst.op = OP_LOAD_GLOBAL;
+                inst.operand.ptr = name ? strdup(name) : strdup("");
+            }
+            else if (strcmp(token, "STORE_GLOBAL") == 0)
+            {
+                char *name = strtok(NULL, " \n");
+                inst.op = OP_STORE_GLOBAL;
+                inst.operand.ptr = name ? strdup(name) : strdup("");
+            }
             else if (strcmp(token, "STRUCT_NEW") == 0)
             {
                 char *struct_id_str = strtok(NULL, " ");
@@ -3561,6 +3804,8 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 inst.op = OP_SOCKET_ACCEPT;
             else if (strcmp(token, "SOCKET_SEND") == 0)
                 inst.op = OP_SOCKET_SEND;
+            else if (strcmp(token, "SOCKET_SENDALL") == 0)
+                inst.op = OP_SOCKET_SENDALL;
             else if (strcmp(token, "SOCKET_RECV") == 0)
                 inst.op = OP_SOCKET_RECV;
             else if (strcmp(token, "SOCKET_CLOSE") == 0)
@@ -3974,6 +4219,29 @@ bool vm_load_bytecode(VM *vm, const char *filename) {
                 }
                 inst.operand.ptr = multi;
             }
+            // Fused struct field get + store + load triplets
+            else if (strcmp(token, "FUSED_GET_STORE_LOAD") == 0)
+            {
+                inst.op = OP_FUSED_GET_STORE_LOAD;
+                char *rest_of_line = strtok(NULL, "\n");
+                if (rest_of_line == NULL)
+                {
+                    fprintf(stderr, "Error: FUSED_GET_STORE_LOAD requires arguments\n");
+                    exit(1);
+                }
+                int temp_args[768];
+                int arg_count = 0;
+                char *arg_str = strtok(rest_of_line, " ");
+                while (arg_str != NULL && arg_count < 768)
+                {
+                    temp_args[arg_count++] = safe_atoi(arg_str);
+                    arg_str = strtok(NULL, " ");
+                }
+                MultiInt *multi = malloc(sizeof(MultiInt) + arg_count * sizeof(int));
+                multi->count = arg_count;
+                for (int j = 0; j < arg_count; j++) multi->values[j] = temp_args[j];
+                inst.operand.ptr = multi;
+            }
             // Fused LOAD2 + arithmetic instructions
             else if (strcmp(token, "LOAD2_ADD_I64") == 0)
             {
@@ -4207,6 +4475,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
     {
         // Create a list of argument strings
         List *argv_list = malloc(sizeof(List));
+        argv_list->refcount = 1;
         argv_list->length = vm->prog_argc;
         argv_list->capacity = (vm->prog_argc > 0) ? vm->prog_argc : 1;  // At least capacity of 1
         argv_list->items = malloc(sizeof(Value) * argv_list->capacity);
@@ -4242,6 +4511,8 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_CONST_BOOL_MULTI] = &&L_CONST_BOOL_MULTI,
         [OP_LOAD] = &&L_LOAD,
         [OP_STORE] = &&L_STORE,
+        [OP_LOAD_GLOBAL] = &&L_LOAD_GLOBAL,
+        [OP_STORE_GLOBAL] = &&L_STORE_GLOBAL,
         [OP_STORE_CONST_I64] = &&L_STORE_CONST_I64,
         [OP_STORE_CONST_F64] = &&L_STORE_CONST_F64,
         [OP_STORE_CONST_BOOL] = &&L_STORE_CONST_BOOL,
@@ -4277,6 +4548,9 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_BUILTIN_STR] = &&L_BUILTIN_STR,
         [OP_BUILTIN_LEN] = &&L_BUILTIN_LEN,
         [OP_BUILTIN_SQRT] = &&L_BUILTIN_SQRT,
+        [OP_SIN] = &&L_SIN,
+        [OP_COS] = &&L_COS,
+        [OP_TAN] = &&L_TAN,
         [OP_BUILTIN_ROUND] = &&L_BUILTIN_ROUND,
         [OP_BUILTIN_FLOOR] = &&L_BUILTIN_FLOOR,
         [OP_BUILTIN_CEIL] = &&L_BUILTIN_CEIL,
@@ -4317,6 +4591,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LOAD_MULTI] = &&L_LOAD_MULTI,
         [OP_FUSED_LOAD_STORE] = &&L_FUSED_LOAD_STORE,
         [OP_FUSED_STORE_LOAD] = &&L_FUSED_STORE_LOAD,
+        [OP_FUSED_GET_STORE_LOAD] = &&L_FUSED_GET_STORE_LOAD,
         [OP_LOAD2_ADD_I64] = &&L_LOAD2_ADD_I64,
         [OP_LOAD2_SUB_I64] = &&L_LOAD2_SUB_I64,
         [OP_LOAD2_MUL_I64] = &&L_LOAD2_MUL_I64,
@@ -4343,14 +4618,26 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_LIST_NEW_F64] = &&L_LIST_NEW_F64,
         [OP_LIST_NEW_STR] = &&L_LIST_NEW_STR,
         [OP_LIST_NEW_BOOL] = &&L_LIST_NEW_BOOL,
+        [OP_LIST_NEW_CAP] = &&L_LIST_NEW_CAP,
         [OP_SET_NEW] = &&L_SET_NEW,
         [OP_SET_ADD] = &&L_SET_ADD,
         [OP_SET_REMOVE] = &&L_SET_REMOVE,
         [OP_SET_CONTAINS] = &&L_SET_CONTAINS,
         [OP_SET_LEN] = &&L_SET_LEN,
+        [OP_DICT_NEW] = &&L_DICT_NEW,
+        [OP_DICT_SET] = &&L_DICT_SET,
+        [OP_DICT_GET] = &&L_DICT_GET,
+        [OP_DICT_CONTAINS] = &&L_DICT_CONTAINS,
+        [OP_DICT_LEN] = &&L_DICT_LEN,
         [OP_CONTAINS] = &&L_CONTAINS,
         [OP_STRUCT_NEW] = &&L_STRUCT_NEW,
         [OP_STRUCT_GET] = &&L_STRUCT_GET,
+        [OP_ADDR_LOCAL] = &&L_ADDR_LOCAL,
+        [OP_ADDR_GLOBAL] = &&L_ADDR_GLOBAL,
+        [OP_ADDR_FIELD] = &&L_ADDR_FIELD,
+        [OP_ADDR_ELEM] = &&L_ADDR_ELEM,
+        [OP_DEREF] = &&L_DEREF,
+        [OP_DEREF_SET] = &&L_DEREF_SET,
         [OP_STRUCT_SET] = &&L_STRUCT_SET,
         [OP_TO_INT] = &&L_TO_INT,
         [OP_TO_FLOAT] = &&L_TO_FLOAT,
@@ -4395,6 +4682,7 @@ __attribute__((hot)) void vm_run(VM *vm) {
         [OP_SOCKET_LISTEN] = &&L_SOCKET_LISTEN,
         [OP_SOCKET_ACCEPT] = &&L_SOCKET_ACCEPT,
         [OP_SOCKET_SEND] = &&L_SOCKET_SEND,
+        [OP_SOCKET_SENDALL] = &&L_SOCKET_SENDALL,
         [OP_SOCKET_RECV] = &&L_SOCKET_RECV,
         [OP_SOCKET_CLOSE] = &&L_SOCKET_CLOSE,
         [OP_SOCKET_SETSOCKOPT] = &&L_SOCKET_SETSOCKOPT,
@@ -4491,6 +4779,41 @@ L_CONST_BOOL_MULTI: // OP_CONST_BOOL_MULTI
     }
     DISPATCH();
 }
+L_LOAD_GLOBAL: // OP_LOAD_GLOBAL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    char *name = (char *)inst.operand.ptr;
+    int idx = -1;
+    for (int i = 0; i < vm->global_count; i++) {
+        if (strcmp(vm->global_names[i], name) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+        fprintf(stderr, "Error: Unknown global '%s'\n", name ? name : "");
+        exit(1);
+    }
+    vm_push(vm, value_copy(vm->globals[idx]));
+    DISPATCH();
+}
+
+L_STORE_GLOBAL: // OP_STORE_GLOBAL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    char *name = (char *)inst.operand.ptr;
+    Value val = vm_pop(vm);
+    int idx = -1;
+    for (int i = 0; i < vm->global_count; i++) {
+        if (strcmp(vm->global_names[i], name) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+        fprintf(stderr, "Error: Unknown global '%s'\n", name ? name : "");
+        value_free(val);
+        exit(1);
+    }
+    value_free(vm->globals[idx]);
+    vm->globals[idx] = val;
+    DISPATCH();
+}
+
 L_LOAD: // OP_LOAD
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -4919,9 +5242,11 @@ L_CALL: // OP_CALL
         CallFrame *frame = &vm->call_stack[vm->call_stack_top++];
         frame->func = func;
         frame->return_pc = vm->pc;
-        frame->vars.var_count = func->local_count;
-        // Initialize locals to 0
-        for (int i = 0; i < func->local_count; i++)
+        frame->vars.var_count = MAX_VARS;
+        // Initialize every slot. Compiler-generated field-cache temporaries can
+        // use indices beyond the declared local count; leaving those slots with
+        // recycled pointers makes STORE free an arbitrary old value.
+        for (int i = 0; i < MAX_VARS; i++)
         {
             frame->vars.vars[i] = value_make_int_si(0);
         }
@@ -5059,6 +5384,27 @@ L_BUILTIN_SQRT: // OP_BUILTIN_SQRT
         value_free(v);
         DISPATCH();
     }
+}
+L_SIN: // OP_SIN
+{
+    Value v = vm_pop(vm);
+    vm_push(vm, value_make_f64(sin(value_as_double(v))));
+    value_free(v);
+    DISPATCH();
+}
+L_COS: // OP_COS
+{
+    Value v = vm_pop(vm);
+    vm_push(vm, value_make_f64(cos(value_as_double(v))));
+    value_free(v);
+    DISPATCH();
+}
+L_TAN: // OP_TAN
+{
+    Value v = vm_pop(vm);
+    vm_push(vm, value_make_f64(tan(value_as_double(v))));
+    value_free(v);
+    DISPATCH();
 }
 L_BUILTIN_ROUND: // OP_BUILTIN_ROUND
 {
@@ -6394,6 +6740,62 @@ L_LIST_POP: // OP_LIST_POP
 }
 
 // Set operations
+L_DICT_NEW: // OP_DICT_NEW
+{
+    vm_push(vm, value_make_dict());
+    DISPATCH();
+}
+
+L_DICT_SET: // OP_DICT_SET
+{
+    Value value = vm_pop(vm);
+    Value key = vm_pop(vm);
+    Value d = vm_pop(vm);
+    if (d.type != VAL_DICT) {
+        fprintf(stderr, "Runtime error: DICT_SET on non-dict\n");
+        value_free(value); value_free(key); value_free(d);
+        exit(1);
+    }
+    dict_set(d.as.dict_val, key, value);
+    value_free(value); value_free(key);
+    vm_push(vm, d);
+    DISPATCH();
+}
+
+L_DICT_GET: // OP_DICT_GET
+{
+    Value key = vm_pop(vm);
+    Value d = vm_pop(vm);
+    if (d.type != VAL_DICT) {
+        fprintf(stderr, "Runtime error: DICT_GET on non-dict\n");
+        value_free(key); value_free(d);
+        exit(1);
+    }
+    Value result = dict_get(d.as.dict_val, key);
+    value_free(key); value_free(d);
+    vm_push(vm, result);
+    DISPATCH();
+}
+
+L_DICT_CONTAINS: // OP_DICT_CONTAINS
+{
+    Value key = vm_pop(vm);
+    Value d = vm_pop(vm);
+    bool found = d.type == VAL_DICT && dict_contains(d.as.dict_val, key);
+    value_free(key); value_free(d);
+    vm_push(vm, value_make_bool(found));
+    DISPATCH();
+}
+
+L_DICT_LEN: // OP_DICT_LEN
+{
+    Value d = vm_pop(vm);
+    int n = d.type == VAL_DICT ? dict_len(d.as.dict_val) : 0;
+    value_free(d);
+    vm_push(vm, value_make_int_si(n));
+    DISPATCH();
+}
+
 L_SET_NEW: // OP_SET_NEW
 {
     vm_push(vm, value_make_set());
@@ -6575,6 +6977,142 @@ L_LIST_NEW_BOOL: // OP_LIST_NEW_BOOL
     DISPATCH();
 }
 
+L_LIST_NEW_CAP: // OP_LIST_NEW_CAP
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt *multi = (MultiInt*)inst.operand.ptr;
+    int capacity = multi->count > 0 ? multi->values[0] : 0;
+    int elem_type = multi->count > 1 ? multi->values[1] : -1;
+    if (capacity < 0) capacity = 0;
+
+    List *list = list_new();
+    list->capacity = capacity > 0 ? capacity : 1;
+    list->items = realloc(list->items, sizeof(Value) * list->capacity);
+    list->length = capacity;
+
+    for (int i = 0; i < capacity; i++)
+    {
+        switch (elem_type)
+        {
+            case 1: list->items[i] = value_make_str(""); break;
+            case 2: list->items[i] = value_make_f64(0.0); break;
+            case 3: list->items[i] = value_make_bool(false); break;
+            default: list->items[i] = value_make_int_si(0); break;
+        }
+    }
+    vm_push(vm, value_wrap_list(list));
+    DISPATCH();
+}
+
+L_ADDR_LOCAL: // OP_ADDR_LOCAL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
+    int idx = inst.operand.index;
+    if (idx < 0 || idx >= MAX_VARS)
+    {
+        fprintf(stderr, "Error: Invalid local index for ADDR_LOCAL\n");
+        exit(1);
+    }
+    Value ptr;
+    ptr.type = VAL_PTR;
+    ptr.as.ptr = &frame->vars.vars[idx];
+    vm_push(vm, ptr);
+    DISPATCH();
+}
+
+L_ADDR_GLOBAL: // OP_ADDR_GLOBAL
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    char *name = (char *)inst.operand.ptr;
+    int idx = -1;
+    for (int i = 0; i < vm->global_count; i++) {
+        if (strcmp(vm->global_names[i], name) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+        fprintf(stderr, "Error: Unknown global '%s'\n", name ? name : "");
+        exit(1);
+    }
+    Value ptr;
+    ptr.type = VAL_PTR;
+    ptr.as.ptr = &vm->globals[idx];
+    vm_push(vm, ptr);
+    DISPATCH();
+}
+
+L_ADDR_FIELD: // OP_ADDR_FIELD
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    Value sv = vm_pop(vm);
+    if (sv.type != VAL_STRUCT)
+    {
+        fprintf(stderr, "Error: ADDR_FIELD requires a struct\n");
+        exit(1);
+    }
+    int idx = inst.operand.index;
+    if (idx < 0 || idx >= sv.as.struct_val->field_count)
+    {
+        fprintf(stderr, "Error: Invalid struct field index\n");
+        exit(1);
+    }
+    Value ptr;
+    ptr.type = VAL_PTR;
+    ptr.as.ptr = &sv.as.struct_val->fields[idx];
+    vm_push(vm, ptr);
+    DISPATCH();
+}
+
+L_ADDR_ELEM: // OP_ADDR_ELEM
+{
+    Value idx_val = vm_pop(vm);
+    Value list_val = vm_pop(vm);
+    if (list_val.type != VAL_LIST)
+    {
+        fprintf(stderr, "Error: ADDR_ELEM requires a list\n");
+        exit(1);
+    }
+    int idx = (int)(idx_val.type == VAL_INT ? idx_val.as.int64 : (int64_t)idx_val.as.f64);
+    value_free(idx_val);
+    if (idx < 0) idx += list_val.as.list->length;
+    if (idx < 0 || idx >= list_val.as.list->length)
+    {
+        fprintf(stderr, "Error: list index out of range for ADDR_ELEM\n");
+        exit(1);
+    }
+    Value ptr;
+    ptr.type = VAL_PTR;
+    ptr.as.ptr = &list_val.as.list->items[idx];
+    vm_push(vm, ptr);
+    DISPATCH();
+}
+
+L_DEREF: // OP_DEREF
+{
+    Value ptr = vm_pop(vm);
+    if (ptr.type != VAL_PTR || ptr.as.ptr == NULL)
+    {
+        fprintf(stderr, "Error: Cannot dereference a non-pointer value\n");
+        exit(1);
+    }
+    vm_push(vm, value_copy(*ptr.as.ptr));
+    DISPATCH();
+}
+
+L_DEREF_SET: // OP_DEREF_SET
+{
+    Value value = vm_pop(vm);
+    Value ptr = vm_pop(vm);
+    if (ptr.type != VAL_PTR || ptr.as.ptr == NULL)
+    {
+        fprintf(stderr, "Error: Cannot assign through a non-pointer value\n");
+        value_free(value);
+        exit(1);
+    }
+    value_free(*ptr.as.ptr);
+    *ptr.as.ptr = value;
+    DISPATCH();
+}
+
 L_STRUCT_NEW: // OP_STRUCT_NEW
 {
     Instruction inst = vm->code[vm->pc - 1];
@@ -6595,6 +7133,7 @@ L_STRUCT_NEW: // OP_STRUCT_NEW
     Struct *s = malloc(sizeof(Struct));
     s->struct_id = struct_id;
     s->field_count = def->field_count;
+    s->refcount = 1;
     s->fields = malloc(sizeof(Value) * s->field_count);
 
     // Pop field values from stack in reverse order (last field pushed first)
@@ -6629,7 +7168,9 @@ L_STRUCT_GET: // OP_STRUCT_GET
 
     if (field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
     {
-        fprintf(stderr, "Error: Field index %d out of range\n", field_idx);
+        fprintf(stderr, "Error: Field index %d out of range (struct %d, fields %d)\n",
+                field_idx, struct_val.as.struct_val->struct_id,
+                struct_val.as.struct_val->field_count);
         value_free(struct_val);
         vm->running = false;
         vm->exit_code = 1;
@@ -6662,7 +7203,9 @@ L_STRUCT_SET: // OP_STRUCT_SET
 
     if (field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
     {
-        fprintf(stderr, "Error: Field index %d out of range\n", field_idx);
+        fprintf(stderr, "Error: Field index %d out of range (struct %d, fields %d)\n",
+                field_idx, struct_val.as.struct_val->struct_id,
+                struct_val.as.struct_val->field_count);
         value_free(struct_val);
         value_free(new_value);
         vm->running = false;
@@ -7271,6 +7814,7 @@ L_FILE_LISTDIR: // OP_FILE_LISTDIR - List directory contents (path -> list)
     }
 
     List *list = malloc(sizeof(List));
+    list->refcount = 1;
     list->capacity = 16;
     list->length = 0;
     list->items = malloc(sizeof(Value) * list->capacity);
@@ -7776,11 +8320,37 @@ L_SOCKET_SEND: // OP_SOCKET_SEND - Send data (sock_id, data -> bytes_sent)
 
     int sock = (int)sock_val.as.int64;
     const char *data = data_val.as.str;
-    int sent = send(sock, data, strlen(data), 0);
+    int sent = send(sock, data, strlen(data), MSG_NOSIGNAL);
 
     value_free(sock_val);
     value_free(data_val);
     vm_push(vm, value_make_int_si(sent));
+    DISPATCH();
+}
+
+L_SOCKET_SENDALL: // OP_SOCKET_SENDALL - Send all data
+{
+    Value data_val = vm_pop(vm);
+    Value sock_val = vm_pop(vm);
+    if (sock_val.type != VAL_INT || data_val.type != VAL_STR)
+    {
+        fprintf(stderr, "Runtime error: sendall() expects (int, string)\n");
+        value_free(sock_val);
+        value_free(data_val);
+        exit(1);
+    }
+    int sock = (int)sock_val.as.int64;
+    const char *data = data_val.as.str;
+    size_t total = strlen(data);
+    size_t sent = 0;
+    while (sent < total)
+    {
+        int n = send(sock, data + sent, total - sent, MSG_NOSIGNAL);
+        if (n <= 0) break;
+        sent += (size_t)n;
+    }
+    value_free(sock_val);
+    value_free(data_val);
     DISPATCH();
 }
 
@@ -8408,6 +8978,38 @@ L_FUSED_STORE_LOAD: // OP_FUSED_STORE_LOAD
         }
     }
 
+    DISPATCH();
+}
+
+L_FUSED_GET_STORE_LOAD: // OP_FUSED_GET_STORE_LOAD
+{
+    Instruction inst = vm->code[vm->pc - 1];
+    MultiInt *multi = (MultiInt *)inst.operand.ptr;
+    CallFrame *frame = &vm->call_stack[vm->call_stack_top - 1];
+
+    for (int i = 0; i + 2 < multi->count; i += 3)
+    {
+        int field_idx = multi->values[i];
+        int store_idx = multi->values[i + 1];
+        int load_idx = multi->values[i + 2];
+
+        Value struct_val = vm_pop(vm);
+        if (struct_val.type != VAL_STRUCT ||
+            field_idx < 0 || field_idx >= struct_val.as.struct_val->field_count)
+        {
+            fprintf(stderr, "Error: Invalid fused struct field access (field %d, type %d)\n",
+                    field_idx, struct_val.type == VAL_STRUCT ? struct_val.as.struct_val->field_count : -1);
+            exit(1);
+        }
+        Value field_val = value_copy(struct_val.as.struct_val->fields[field_idx]);
+        value_free(struct_val);
+
+        value_free(frame->vars.vars[store_idx]);
+        frame->vars.vars[store_idx] = value_copy(field_val);
+        value_free(field_val);
+
+        vm_push(vm, value_copy(frame->vars.vars[load_idx]));
+    }
     DISPATCH();
 }
 

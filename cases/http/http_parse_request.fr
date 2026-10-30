@@ -1,0 +1,17 @@
+// !POST
+// !/echo
+// !hello
+// !5
+// !tester
+
+import ../../examples/http/http_lib
+
+void main() {
+    str raw = "POST /echo HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\nUser-Agent: tester\r\n\r\nhello"
+    HttpRequest req = http_parse_request(raw)
+    println(req.method)
+    println(req.path)
+    println(req.body)
+    println(http_get_header(req.headers, "content-length"))
+    println(http_get_header(req.headers, "user-agent"))
+}

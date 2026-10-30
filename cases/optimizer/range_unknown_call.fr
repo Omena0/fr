@@ -1,0 +1,17 @@
+// !1
+// !2
+
+#pragma no_eval
+
+int classify(int n) {
+    if (n > 10) {
+        return 1
+    }
+    return 2
+}
+
+void main() {
+    println(str(classify(20)))
+    int n = getpid() % 5 + 1
+    println(str(classify(n)))
+}

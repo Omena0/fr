@@ -1,0 +1,14 @@
+// !1
+// !2
+// !true
+// !false
+
+void main() {
+    dict d = {}
+    d["a"] = 1
+    d["b"] = 2
+    println(d["a"])
+    println(d["b"])
+    println("a" in d)
+    println("z" in d)
+}

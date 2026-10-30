@@ -75,6 +75,9 @@ disable_eval: bool = False
 # Parse-time evaluation timeout (seconds)
 eval_timeout_seconds: float = 0.5
 
+# Variables whose address is taken must never be constant-propagated.
+_address_taken_vars: set[str] = set()
+
 
 def _parse_c_signatures(
     c_file: str,
@@ -571,6 +574,32 @@ def _split_args(args_text: str) -> list[str]:
     return [arg.strip() for arg in args if arg.strip()]
 
 
+def _canonical_pointer_type(token: str) -> tuple[str, int] | None:
+    """Split a type token into (base, pointer_depth).
+
+    Accepted spellings: ``int*``, ``*int``, ``**int`` and ``int**``.
+    Plain (non-pointer) types return None. This deliberately does not treat
+    ``int *name`` as a pointer because that spelling is reserved for varargs.
+    """
+    if not token or "*" not in token:
+        return None
+    base = token
+    depth = 0
+    while base.startswith("*"):
+        depth += 1
+        base = base[1:]
+    while base.endswith("*"):
+        depth += 1
+        base = base[:-1]
+    if not base or base.endswith("*") or depth == 0:
+        return None
+    return base, depth
+
+
+def _pointer_type_string(base: str, depth: int) -> str:
+    return "*" * depth + base
+
+
 def _parse_typed_arg(
     arg: str, check_comma: bool, stream: InputStream, line: int
 ) -> tuple[str, str | None]:
@@ -581,6 +610,13 @@ def _parse_typed_arg(
     """
     import re
 
+    # Pointer parameter: ``int* p`` / ``*int p`` / ``int** p``.
+    pointer_match = re.match(r"^(\*{1,2})(\w+)\s+(\w+)$", arg)
+    if pointer_match and pointer_match[2] in types:
+        depth = len(pointer_match[1])
+        return (pointer_match[3], _pointer_type_string(pointer_match[2], depth))
+
+    # Varargs: ``int *name`` / ``int **name`` (space before the stars).
     if varargs_match := re.match(r"^(\w+)\s+(\*\*?)(\w+)$", arg):
         arg_type = varargs_match[1]
         if arg_type in types:
@@ -594,6 +630,10 @@ def _parse_typed_arg(
     if len(parts) == 1:
         # Untyped argument: "x"
         return (parts[0], None)
+    elif len(parts) == 2 and _canonical_pointer_type(parts[0]):
+        base, depth = _canonical_pointer_type(parts[0])  # type: ignore[misc]
+        if base in types or base in {"string", "str", "float", "f64", "bool", "void"}:
+            return (parts[1], _pointer_type_string(base, depth))
     elif len(parts) == 2 and parts[0] in types:
         # Typed argument: "int x"
         return (parts[1], parts[0])
@@ -726,6 +766,25 @@ def _normalize_operators(text: str) -> str:
 
 def _ast_to_dict(node):
     """Convert AST node to dictionary representation."""
+    if isinstance(node, ast.Name) and node.id in ("true", "false"):
+        return {"type": "bool", "value": node.id}
+
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, bool):
+            return {"type": "bool", "value": value}
+        if isinstance(value, str):
+            return {"type": "string", "value": value}
+        if isinstance(value, bytes):
+            return {
+                "type": "bytes",
+                "value": value.decode("utf-8", errors="replace"),
+            }
+        if isinstance(value, int):
+            return {"type": "int", "value": value}
+        if isinstance(value, float):
+            return {"type": "float", "value": value}
+
     if not node._fields:
         return str(get_type(node))
 
@@ -743,6 +802,19 @@ def _ast_to_dict(node):
         # Otherwise it's a dict, which we don't support yet
         # For now, treat non-empty dicts as sets (will fail with proper error later)
         # This shouldn't happen often since Python dict syntax requires keys
+
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("__addr__", "__deref__")
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        kind = "addr" if node.func.id == "__addr__" else "deref"
+        value = _ast_to_dict(node.args[0])
+        if kind == "addr" and isinstance(value, dict) and set(value.keys()) == {"id"}:
+            _address_taken_vars.add(value["id"])
+        return {"type": kind, "value": value}
 
     # Check if this is a method call on a variable (x.method(args))
     # We want to convert it to method(x, args) if method is a builtin function
@@ -1090,6 +1162,148 @@ def _contains_variable_refs(node):
     return False
 
 
+def _find_pointer_operand_end(text: str, start: int) -> int:
+    """Return the end index of the primary/postfix expression at *start*."""
+    n = len(text)
+    i = start
+    while i < n and text[i].isspace():
+        i += 1
+    if i >= n:
+        return i
+
+    def skip_balanced(j: int, open_ch: str, close_ch: str) -> int:
+        depth = 0
+        in_str = None
+        while j < n:
+            ch = text[j]
+            if in_str:
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+            elif ch in ("'", '"'):
+                in_str = ch
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return n
+
+    if text[i] == "(":
+        return skip_balanced(i, "(", ")")
+    if text[i] in ("'", '"'):
+        quote = text[i]
+        j = i + 1
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == quote:
+                return j + 1
+            j += 1
+        return n
+    if text[i].isdigit() or text[i] == ".":
+        j = i
+        while j < n and (text[j].isalnum() or text[j] in "._"):
+            j += 1
+        return j
+    if text[i].isalpha() or text[i] == "_":
+        j = i + 1
+        while j < n and (text[j].isalnum() or text[j] == "_"):
+            j += 1
+        # Postfix chain: .field, [index], (call)
+        while j < n:
+            if text[j] == "." and j + 1 < n and (text[j + 1].isalpha() or text[j + 1] == "_"):
+                j += 2
+                while j < n and (text[j].isalnum() or text[j] == "_"):
+                    j += 1
+            elif text[j] == "[":
+                j = skip_balanced(j, "[", "]")
+            elif text[j] == "(":
+                j = skip_balanced(j, "(", ")")
+            else:
+                break
+        return j
+    return i + 1
+
+
+def _rewrite_pointer_syntax(text: str) -> str:
+    """Translate unary ``&expr`` and ``*expr`` into internal pseudo-calls.
+
+    This runs before Python's AST parser sees the expression. It only treats
+    ``&``/``*`` as unary in prefix position, so multiplication and the logical
+    operators continue to work exactly as before.
+    """
+    unary_prefix = set("([{,;:=+-*/%<>!&|^~?")
+    out: list[str] = []
+    i = 0
+    prev_sig = ""
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            prev_sig = quote
+            i = j
+            continue
+
+        unary = (prev_sig == "" or prev_sig in unary_prefix)
+
+        if (
+            ch == "&"
+            and unary
+            and (i + 1 >= n or text[i + 1] != "&")
+            and (i == 0 or text[i - 1:i] != "&")
+        ):
+            start = i + 1
+            end = _find_pointer_operand_end(text, start)
+            if end > start:
+                out.append("__addr__(" + text[start:end].strip() + ")")
+                prev_sig = ")"
+                i = end
+                continue
+
+        if ch == "*" and unary and (i == 0 or text[i - 1] != "*"):
+            if i + 1 < n and text[i + 1] == "*":
+                start = i + 2
+                end = _find_pointer_operand_end(text, start)
+                if end > start:
+                    out.append(
+                        "__deref__(__deref__(" + text[start:end].strip() + "))"
+                    )
+                    prev_sig = ")"
+                    i = end
+                    continue
+            else:
+                start = i + 1
+                end = _find_pointer_operand_end(text, start)
+                if end > start:
+                    out.append("__deref__(" + text[start:end].strip() + ")")
+                    prev_sig = ")"
+                    i = end
+                    continue
+
+        out.append(ch)
+        if not ch.isspace():
+            prev_sig = ch
+        i += 1
+    return "".join(out)
+
+
 def parse_expr(text: str):
     """Parse an expression using Python's AST parser and optionally evaluate constants."""
     from runtime import eval_expr  # type: ignore
@@ -1111,6 +1325,7 @@ def parse_expr(text: str):
         if text_stripped.startswith('b"') and text_stripped.endswith('"'):
             return parse_literal(text_stripped)
 
+        text = _rewrite_pointer_syntax(text)
         text = _normalize_operators(text)
         try:
             expr = ast.parse(text, mode="eval").body
@@ -1180,6 +1395,12 @@ def parse_expr(text: str):
             ):  # Variable reference - keep as expr_dict
                 if _is_large_int(evaluated):
                     return expr_dict
+                if isinstance(evaluated, bytes):
+                    # Bytecode represents bytes as an escaped string payload.
+                    return {
+                        "type": "bytes",
+                        "value": evaluated.decode("utf-8", errors="replace"),
+                    }
                 return evaluated
 
         except Exception:
@@ -1326,6 +1547,7 @@ def parse_var(
     Returns:
         Variable AST node or SkipNode if const
     """
+    is_declaration = var_type is not None
     stream.strip()
 
     if not stream.consume("="):
@@ -1363,6 +1585,7 @@ def parse_var(
     node = make_node(
         stream, type="var", name=name, value_type=var_type, value=value, mods=mods
     )
+    node["declaration"] = is_declaration
     if list_capacity is not None or list_elem_type is not None:
         node["list_capacity"] = list_capacity
         node["list_elem_type"] = list_elem_type
@@ -1376,6 +1599,10 @@ def _is_runtime_expression(value: dict) -> bool:
     """Check if a dict represents an expression that must be evaluated at runtime."""
     # Subscript expressions (indexing): arr[i]
     if "slice" in value:
+        return True
+
+    # Pointer operations are runtime expressions.
+    if value.get("type") in ("addr", "deref"):
         return True
 
     # Field access: obj.field
@@ -1429,6 +1656,10 @@ def cast_value(value: Any, required_type: str):
 
     # Runtime expressions must be kept as-is
     if _is_runtime_expression(value):
+        return value
+
+    # Pointer-typed destinations always retain the runtime expression.
+    if isinstance(required_type, str) and required_type.startswith("*"):
         return value
 
     # Accept any type if required type is 'any'
@@ -2171,6 +2402,13 @@ def parse_any(
                     pass
 
                 field_name = stream.consume_word()
+                pointer = _canonical_pointer_type(field_type)
+                if pointer:
+                    base, depth = pointer
+                    field_type = _pointer_type_string(base, depth)
+                elif field_name.startswith("*") and not field_name.startswith("**"):
+                    field_name = field_name[1:]
+                    field_type = _pointer_type_string(field_type, 1)
 
                 fields.append({"name": field_name, "type": field_type})
 
@@ -2445,6 +2683,19 @@ def parse_any(
             type = stream.consume_word()
 
         name = stream.consume_word()
+
+        # Pointer declarations: ``int* p``, ``*int p``, ``int** p`` and the
+        # spaced form ``int *p``.
+        pointer = _canonical_pointer_type(type)
+        if name.startswith("*") and not name.startswith("**") and type in types:
+            name = name[1:]
+            pointer = (type, 1)
+        elif name.startswith("**") and type in types:
+            name = name[2:]
+            pointer = (type, 2)
+        if pointer:
+            base, depth = pointer
+            type = _pointer_type_string(base, depth)
         list_capacity = None
         list_elem_type = None
 
@@ -2597,17 +2848,82 @@ def parse_any(
                     stream.format_error(f"Unknown directive: #{directive}")
                 )
 
+        # Statements may begin with a parenthesized lvalue, e.g. (*p).x = 1.
+        if stream.peek(1) == "(":
+            def consume_group() -> str:
+                depth = 0
+                out = ""
+                while stream.text:
+                    ch = stream.peek(1)
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                    out += ch
+                    stream.consume(ch)
+                    if depth == 0:
+                        break
+                return out
+
+            stmt_start = stream.line
+            target_text = consume_group()
+            stream.strip()
+            if stream.peek(1) == ".":
+                stream.consume(".")
+                stream.strip()
+                field_name = stream.consume_word()
+                stream.strip()
+                if stream.peek(1) == "=" and stream.peek(2) != "=":
+                    stream.consume("=")
+                    stream.strip()
+                    value = _consume_expression(stream).strip().rstrip(";")
+                    node = make_node(
+                        stream,
+                        type="field_assign",
+                        target=parse_expr(target_text[1:-1]),
+                        field=field_name,
+                        value=parse_expr(value),
+                    )
+                    node["line"] = stmt_start
+                    return node
+            raise SyntaxError(
+                stream.format_error("Unexpected parenthesized statement")
+            )
+
         word = stream.consume_word()
 
         # Ignore if empty (comment or blank line) - consume_word() already advanced the stream
         if not word.strip():
             return None
 
+        # Pointer store: *p = value (or **pp = value).
+        if word.startswith("*"):
+            depth = len(word) - len(word.lstrip("*"))
+            target_text = word[depth:].strip()
+            stream.strip()
+            if target_text and stream.peek(1) == "=" and stream.peek(2) != "=":
+                stream.consume("=")
+                stream.strip()
+                value = _consume_expression(stream).strip().rstrip(";")
+                target = parse_expr(target_text)
+                for _ in range(depth):
+                    target = {"type": "deref", "value": target}
+                node = make_node(
+                    stream, type="ptr_assign", target=target, value=parse_expr(value)
+                )
+                node["line"] = stmt_line
+                return node
+
         # Field assignment: obj.field = value (word is "obj.field")
-        if "." in word and stream.peek(1) == "=":
-            parts = word.split(".", 1)
+        if "." in word and stream.peek(1) == "=" and stream.peek(2) != "=":
+            parts = word.rsplit(".", 1)
             if len(parts) == 2:
-                target, field = parts
+                target_text, field = parts
+                target = (
+                    target_text
+                    if target_text.isidentifier()
+                    else parse_expr(target_text)
+                )
                 stream.consume("=")
                 stream.strip()
                 value = _consume_expression(stream).strip().rstrip(";")
@@ -2821,10 +3137,18 @@ def parse_any(
                 value=binary_expr,
                 mods=[],
             )
+            node["declaration"] = False
             node["line"] = stmt_line
             return node
 
-        elif word in types:
+        elif word in types or (
+            _canonical_pointer_type(word)
+            and _canonical_pointer_type(word)[0] in types  # type: ignore[index]
+        ):
+            pointer = _canonical_pointer_type(word)
+            if pointer:
+                base, depth = pointer
+                word = _pointer_type_string(base, depth)
             name = stream.consume_word()
             list_capacity = None
             list_elem_type = None
@@ -2911,6 +3235,19 @@ def parse_any(
                         )
 
                     stream.consume("else")
+                    stream.strip()
+                    # Accept both ``elif`` and the common ``else if`` spelling.
+                    if stream.peek_word() == "if":
+                        stream.consume("if")
+                        args = parse_args(stream, check_comma=False)
+                        arg_value = args[0][0] if args else ""
+                        condition = parse_expr(arg_value)
+                        scope = parse_scope(stream, level + 1)
+                        node["elifs"].append(
+                            {"type": "elif", "condition": condition, "scope": scope}
+                        )
+                        continue
+
                     scope = parse_scope(stream, level + 1)
                     node["else"] = scope
 
@@ -3130,7 +3467,7 @@ def parse_any(
                     return {
                         "type": "for_in",
                         "var": varname,
-                        "iterable": parse_literal(iterable_expr),
+                        "iterable": parse_expr(iterable_expr),
                         "scope": scope,
                         "line": for_line,
                     }
@@ -3365,6 +3702,7 @@ def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
             _imported_files.clear()  # Reset import tracking for each top-level parse
         disable_eval = False  # Reset pragma state for each top-level parse
         eval_timeout_seconds = 0.5
+        _address_taken_vars.clear()
         _eval_cache.clear()
         _eval_failed_cache.clear()
         _eval_timeout_funcs.clear()
@@ -3514,12 +3852,23 @@ def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
                 node: Any, const_map: dict[str, Any], skip_name: str | None = None
             ) -> Any:
                 if isinstance(node, dict):
+                    # Never substitute inside address-of/dereference targets:
+                    # their identity is the whole point of a pointer.
+                    if node.get("type") in ("addr", "deref"):
+                        return node
+                    if node.get("type") == "ptr_assign":
+                        result = dict(node)
+                        result["value"] = _replace_const_refs(
+                            node.get("value"), const_map, skip_name
+                        )
+                        return result
                     if set(node.keys()) == {"id"}:
                         name = node.get("id")
                         if (
                             isinstance(name, str)
                             and name != skip_name
                             and name in const_map
+                            and name not in _address_taken_vars
                         ):
                             return copy.deepcopy(const_map[name])
 
@@ -3639,7 +3988,7 @@ def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
 
                 local_inline: dict[str, Any] = {}
                 for name, count in assign_counts.items():
-                    if count == 1:
+                    if count == 1 and name not in _address_taken_vars:
                         value = assign_values.get(name)
                         if _is_inlineable_const_value(value):
                             local_inline[name] = _normalize_literal_value(value)

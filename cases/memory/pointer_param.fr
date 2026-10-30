@@ -1,0 +1,14 @@
+// !15
+// !30
+
+void add_to(int* p, int amount) {
+    *p = *p + amount
+}
+
+void main() {
+    int x = 10
+    add_to(&x, 5)
+    println(x)
+    add_to(&x, x)
+    println(x)
+}

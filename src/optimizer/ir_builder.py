@@ -20,6 +20,7 @@ from optimizer.ir import (
     StructType,
     ListType,
     SetType,
+    PtrType,
     ValueType,
 )
 
@@ -46,6 +47,23 @@ def _parse_type(type_str: str, module: Module) -> ValueType:
             return module.struct_types[name]
         return StructType(name)
     return _TYPE_MAP.get(type_str, IRType.INT64)
+
+
+def _unescape_bytecode_string(s: str) -> str:
+    """Decode the C-style escapes used by the bytecode writer."""
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch != "\\" or i + 1 >= len(s):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = s[i + 1]
+        mapping = {"n": "\n", "r": "\r", "t": "\t", "0": "\0"}
+        out.append(mapping.get(nxt, nxt))
+        i += 2
+    return "".join(out)
 
 
 def _parse_line(line: str) -> tuple[str, list[str]]:
@@ -130,6 +148,11 @@ class IRBuilder:
                 if sid in self._struct_id_map:
                     self._struct_id_map[sid].name = name
                     self.module.add_struct(self._struct_id_map[sid])
+
+            elif op == ".global" and args:
+                name = args[0]
+                typ = _parse_type(args[1], self.module) if len(args) > 1 else IRType.INT64
+                self.module.global_vars[name] = typ
 
             elif op == ".entry" and args:
                 self.module.entry_func = args[0].rstrip("%")
@@ -298,6 +321,7 @@ class IRBuilder:
         # Variable versions: track current SSA value for each local variable index
         # This is pre-SSA: we'll insert phi nodes later
         var_versions: dict[int, Value] = {}
+        self._boxed_locals: dict[int, Value] = {}
 
         # Initialize params
         for p in func.params:
@@ -356,6 +380,53 @@ class IRBuilder:
             block.append(inst)
             return inst
 
+        def _make_entry_inst(ir_op, operands, result_type, **kwargs):
+            entry = func.entry
+            inst = Instruction(ir_op, operands, result_type, source_line)
+            for k, v in kwargs.items():
+                setattr(inst, k, v)
+            inst.block = entry
+            if entry.terminator is not None:
+                entry.instructions.insert(len(entry.instructions) - 1, inst)
+            else:
+                entry.instructions.append(inst)
+            return inst
+
+        def _var_value(idx: int) -> Value:
+            if idx in self._boxed_locals:
+                ptr = self._boxed_locals[idx]
+                pointee = ptr.type.pointee if isinstance(ptr.type, PtrType) else IRType.INT64
+                inst = _make_inst(Op.PTR_LOAD, [ptr], pointee)
+                return inst.result or ptr
+            val = var_versions.get(idx)
+            if val is None:
+                typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
+                val = self._make_const(typ, 0, block, source_line)
+                var_versions[idx] = val
+            return val
+
+        def _set_var(idx: int, val: Value) -> None:
+            if idx in self._boxed_locals:
+                _make_inst(Op.PTR_STORE, [self._boxed_locals[idx], val], None)
+            else:
+                var_versions[idx] = val
+
+        def _box_var(idx: int) -> Value:
+            if idx in self._boxed_locals:
+                return self._boxed_locals[idx]
+            current = _var_value(idx)
+            pointee = current.type if current is not None else IRType.INT64
+            # Allocate in the entry block: a box created under a branch must
+            # dominate every later pointer load.
+            inst = _make_entry_inst(Op.ALLOCA, [], PtrType(pointee))
+            ptr = inst.result
+            if ptr is None:
+                ptr = self._make_const(PtrType(pointee), 0, block, source_line)
+            _make_inst(Op.PTR_STORE, [ptr, current], None)
+            self._boxed_locals[idx] = ptr
+            var_versions.pop(idx, None)
+            return ptr
+
         # ── Constants ──
 
         if op == "CONST_I64":
@@ -372,7 +443,9 @@ class IRBuilder:
 
         if op == "CONST_STR":
             for a in (args if args else [""]):
-                v = self._make_const(IRType.STRING, a, block, source_line)
+                v = self._make_const(
+                    IRType.STRING, _unescape_bytecode_string(a), block, source_line
+                )
                 _push(v)
             return
 
@@ -386,20 +459,12 @@ class IRBuilder:
 
         if op == "LOAD":
             for a in args:
-                idx = int(a)
-                val = var_versions.get(idx)
-                if val is None:
-                    typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
-                    val = self._make_const(typ, 0, block, source_line)
-                    var_versions[idx] = val
-                _push(val)
+                _push(_var_value(int(a)))
             return
 
         if op == "STORE":
             for a in reversed(args):
-                idx = int(a)
-                val = _pop()
-                var_versions[idx] = val
+                _set_var(int(a), _pop())
             return
 
         if op == "STORE_CONST_I64":
@@ -408,7 +473,7 @@ class IRBuilder:
                 val = self._make_const(
                     IRType.INT64, int(args[i + 1]), block, source_line
                 )
-                var_versions[idx] = val
+                _set_var(idx, val)
             return
 
         if op == "STORE_CONST_F64":
@@ -417,7 +482,7 @@ class IRBuilder:
                 val = self._make_const(
                     IRType.FLOAT64, float(args[i + 1]), block, source_line
                 )
-                var_versions[idx] = val
+                _set_var(idx, val)
             return
 
         if op == "STORE_CONST_BOOL":
@@ -429,14 +494,69 @@ class IRBuilder:
                     block,
                     source_line,
                 )
-                var_versions[idx] = val
+                _set_var(idx, val)
             return
 
         if op == "STORE_CONST_STR":
             for i in range(0, len(args) - 1, 2):
                 idx = int(args[i])
-                val = self._make_const(IRType.STRING, args[i + 1], block, source_line)
-                var_versions[idx] = val
+                val = self._make_const(
+                    IRType.STRING,
+                    _unescape_bytecode_string(args[i + 1]),
+                    block,
+                    source_line,
+                )
+                _set_var(idx, val)
+            return
+
+        if op == "ADDR_GLOBAL" and args:
+            gtype = self.module.global_vars.get(args[0], IRType.INT64)
+            inst = _make_inst(
+                Op.ADDR_GLOBAL, [], PtrType(gtype), imm_str=args[0]
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "ADDR_LOCAL" and args:
+            ptr = _box_var(int(args[0]))
+            _push(ptr)
+            return
+
+        if op == "ADDR_FIELD" and args:
+            field_idx = int(args[0])
+            struct_val = _pop()
+            pointee = IRType.INT64
+            if isinstance(struct_val.type, StructType) and field_idx < len(struct_val.type.field_types):
+                pointee = struct_val.type.field_types[field_idx]
+            inst = _make_inst(Op.FIELD_ADDR, [struct_val], PtrType(pointee), imm_int=field_idx)
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "ADDR_ELEM":
+            index = _pop()
+            list_val = _pop()
+            pointee = IRType.INT64
+            if isinstance(list_val.type, ListType):
+                pointee = list_val.type.elem_type
+            inst = _make_inst(Op.LIST_ELEM_ADDR, [list_val, index], PtrType(pointee))
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "DEREF":
+            ptr = _pop()
+            pointee = ptr.type.pointee if isinstance(ptr.type, PtrType) else IRType.INT64
+            inst = _make_inst(Op.PTR_LOAD, [ptr], pointee)
+            if inst.result:
+                _push(inst.result)
+            return
+
+        if op == "DEREF_SET":
+            value = _pop()
+            ptr = _pop()
+            _make_inst(Op.PTR_STORE, [ptr, value], None)
             return
 
         if op == "FUSED_LOAD_STORE":
@@ -447,18 +567,9 @@ class IRBuilder:
             while i < len(args):
                 idx = int(args[i])
                 if expect_load:
-                    # LOAD: push var onto stack
-                    val = var_versions.get(idx)
-                    if val is None:
-                        typ = self._local_types.get(func.name, {}).get(
-                            idx, IRType.INT64
-                        )
-                        val = self._make_const(typ, 0, block, source_line)
-                    _push(val)
+                    _push(_var_value(idx))
                 else:
-                    # STORE: pop from stack into var
-                    val = _pop()
-                    var_versions[idx] = val
+                    _set_var(idx, _pop())
                 expect_load = not expect_load
                 i += 1
             return
@@ -468,11 +579,8 @@ class IRBuilder:
                 store_idx = int(args[i])
                 load_idx = int(args[i + 1])
                 val = _pop()
-                var_versions[store_idx] = val
-                load_val = var_versions.get(load_idx)
-                if load_val is None:
-                    load_val = self._make_const(IRType.INT64, 0, block, source_line)
-                _push(load_val)
+                _set_var(store_idx, val)
+                _push(_var_value(load_idx))
             return
 
         if op == "FUSED_GET_STORE_LOAD":
@@ -485,43 +593,31 @@ class IRBuilder:
                     Op.LOAD_FIELD, [struct_val], IRType.INT64, imm_int=field_idx
                 )
                 if inst.result:
-                    var_versions[store_idx] = inst.result
-                load_val = var_versions.get(load_idx)
-                if load_val is None:
-                    load_val = self._make_const(IRType.INT64, 0, block, source_line)
-                _push(load_val)
+                    _set_var(store_idx, inst.result)
+                _push(_var_value(load_idx))
             return
 
         if op in ("COPY_LOCAL", "COPY_LOCAL_REF"):
             if len(args) >= 2:
                 src = int(args[0])
                 dst = int(args[1])
-                val = var_versions.get(src)
-                if val is None:
-                    val = self._make_const(IRType.INT64, 0, block, source_line)
-                var_versions[dst] = val
+                _set_var(dst, _var_value(src))
             return
 
         if op == "INC_LOCAL" and args:
             idx = int(args[0])
-            val = var_versions.get(idx)
-            if val is None:
-                val = self._make_const(IRType.INT64, 0, block, source_line)
             one = self._make_const(IRType.INT64, 1, block, source_line)
-            inst = _make_inst(Op.ADD, [val, one], IRType.INT64)
+            inst = _make_inst(Op.ADD, [_var_value(idx), one], IRType.INT64)
             if inst.result:
-                var_versions[idx] = inst.result
+                _set_var(idx, inst.result)
             return
 
         if op == "DEC_LOCAL" and args:
             idx = int(args[0])
-            val = var_versions.get(idx)
-            if val is None:
-                val = self._make_const(IRType.INT64, 0, block, source_line)
             one = self._make_const(IRType.INT64, 1, block, source_line)
-            inst = _make_inst(Op.SUB, [val, one], IRType.INT64)
+            inst = _make_inst(Op.SUB, [_var_value(idx), one], IRType.INT64)
             if inst.result:
-                var_versions[idx] = inst.result
+                _set_var(idx, inst.result)
             return
 
         # ── Stack manipulation ──
@@ -582,7 +678,11 @@ class IRBuilder:
 
         if op == "NEG":
             a = _pop()
-            inst = _make_inst(Op.NEG, [a], IRType.INT64)
+            inst = _make_inst(
+                Op.NEG,
+                [a],
+                IRType.FLOAT64 if a.type == IRType.FLOAT64 else IRType.INT64,
+            )
             if inst.result:
                 _push(inst.result)
             return
@@ -681,6 +781,31 @@ class IRBuilder:
 
         # ── LOAD2 fused ops ──
 
+        _load2_ops = {
+            "LOAD2_ADD_I64": (Op.ADD, IRType.INT64),
+            "LOAD2_SUB_I64": (Op.SUB, IRType.INT64),
+            "LOAD2_MUL_I64": (Op.MUL, IRType.INT64),
+            "LOAD2_DIV_I64": (Op.DIV, IRType.INT64),
+            "LOAD2_MOD_I64": (Op.MOD, IRType.INT64),
+            "LOAD2_ADD_F64": (Op.FADD, IRType.FLOAT64),
+            "LOAD2_SUB_F64": (Op.FSUB, IRType.FLOAT64),
+            "LOAD2_MUL_F64": (Op.FMUL, IRType.FLOAT64),
+            "LOAD2_DIV_F64": (Op.FDIV, IRType.FLOAT64),
+            "LOAD2_AND_I64": (Op.AND, IRType.BOOL),
+            "LOAD2_OR_I64": (Op.OR, IRType.BOOL),
+            "LOAD2_XOR_I64": (Op.BIT_XOR, IRType.INT64),
+            "LOAD2_SHL_I64": (Op.SHL, IRType.INT64),
+            "LOAD2_SHR_I64": (Op.SHR, IRType.INT64),
+        }
+        if op in _load2_ops and len(args) >= 2:
+            ir_op, ret_type = _load2_ops[op]
+            a = _var_value(int(args[0]))
+            b = _var_value(int(args[1]))
+            inst = _make_inst(ir_op, [a, b], ret_type)
+            if inst.result:
+                _push(inst.result)
+            return
+
         if op == "LOAD2_ADD_I64" and len(args) >= 2:
             a = var_versions.get(int(args[0]))
             b = var_versions.get(int(args[1]))
@@ -721,6 +846,20 @@ class IRBuilder:
                 "LOAD2_CMP_NE": Op.NE,
             }
             ir_op = cmp_map.get(op, Op.LT)
+            if op in ("LOAD2_CMP_EQ", "LOAD2_CMP_NE") and (
+                a.type == IRType.STRING or b.type == IRType.STRING
+            ):
+                inst = _make_inst(
+                    Op.CALL_BUILTIN, [a, b], IRType.BOOL, imm_str="str_eq"
+                )
+                if inst.result:
+                    if op == "LOAD2_CMP_NE":
+                        not_inst = _make_inst(Op.NOT, [inst.result], IRType.BOOL)
+                        if not_inst.result:
+                            _push(not_inst.result)
+                    else:
+                        _push(inst.result)
+                return
             inst = _make_inst(ir_op, [a, b], IRType.BOOL)
             if inst.result:
                 _push(inst.result)
@@ -756,21 +895,45 @@ class IRBuilder:
                 _push(inst.result)
             return
 
-        if op == "CMP_EQ":
+        if op in ("CMP_EQ", "CMP_NE"):
             b, a = _pop(), _pop()
-            inst = _make_inst(Op.EQ, [a, b], IRType.BOOL)
-            if inst.result:
-                _push(inst.result)
-            return
-
-        if op == "CMP_NE":
-            b, a = _pop(), _pop()
-            inst = _make_inst(Op.NE, [a, b], IRType.BOOL)
+            if a.type == IRType.STRING or b.type == IRType.STRING:
+                inst = _make_inst(
+                    Op.CALL_BUILTIN, [a, b], IRType.BOOL, imm_str="str_eq"
+                )
+                if inst.result:
+                    if op == "CMP_NE":
+                        not_inst = _make_inst(Op.NOT, [inst.result], IRType.BOOL)
+                        if not_inst.result:
+                            _push(not_inst.result)
+                    else:
+                        _push(inst.result)
+                return
+            inst = _make_inst(Op.EQ if op == "CMP_EQ" else Op.NE, [a, b], IRType.BOOL)
             if inst.result:
                 _push(inst.result)
             return
 
         # ── Const-fused comparison ──
+
+        if op in (
+            "CMP_LT_CONST_F64", "CMP_GT_CONST_F64", "CMP_LE_CONST_F64",
+            "CMP_GE_CONST_F64", "CMP_EQ_CONST_F64", "CMP_NE_CONST_F64",
+        ) and args:
+            a = _pop()
+            c = self._make_const(IRType.FLOAT64, float(args[0]), block, source_line)
+            cmp_map = {
+                "CMP_LT_CONST_F64": Op.LT,
+                "CMP_GT_CONST_F64": Op.GT,
+                "CMP_LE_CONST_F64": Op.LE,
+                "CMP_GE_CONST_F64": Op.GE,
+                "CMP_EQ_CONST_F64": Op.EQ,
+                "CMP_NE_CONST_F64": Op.NE,
+            }
+            inst = _make_inst(cmp_map[op], [a, c], IRType.BOOL)
+            if inst.result:
+                _push(inst.result)
+            return
 
         if op == "CMP_LT_CONST" and args:
             a = _pop()
@@ -1037,6 +1200,31 @@ class IRBuilder:
                 _push(inst.result)
             return
 
+        if op == "LIST_NEW_CAP" and args:
+            capacity = int(args[0])
+            elem_code = int(args[1]) if len(args) > 1 else -1
+            elem_type = {
+                0: IRType.INT64,
+                1: IRType.STRING,
+                2: IRType.FLOAT64,
+                3: IRType.BOOL,
+            }.get(elem_code, IRType.INT64)
+            zero = (
+                ""
+                if elem_type == IRType.STRING
+                else (0.0 if elem_type == IRType.FLOAT64 else 0)
+            )
+            elems = [
+                self._make_const(elem_type, zero, block, source_line)
+                for _ in range(max(0, capacity))
+            ]
+            inst = _make_inst(
+                Op.ALLOC_LIST, elems, ListType(elem_type), imm_int=capacity
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+
         if op == "LIST_NEW_STACK" and args:
             count = int(args[0])
             elems = []
@@ -1052,6 +1240,12 @@ class IRBuilder:
         if op == "LIST_APPEND":
             val = _pop()
             lst = _pop()
+            if (
+                isinstance(lst.type, ListType)
+                and lst.type.elem_type == IRType.INT64
+                and val.type != IRType.INT64
+            ):
+                lst.type = ListType(val.type)
             _make_inst(Op.LIST_APPEND, [lst, val])
             _push(lst)
             return
@@ -1059,8 +1253,14 @@ class IRBuilder:
         if op == "LIST_GET":
             idx = _pop()
             lst = _pop()
-            # String indexing returns a string character
-            result_type = IRType.STRING if lst.type == IRType.STRING else IRType.INT64
+            # String indexing returns a string character; typed lists return
+            # their element type so downstream calls/prints get the right ABI.
+            if isinstance(lst.type, ListType):
+                result_type = lst.type.elem_type
+            elif lst.type == IRType.STRING:
+                result_type = IRType.STRING
+            else:
+                result_type = IRType.INT64
             inst = _make_inst(Op.LIST_GET, [lst, idx], result_type)
             if inst.result:
                 _push(inst.result)
@@ -1070,6 +1270,12 @@ class IRBuilder:
             val = _pop()
             idx = _pop()
             lst = _pop()
+            if (
+                isinstance(lst.type, ListType)
+                and lst.type.elem_type == IRType.INT64
+                and val.type != IRType.INT64
+            ):
+                lst.type = ListType(val.type)
             _make_inst(Op.LIST_SET, [lst, idx, val])
             _push(lst)
             return
@@ -1083,7 +1289,8 @@ class IRBuilder:
 
         if op == "LIST_POP":
             lst = _pop()
-            inst = _make_inst(Op.CALL_BUILTIN, [lst], IRType.INT64, imm_str="list_pop")
+            result_type = lst.type.elem_type if isinstance(lst.type, ListType) else IRType.INT64
+            inst = _make_inst(Op.CALL_BUILTIN, [lst], result_type, imm_str="list_pop")
             # LIST_POP in bytecode pushes (modified_list, popped_value)
             # The list is modified in-place, so push list back first, then result
             _push(lst)
@@ -1130,8 +1337,9 @@ class IRBuilder:
             return
 
         if op == "ASSERT":
-            msg = _pop()
+            # Bytecode stack order is: message, then condition.
             cond = _pop()
+            msg = _pop()
             _make_inst(Op.CALL_BUILTIN, [cond, msg], IRType.VOID, imm_str="assert")
             return
 
@@ -1153,8 +1361,8 @@ class IRBuilder:
             return
 
         if op == "CONST_BYTES":
-            # Treat as a string constant for now
-            text = args[0] if args else ""
+            # Bytes share the escaped string payload representation.
+            text = _unescape_bytecode_string(args[0]) if args else ""
             v = self._make_const(IRType.STRING, text, block, source_line)
             _push(v)
             return
@@ -1262,14 +1470,21 @@ class IRBuilder:
         # ── Global variables ──
 
         if op == "LOAD_GLOBAL" and args:
-            inst = _make_inst(Op.LOAD_GLOBAL, [], IRType.INT64, imm_str=args[0])
+            gtype = self.module.global_vars.get(args[0], IRType.INT64)
+            inst = _make_inst(Op.LOAD_GLOBAL, [], gtype, imm_str=args[0])
             if inst.result:
                 _push(inst.result)
             return
 
         if op == "STORE_GLOBAL" and args:
             val = _pop()
-            _make_inst(Op.STORE_GLOBAL, [val], imm_str=args[0])
+            name = args[0]
+            current = self.module.global_vars.get(name)
+            if isinstance(val.type, (StructType, ListType)) and not isinstance(
+                current, (StructType, ListType)
+            ):
+                self.module.global_vars[name] = val.type
+            _make_inst(Op.STORE_GLOBAL, [val], imm_str=name)
             return
 
         # ── Switch ──
@@ -1366,11 +1581,22 @@ class IRBuilder:
 
         if op in _math_ops:
             ir_op, ret = _math_ops[op]
+
+            def _as_float(value):
+                if value.type == IRType.INT64:
+                    conv = _make_inst(Op.INT_TO_FLOAT, [value], IRType.FLOAT64)
+                    return conv.result or value
+                return value
+
             if op in ("MIN", "MAX", "POW"):
                 b, a = _pop(), _pop()
+                if ir_op == Op.POW:
+                    a, b = _as_float(a), _as_float(b)
                 inst = _make_inst(ir_op, [a, b], ret)
             else:
                 a = _pop()
+                if ir_op in (Op.SQRT, Op.SIN, Op.COS, Op.TAN):
+                    a = _as_float(a)
                 inst = _make_inst(ir_op, [a], ret)
             if inst.result:
                 _push(inst.result)
@@ -1452,6 +1678,12 @@ class IRBuilder:
                     var_versions[idx] = inst.result
             return
 
+        if op == "GETPID":
+            inst = _make_inst(Op.CALL_BUILTIN, [], IRType.INT64, imm_str="getpid")
+            if inst.result:
+                _push(inst.result)
+            return
+
         # ── File I/O, set, dict, etc. → CALL_BUILTIN ──
 
         if op.startswith("FILE_"):
@@ -1461,6 +1693,22 @@ class IRBuilder:
                 "FILE_WRITE": ("fwrite", 2, IRType.INT64),
                 "FILE_READ": ("fread", 2, IRType.STRING),
                 "FILE_CLOSE": ("fclose", 1, IRType.VOID),
+                "FILE_EXISTS": ("exists", 1, IRType.BOOL),
+                "FILE_ISFILE": ("isfile", 1, IRType.BOOL),
+                "FILE_ISDIR": ("isdir", 1, IRType.BOOL),
+                "FILE_LISTDIR": ("listdir", 1, ListType(IRType.STRING)),
+                "FILE_MKDIR": ("mkdir", 1, IRType.VOID),
+                "FILE_MAKEDIRS": ("makedirs", 1, IRType.VOID),
+                "FILE_REMOVE": ("remove", 1, IRType.VOID),
+                "FILE_RMDIR": ("rmdir", 1, IRType.VOID),
+                "FILE_RENAME": ("rename", 2, IRType.VOID),
+                "FILE_GETSIZE": ("getsize", 1, IRType.INT64),
+                "FILE_GETCWD": ("getcwd", 0, IRType.STRING),
+                "FILE_CHDIR": ("chdir", 1, IRType.VOID),
+                "FILE_ABSPATH": ("abspath", 1, IRType.STRING),
+                "FILE_BASENAME": ("basename", 1, IRType.STRING),
+                "FILE_DIRNAME": ("dirname", 1, IRType.STRING),
+                "FILE_JOIN": ("pathjoin", 1, IRType.STRING),
             }
             if op in file_map:
                 name, n_args, ret_type = file_map[op]
@@ -1476,8 +1724,24 @@ class IRBuilder:
             if op in ("SET_ADD", "SET_REMOVE"):
                 val = _pop()
                 s = _pop()
-                # void functions — don't use return value, re-push the set
-                _make_inst(Op.CALL_BUILTIN, [s, val], IRType.VOID, imm_str=builtin_name)
+                if op == "SET_ADD":
+                    if isinstance(val.type, (StructType, ListType, SetType)):
+                        elem_code = 4
+                    elif val.type == IRType.STRING:
+                        elem_code = 1
+                    else:
+                        elem_code = 0
+                    code = self._make_const(IRType.INT64, elem_code, block, source_line)
+                    _make_inst(
+                        Op.CALL_BUILTIN,
+                        [s, val, code],
+                        IRType.VOID,
+                        imm_str="set_add_typed",
+                    )
+                else:
+                    _make_inst(
+                        Op.CALL_BUILTIN, [s, val], IRType.VOID, imm_str=builtin_name
+                    )
                 _push(s)
             elif op == "SET_CONTAINS":
                 val = _pop()
@@ -1508,14 +1772,54 @@ class IRBuilder:
                 if inst.result:
                     _push(inst.result)
             elif op == "DICT_SET":
-                builtin_args = [_pop(), _pop()]
-                _make_inst(
-                    Op.CALL_BUILTIN, builtin_args, IRType.VOID, imm_str=builtin_name
+                value = _pop()
+                key = _pop()
+                d = _pop()
+                key_code = self._make_const(
+                    IRType.INT64,
+                    1 if key.type == IRType.STRING else 0,
+                    block,
+                    source_line,
                 )
-            elif op in ("DICT_GET", "DICT_CONTAINS"):
-                builtin_args = [_pop()]
+                _make_inst(
+                    Op.CALL_BUILTIN,
+                    [d, key, value, key_code],
+                    IRType.VOID,
+                    imm_str="dict_set_typed",
+                )
+                # The bytecode leaves the dictionary for the following STORE.
+                _push(d)
+            elif op == "DICT_GET":
+                key = _pop()
+                d = _pop()
+                key_code = self._make_const(
+                    IRType.INT64,
+                    1 if key.type == IRType.STRING else 0,
+                    block,
+                    source_line,
+                )
                 inst = _make_inst(
-                    Op.CALL_BUILTIN, builtin_args, IRType.INT64, imm_str=builtin_name
+                    Op.CALL_BUILTIN,
+                    [d, key, key_code],
+                    IRType.INT64,
+                    imm_str="dict_get_typed",
+                )
+                if inst.result:
+                    _push(inst.result)
+            elif op == "DICT_CONTAINS":
+                key = _pop()
+                d = _pop()
+                key_code = self._make_const(
+                    IRType.INT64,
+                    1 if key.type == IRType.STRING else 0,
+                    block,
+                    source_line,
+                )
+                inst = _make_inst(
+                    Op.CALL_BUILTIN,
+                    [d, key, key_code],
+                    IRType.BOOL,
+                    imm_str="dict_contains_typed",
                 )
                 if inst.result:
                     _push(inst.result)
@@ -1599,6 +1903,80 @@ class IRBuilder:
                 _push(inst.result)
             return
 
+        # ── Sockets ──
+        if op == "SOCKET_CREATE":
+            typ = _pop()
+            family = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [family, typ], IRType.INT64, imm_str="socket_create"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op in ("SOCKET_CONNECT", "SOCKET_BIND"):
+            port = _pop()
+            host = _pop()
+            sock = _pop()
+            name = "socket_connect" if op == "SOCKET_CONNECT" else "socket_bind"
+            _make_inst(Op.CALL_BUILTIN, [sock, host, port], IRType.VOID, imm_str=name)
+            return
+        if op == "SOCKET_LISTEN":
+            backlog = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN, [sock, backlog], IRType.VOID, imm_str="socket_listen"
+            )
+            return
+        if op == "SOCKET_ACCEPT":
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock], IRType.INT64, imm_str="socket_accept"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_SEND":
+            data = _pop()
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock, data], IRType.INT64, imm_str="socket_send"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_SENDALL":
+            data = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN, [sock, data], IRType.VOID, imm_str="socket_sendall"
+            )
+            return
+        if op == "SOCKET_RECV":
+            size = _pop()
+            sock = _pop()
+            inst = _make_inst(
+                Op.CALL_BUILTIN, [sock, size], IRType.STRING, imm_str="socket_recv"
+            )
+            if inst.result:
+                _push(inst.result)
+            return
+        if op == "SOCKET_CLOSE":
+            sock = _pop()
+            _make_inst(Op.CALL_BUILTIN, [sock], IRType.VOID, imm_str="socket_close")
+            return
+        if op == "SOCKET_SETSOCKOPT":
+            value = _pop()
+            option = _pop()
+            level = _pop()
+            sock = _pop()
+            _make_inst(
+                Op.CALL_BUILTIN,
+                [sock, level, option, value],
+                IRType.VOID,
+                imm_str="socket_setsockopt",
+            )
+            return
+
         # ── Extern calls (C FFI) ──
         # These are handled as CALL with extern flag; the native codegen
         # will detect c_import functions by name
@@ -1662,22 +2040,33 @@ class IRBuilder:
                     term.target_blocks = [target]
 
             elif term.op == Op.BRANCH:
-                # BRANCH cond, false_label
-                # True branch = fall through to next block
-                # False branch = jump to label
-                false_label = term.imm_str
-                if i + 1 < len(blocks):
-                    true_block = blocks[i + 1]
-                    block.successors.append(true_block)
-                    true_block.predecessors.append(block)
-                if false_label in block_map:
-                    false_block = block_map[false_label]
-                    block.successors.append(false_block)
-                    false_block.predecessors.append(block)
-                    term.target_blocks = [
-                        blocks[i + 1] if i + 1 < len(blocks) else false_block,
-                        false_block,
-                    ]
+                # Explicit target_blocks come from switch lowering and are
+                # already authoritative (inner switch blocks have no imm_str).
+                if term.target_blocks:
+                    for target in term.target_blocks:
+                        if target not in block.successors:
+                            block.successors.append(target)
+                        if block not in target.predecessors:
+                            target.predecessors.append(block)
+                else:
+                    # BRANCH cond, false_label: true = fall through.
+                    false_label = term.imm_str
+                    if i + 1 < len(blocks):
+                        true_block = blocks[i + 1]
+                        if true_block not in block.successors:
+                            block.successors.append(true_block)
+                        if block not in true_block.predecessors:
+                            true_block.predecessors.append(block)
+                    if false_label in block_map:
+                        false_block = block_map[false_label]
+                        if false_block not in block.successors:
+                            block.successors.append(false_block)
+                        if block not in false_block.predecessors:
+                            false_block.predecessors.append(block)
+                        term.target_blocks = [
+                            blocks[i + 1] if i + 1 < len(blocks) else false_block,
+                            false_block,
+                        ]
 
             elif term.op == Op.TRY_BEGIN:
                 # TRY_BEGIN: fall through to try body, jump to except on exception
@@ -1696,6 +2085,22 @@ class IRBuilder:
                     ]
 
             # RETURN/RETURN_VOID have no successors
+
+        # Materialize implicit fallthrough as an explicit JUMP. This makes the
+        # CFG self-contained for cloning/analysis passes instead of relying on
+        # block list order.
+        for i, block in enumerate(blocks):
+            if block.terminator is None and i + 1 < len(blocks):
+                succ = blocks[i + 1]
+                if succ not in block.successors:
+                    block.successors.append(succ)
+                if block not in succ.predecessors:
+                    succ.predecessors.append(block)
+                jump = Instruction(Op.JUMP, [], None, None)
+                jump.imm_str = succ.label
+                jump.target_blocks = [succ]
+                jump.block = block
+                block.append(jump)
 
     # ── Phase 6: SSA construction ───────────────────────────────
 
@@ -1825,6 +2230,25 @@ class IRBuilder:
                         func, block, old_val, phi_val, block_entry_vars, block_exit_vars
                     )
                     changed = True
+
+        # Loop exits can inherit the back-edge value even though that value is
+        # not defined on the exit path. Re-point each successor's incoming
+        # version at the header PHI when the old value is not defined there.
+        for block in func.blocks:
+            for phi in block.phi_nodes:
+                var_idx = phi.imm_int
+                if phi.result is None:
+                    continue
+                for succ in block.successors:
+                    incoming = block_entry_vars.get(succ.label, {}).get(var_idx)
+                    if incoming is None or incoming is phi.result:
+                        continue
+                    defining = getattr(incoming, "defining_inst", None)
+                    if defining is not None and defining.block is succ:
+                        continue
+                    self._replace_val_in_block_and_succs(
+                        func, succ, incoming, phi.result, block_entry_vars, block_exit_vars
+                    )
 
     def _replace_val_in_block_and_succs(
         self, func, start_block, old_val, new_val, block_entry_vars, block_exit_vars

@@ -1,0 +1,8 @@
+// !true
+// !false
+
+void main() {
+    set s = {1048577, 2}
+    println(1048577 in s)
+    println(1048576 in s)
+}

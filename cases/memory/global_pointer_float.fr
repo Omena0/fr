@@ -1,0 +1,9 @@
+// !4.5
+
+float value = 3.5
+
+void main() {
+    float* p = &value
+    *p = 4.5
+    println(str(value))
+}

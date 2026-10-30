@@ -1,0 +1,44 @@
+int sum_i(list xs) {
+    int total = 0
+    int i = 0
+    while (i < len(xs)) {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total
+}
+
+float sum_f(list xs) {
+    float total = 0.0
+    int i = 0
+    while (i < len(xs)) {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total
+}
+
+float sumsq_f(list xs) {
+    float total = 0.0
+    int i = 0
+    while (i < len(xs)) {
+        float v = xs[i]
+        total = total + v * v
+        i = i + 1
+    }
+    return total
+}
+
+void main() {
+    list ints = []
+    list floats = []
+    int i = 0
+    while (i < 100000) {
+        ints.append(i)
+        floats.append(float(i) * 0.5)
+        i = i + 1
+    }
+    println(str(sum_i(ints)))
+    println(str(sum_f(floats)))
+    println(str(sumsq_f(floats)))
+}

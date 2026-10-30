@@ -1,0 +1,14 @@
+#pragma no_eval
+// !1050
+
+int depth(int n) {
+    list keep_scope = []
+    if (n == 0) {
+        return 0
+    }
+    return depth(n - 1) + 1
+}
+
+void main() {
+    println(str(depth(1050)))
+}

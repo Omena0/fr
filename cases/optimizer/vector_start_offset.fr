@@ -1,0 +1,16 @@
+// !7
+
+int sum_from(list xs, int start) {
+    int total = 0
+    int i = start
+    while (i < len(xs)) {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total
+}
+
+void main() {
+    list xs = [1, 2, 3, 4]
+    println(str(sum_from(xs, 2)))
+}

@@ -1,0 +1,11 @@
+// !3002399751580331
+
+#pragma no_eval
+
+int divide(int a, int b) {
+    return a / b
+}
+
+void main() {
+    println(str(int(divide(9007199254740993, 3))))
+}

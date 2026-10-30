@@ -1,0 +1,20 @@
+// !2
+// !3
+
+struct P {
+    int x
+}
+
+P make(int v) {
+    return P(v)
+}
+
+void main() {
+    list values = [make(1)]
+    P a = make(2)
+    values[0] = a
+    println(str(values[0].x))
+    list other = [make(3)]
+    values[0] = other[0]
+    println(str(values[0].x))
+}

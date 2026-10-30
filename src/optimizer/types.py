@@ -281,6 +281,10 @@ class EscapeAnalysis:
                             op_val is not inst.operands[0]
                         ):  # it's the value, not the target
                             new_state = self.FULL_ESCAPE
+                    elif inst.op in (Op.PTR_STORE, Op.FIELD_ADDR):
+                        # The address of the struct (or one of its fields) may
+                        # outlive this frame; be conservative.
+                        new_state = self.FULL_ESCAPE
                     elif inst.op == Op.PHI:
                         # Phi merges: if any incoming value escapes, the phi result escapes
                         # and the phi result should propagate back to sources
@@ -298,5 +302,10 @@ class EscapeAnalysis:
         return self.get_escape(value) == self.NO_ESCAPE
 
     def can_stack_alloc(self, value: Value) -> bool:
-        """Can this allocation be placed on the stack?"""
-        return self.get_escape(value) <= self.ARG_ESCAPE
+        """Can this allocation be placed on the stack?
+
+        ARG_ESCAPE only says the value reaches a call. The callee may store
+        the pointer in a global/list/field, so without a callee-summary this
+        case must stay heap-allocated.
+        """
+        return self.get_escape(value) == self.NO_ESCAPE

@@ -19,9 +19,14 @@ pip install frscript
 - **Command line launcher** (`fr`)
 - **Compiled language** - Fast by design
 - **File and Socket I/O** - Low-level file operations and sockets.
+- **HTTP library** - A working HTTP/1.1 server/client library in `examples/http/http_lib.fr`, running on all three backends.
+- **Fr OS target** - `fr native ... --target fr-os` emits a static Fr OS userspace ELF using the Fr OS syscall ABI and user ISA profile.
 - **Multiprocessing**. - Easy threading with fork() and wait().
 - **Python integration** - You can use any Python libraries with Frscript.
-- **Aggressive optimization** - Bytecode-level optimizations. Faster than python.
+- **Aggressive optimization** - Purity call-graph analysis, interprocedural ranges, call-site specialization, pure constant-call folding, LICM, SROA/escape analysis, pure-function lookup tables, inline list fast paths and assembly peepholes.
+- **Deterministic memory** - Reference-counted native structs/lists/sets with function-scope cleanup, plus SROA and stack allocation for non-escaping values.
+- **Modern memory model** - Reference-semantics structs/lists/sets, scope-based reference counting, automatic stack allocation for non-escaping values, and a free-list native allocator.
+- **Opt-in pointers** - `int*`, `&value`, `*p`, pointer fields and pointer parameters, lowered directly to addresses in native code.
 - **Stack-based VM** - Fast and memory efficient.
 - **Readable bytecode** - Optimize hot code manually
 - **WASM Backend** - Run sandboxed code in web browsers.

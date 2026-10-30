@@ -1,0 +1,4 @@
+// Fr OS userspace hello world.
+void main() {
+    println("hello from Fr OS")
+}

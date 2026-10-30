@@ -1,0 +1,13 @@
+// !200
+// !abc
+// !3
+
+import ../../examples/http/http_lib
+
+void main() {
+    str raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc"
+    HttpResponse res = http_parse_response(raw)
+    println(str(res.status))
+    println(res.body)
+    println(http_get_header(res.headers, "content-length"))
+}

@@ -7,7 +7,12 @@ from .bytecode_opt import BytecodeOptimizer
 __all__ = ["BytecodeOptimizer", "compile_native_ssa"]
 
 
-def compile_native_ssa(bytecode: str, opt_level: int = 3, dump_ir: bool = False) -> str:
+def compile_native_ssa(
+    bytecode: str,
+    opt_level: int = 3,
+    dump_ir: bool = False,
+    target: str = "linux",
+) -> str:
     """Compile bytecode to x86_64 assembly using the SSA IR pipeline.
 
     This is the new native compilation path:
@@ -17,6 +22,7 @@ def compile_native_ssa(bytecode: str, opt_level: int = 3, dump_ir: bool = False)
         bytecode: The bytecode text (as produced by compiler.py)
         opt_level: 0=none, 1=basic, 2=standard, 3=aggressive+synthesis
         dump_ir: If True, return the IR text instead of assembly
+        target: "linux" or "fr-os" (ABI/ISA profile)
 
     Returns:
         x86_64 assembly text (Intel syntax) or IR text if dump_ir=True
@@ -47,7 +53,7 @@ def compile_native_ssa(bytecode: str, opt_level: int = 3, dump_ir: bool = False)
             pass  # z3 not installed, skip
 
     # Phase 4: Generate assembly (includes register allocation)
-    asm = generate_asm(module, opt_level)
+    asm = generate_asm(module, opt_level, target=target)
 
     # Phase 5: Peephole optimize the assembly
     if opt_level > 0:

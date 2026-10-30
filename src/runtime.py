@@ -1,6 +1,7 @@
 from builtin_funcs import funcs
 from parser import parse_expr, get_type, vars
 from typing import Any, cast
+import os
 import sys
 import threading
 
@@ -9,6 +10,30 @@ debug_runtime_instance = None
 
 # Track the actual current vars (updated when entering/exiting functions)
 _current_runtime_vars = vars
+_global_vars: dict = {}
+_function_locals: set[str] = set()
+
+
+def _collect_local_decls(node, out: set[str]) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "function":
+            return
+        if node.get("type") == "var" and node.get("name") and node.get("declaration"):
+            out.add(node["name"])
+        for value in node.values():
+            _collect_local_decls(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_local_decls(item, out)
+
+
+def _lookup_var_cell(name: str):
+    """Look up a variable cell in the current scope, then globals."""
+    if name in vars:
+        return vars[name]
+    if name in _global_vars:
+        return _global_vars[name]
+    return None
 
 # Runtime context for error formatting
 _runtime_file: str | None = None
@@ -147,6 +172,14 @@ class ContinueException(Exception):
         super().__init__()
 
 
+class ReturnSignal(Exception):
+    """Internal control-flow signal used to unwind a function cleanly."""
+
+    def __init__(self, value):
+        self.value = value
+        super().__init__()
+
+
 # Helper functions
 def is_struct_def(obj: Any) -> bool:
     """Check if an object is a struct definition"""
@@ -199,6 +232,8 @@ def _process_function_arg(arg: Any, old_vars: dict) -> Any:
         # Field access
         elif "attr" in arg:
             return eval_expr_node(arg)
+        elif arg.get("type") in ("addr", "deref", "bytes"):
+            return eval_expr_node(arg)
         # Regular dict with value
         else:
             return arg.get("value", eval_expr(arg))
@@ -235,7 +270,9 @@ def run_func(
     from parser import cast_args
 
     global vars, runtime, _current_runtime_vars, _runtime_current_func, _runtime_current_line
+    global _function_locals
     old_vars = vars
+    old_function_locals = _function_locals
     old_func = _runtime_current_func
     old_line = _runtime_current_line  # Save calling line
 
@@ -266,6 +303,9 @@ def run_func(
         vars = _preserve_struct_definitions()
         _current_runtime_vars = vars  # Update current vars for debugger
         _runtime_current_func = name  # Track function for error reporting
+        declared: set[str] = set()
+        _collect_local_decls(func.get("func"), declared)
+        _function_locals = declared
 
     # Bind function arguments to the scope
     if isinstance(func.get("args"), list):
@@ -287,9 +327,13 @@ def run_func(
         if not all(isinstance(item, dict) for item in func_body):
             raise RuntimeError("Invalid function body.")
 
-        out = run_scope(cast(AstType, func_body), level + 1)
+        try:
+            out = run_scope(cast(AstType, func_body), level + 1)
+        except ReturnSignal as signal:
+            out = signal.value
 
     vars = old_vars
+    _function_locals = old_function_locals
     if not is_builtin:
         _current_runtime_vars = vars  # Only restore if we changed it
         _runtime_current_func = old_func  # Restore function name
@@ -307,8 +351,12 @@ class CompiletimeEvalException(Exception): ...
 
 
 def _get_indexed_value(target: Any, index: Any) -> Any:
-    """Get value from target at index, handling various types"""
-    # Ensure index is numeric
+    """Get value from target at index, handling lists and dictionaries."""
+    if isinstance(target, dict):
+        if index in target:
+            return target[index]
+        raise IndexError(f"Key error: {index!r}")
+    # Ensure index is numeric for array-like targets
     if not isinstance(index, int):
         index = ensure_int(index, "Index")
 
@@ -357,7 +405,7 @@ def _get_indexed_value(target: Any, index: Any) -> Any:
             error_msg = f"Index error: list index out of range: {index}"
             if isinstance(target, list):
                 error_msg += f" (length: {len(target)})"
-            raise RuntimeError(error_msg) from e
+            raise IndexError(error_msg) from e
 
     raise RuntimeError(f"Cannot index into type {type(target).__name__}")
 
@@ -377,8 +425,9 @@ def _handle_list_indexing(node: dict) -> Any:
     index = extract_value(index)
 
     # Handle variable references
-    if isinstance(target, str) and target in vars:
-        target_val = vars[target].get("value")
+    if isinstance(target, str) and (target in vars or target in _global_vars):
+        cell = vars[target] if target in vars else _global_vars[target]
+        target_val = cell.get("value")
         return _get_indexed_value(target_val, index)
 
     return _get_indexed_value(target, index)
@@ -390,8 +439,11 @@ def _handle_field_access(node: dict) -> Any:
     field_name = node["attr"]
 
     # If target is a variable name, look it up
-    if isinstance(target, str) and target in vars:
-        obj = vars[target].get("value")
+    if isinstance(target, str) and (target in vars or target in _global_vars):
+        cell = vars[target] if target in vars else _global_vars[target]
+        obj = cell.get("value")
+        if isinstance(obj, Pointer):
+            obj = obj.get()
 
         # Check if it's a Python object
         if hasattr(obj, "__dict__") or hasattr(obj, field_name):
@@ -416,6 +468,9 @@ def _handle_field_access(node: dict) -> Any:
             raise RuntimeError(
                 f"Python object has no attribute '{field_name}'"
             ) from exc
+
+    if isinstance(target, Pointer):
+        target = target.get()
 
     # If target is already an object (dict), access the field
     if isinstance(target, dict) and field_name in target:
@@ -462,11 +517,101 @@ def _handle_unary_op(node: dict) -> Any:
     return operand
 
 
+class Pointer:
+    """A stable reference to a value cell in the Python runtime."""
+
+    __slots__ = ("_get", "_set", "pointee_type")
+
+    def __init__(self, getter, setter, pointee_type=None):
+        self._get = getter
+        self._set = setter
+        self.pointee_type = pointee_type
+
+    def get(self):
+        return self._get()
+
+    def set(self, value):
+        self._set(value)
+
+    def __repr__(self):
+        return f"<pointer {self.get()!r}>"
+
+
+def _make_pointer(node) -> Pointer:
+    if not isinstance(node, dict):
+        raise RuntimeError("Cannot take the address of this expression")
+    if "id" in node and "func" not in node:
+        name = node["id"]
+        cell = _lookup_var_cell(name)
+        if cell is None:
+            raise RuntimeError(f"Variable '{name}' is not defined")
+
+        def getter():
+            return cell.get("value")
+
+        def setter(value):
+            cell["value"] = value
+
+        return Pointer(getter, setter, cell.get("type"))
+    if "attr" in node and "value" in node:
+        obj = eval_expr_node(node["value"])
+        field = node["attr"]
+        if isinstance(obj, dict):
+            def getter():
+                return obj.get(field)
+
+            def setter(value):
+                obj[field] = value
+
+            return Pointer(getter, setter)
+        raise RuntimeError(f"Cannot take the address of field '{field}'")
+    if "slice" in node and "value" in node:
+        container = eval_expr_node(node["value"])
+        index = eval_expr_node(node["slice"])
+        if not isinstance(container, list):
+            raise RuntimeError("Cannot take the address of a non-list element")
+        index = ensure_int(index, "Index")
+
+        def getter():
+            return container[index]
+
+        def setter(value):
+            container[index] = value
+
+        return Pointer(getter, setter)
+    raise RuntimeError("Cannot take the address of this expression")
+
+
 def eval_expr_node(node) -> int | float | bool | str | None | Any:
     from parser import get_type
 
     if not isinstance(node, dict):
         return node
+
+    if node.get("type") == "bool":
+        raw = node.get("value")
+        if isinstance(raw, str):
+            return raw in ("true", "True", "1")
+        return bool(raw)
+
+    if node.get("type") == "bytes":
+        raw = node.get("value")
+        if isinstance(raw, bytes):
+            return raw
+        if isinstance(raw, str):
+            return raw.encode("latin-1")
+        return b""
+
+    if node.get("type") == "addr":
+        return _make_pointer(node.get("value"))
+
+    if node.get("type") == "deref":
+        pointer = eval_expr_node(node.get("value"))
+        if isinstance(pointer, Pointer):
+            return pointer.get()
+        if isinstance(pointer, int) and pointer == 0:
+            raise RuntimeError("Null pointer dereference")
+        raise RuntimeError("Cannot dereference a non-pointer value")
 
     # Unary operations
     if "op" in node and node["op"] in ("USub", "UAdd", "Not"):
@@ -487,11 +632,12 @@ def eval_expr_node(node) -> int | float | bool | str | None | Any:
     # Variable reference
     if "id" in node:
         value = node["id"]
-        if value in vars:
-            var_value = vars[value].get("value")
+        cell = _lookup_var_cell(value)
+        if cell is not None:
+            var_value = cell.get("value")
             # Return the actual value, even if it's None
             # Only return the variable name if the key doesn't exist
-            return var_value if "value" in vars[value] else value
+            return var_value if "value" in cell else value
         # At parse time, if variable not found, return the node unchanged
         # This prevents treating undefined variables as string literals
         return value if runtime else node
@@ -825,12 +971,13 @@ def _execute_node_var(node: dict):
     # Evaluate f-strings and expressions
     if isinstance(value, dict):
         # Check if it's a set/list literal that needs evaluation
-        if value.get("type") in ("set", "list"):
+        if value.get("type") in ("set", "list", "bool", "bytes"):
             value = eval_expr_node(value)
         # Check if it's a runtime expression (has slice, attr, or other runtime features)
         elif (
             "slice" in value
             or "attr" in value
+            or value.get("type") in ("addr", "deref")
             or ("values" in value and "value" not in value)
         ):
             value = eval_expr_node(value)
@@ -839,11 +986,40 @@ def _execute_node_var(node: dict):
         else:
             value = value["value"]
 
-    # Make a deep copy of mutable objects to avoid mutating the AST
-    if isinstance(value, (list, dict, set)):
-        value = copy.deepcopy(value)
+    if node.get("value_type") == "dict" and isinstance(value, (set, list)) and not value:
+        value = {}
 
-    vars[node["name"]] = {"type": node["value_type"], "value": value}
+    # Static lists are fixed-size and pre-filled with type-appropriate
+    # zero values: list name[capacity:type] = []
+    capacity = node.get("list_capacity")
+    if capacity is not None and isinstance(value, list) and not value:
+        elem_type = node.get("list_elem_type")
+        if elem_type in ("str", "string"):
+            default = ""
+        elif elem_type in ("float", "f64"):
+            default = 0.0
+        elif elem_type == "bool":
+            default = False
+        else:
+            default = 0
+        value = [copy.deepcopy(default) for _ in range(int(capacity))]
+
+    # Assignments alias mutable objects, matching the native/C reference
+    # semantics. Fresh literals and struct constructors already produce a new
+    # object for every evaluation, so no defensive copy is needed here.
+    name = node["name"]
+    if name in vars:
+        # Mutate the existing cell so pointers obtained with &name keep
+        # aliasing the variable after reassignment.
+        vars[name]["type"] = node["value_type"]
+        vars[name]["value"] = value
+    elif name in _function_locals:
+        vars[name] = {"type": node["value_type"], "value": value}
+    elif name in _global_vars:
+        _global_vars[name]["type"] = node["value_type"]
+        _global_vars[name]["value"] = value
+    else:
+        vars[name] = {"type": node["value_type"], "value": value}
 
 
 def _execute_node_index_assign(node: dict):
@@ -852,9 +1028,20 @@ def _execute_node_index_assign(node: dict):
     if target_name not in vars:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
 
-    target = vars[target_name]["value"]
-    index = ensure_int(eval_expr(node["index"]), "Index")
+    cell = _lookup_var_cell(target_name)
+    if cell is None:
+        raise RuntimeError(f"Variable '{target_name}' is not defined")
+    target = cell["value"]
+    index = eval_expr(node["index"])
     value = eval_expr(node["value"])
+
+    if isinstance(target, dict):
+        target[index] = value
+        return
+    if isinstance(index, str):
+        index = ensure_int(index, "Index")
+    else:
+        index = ensure_int(index, "Index")
 
     if isinstance(target, list):
         if index < 0 or index >= len(target):
@@ -869,6 +1056,17 @@ def _execute_node_index_assign(node: dict):
 def _execute_node_field_assign(node: dict):
     """Handle struct field assignment: obj.field = value"""
     target_name = node["target"]
+
+    if isinstance(target_name, dict):
+        target = eval_expr_node(target_name)
+        if isinstance(target, Pointer):
+            target = target.get()
+        field_name = node["field"]
+        value = eval_expr(node["value"])
+        if isinstance(target, dict) and field_name in target:
+            target[field_name] = value
+            return
+        raise RuntimeError(f"Object has no field '{field_name}'")
 
     # Check if it's a Python module import alias
     if target_name in py_imports:
@@ -888,11 +1086,14 @@ def _execute_node_field_assign(node: dict):
         setattr(module, field_name, value)
         return
 
-    if target_name not in vars:
+    cell = _lookup_var_cell(target_name)
+    if cell is None:
         raise RuntimeError(f"Variable '{target_name}' is not defined")
 
-    target = vars[target_name]["value"]
-    target_type = vars[target_name]["type"]
+    target = cell["value"]
+    if isinstance(target, Pointer):
+        target = target.get()
+    target_type = cell["type"]
     field_name = node["field"]
     value = eval_expr(node["value"])
 
@@ -1101,8 +1302,10 @@ def run_scope(ast: AstType, level=0):
         # Handle call expressions from AST first (e.g. method calls like obj.method())
         # These don't have a 'type' key, just 'func' and 'args'
         if "func" in node and "args" in node and "type" not in node:
-            # Execute the expression but discard the result since this is used as a statement
-            result = eval_expr(node)
+            # Execute the expression but discard its value. Assigning it to
+            # `result` would make an if/loop body look like it returned and
+            # skip the remaining statements in the scope.
+            eval_expr(node)
             continue
 
         node_type = node["type"]
@@ -1131,10 +1334,17 @@ def run_scope(ast: AstType, level=0):
             _execute_node_index_assign(node)
         elif node_type == NODE_TYPE_FIELD_ASSIGN:
             _execute_node_field_assign(node)
+        elif node_type == "ptr_assign":
+            target = node.get("target")
+            if isinstance(target, dict) and target.get("type") == "deref":
+                target = target.get("value")
+            pointer = eval_expr_node(target)
+            if not isinstance(pointer, Pointer):
+                raise RuntimeError("Cannot assign through a non-pointer value")
+            pointer.set(eval_expr(node.get("value")))
         elif node_type == NODE_TYPE_CALL:
-            result = run_func(node["name"], node["args"], level)
-            if len(ast) == 1:
-                return result
+            # A bare call statement does not return from the enclosing scope.
+            run_func(node["name"], node["args"], level)
         elif node_type == NODE_TYPE_IF:
             result = _execute_node_if(node)
             if result is not None:
@@ -1160,7 +1370,7 @@ def run_scope(ast: AstType, level=0):
         elif node_type == NODE_TYPE_ASSERT:
             _execute_node_assert(node)
         elif node_type == NODE_TYPE_RETURN:
-            return eval_expr(node["value"])
+            raise ReturnSignal(eval_expr(node["value"]))
         elif node_type == NODE_TYPE_RAISE:
             _execute_node_raise(node)
         else:
@@ -1173,7 +1383,7 @@ def run(ast: AstType, file: str = "", source: str = ""):
     # Use lock to prevent race conditions in parallel test execution
     with _runtime_lock:
         global vars, runtime, funcs, py_imports, _current_runtime_vars
-        global _runtime_file, _runtime_source, _runtime_current_func
+        global _runtime_file, _runtime_source, _runtime_current_func, _global_vars
 
         # Initialize runtime context for error formatting
         _runtime_file = file
@@ -1199,6 +1409,7 @@ def run(ast: AstType, file: str = "", source: str = ""):
             del funcs[name]
 
         run_scope(ast)
+        _global_vars = vars
 
         if "main" not in funcs:
             raise RuntimeError("Missing main function")
@@ -1206,6 +1417,12 @@ def run(ast: AstType, file: str = "", source: str = ""):
         exit_code = run_func("main", sys.argv[3:])
         # If main returns an integer, use it as the exit code
         if isinstance(exit_code, int):
+            import builtin_funcs as _builtins
+
+            if getattr(_builtins, "_in_fork_child", False):
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(int(exit_code))
             sys.exit(exit_code)
 
 

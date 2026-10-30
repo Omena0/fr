@@ -1,0 +1,9 @@
+// !true
+// !true
+// !true
+
+void main() {
+    println(sin(1) > 0.8)
+    println(cos(1) > 0.5)
+    println(tan(1) > 1.5)
+}

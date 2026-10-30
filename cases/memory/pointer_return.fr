@@ -1,0 +1,18 @@
+// !5
+// !2
+
+int* pick(int* a, int* b, bool first) {
+    if (first) {
+        return a
+    }
+    return b
+}
+
+void main() {
+    int x = 1
+    int y = 2
+    int* p = pick(&x, &y, true)
+    *p = 5
+    println(x)
+    println(y)
+}
