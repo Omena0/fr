@@ -33,9 +33,7 @@ def _rng(v: Value | Constant | None, ranges: dict[int, Range]) -> Range | None:
     if isinstance(v, Constant):
         if isinstance(v.value, bool):
             return (1, 1) if v.value else (0, 0)
-        if isinstance(v.value, int):
-            return (int(v.value), int(v.value))
-        return None
+        return (int(v.value), int(v.value)) if isinstance(v.value, int) else None
     if isinstance(v, (int, bool)):
         return (int(v), int(v))
     if isinstance(v, Value):
@@ -55,9 +53,7 @@ def _rng(v: Value | Constant | None, ranges: dict[int, Range]) -> Range | None:
 def _union(a: Range | None, b: Range | None) -> Range | None:
     if a is None:
         return b
-    if b is None:
-        return a
-    return (min(a[0], b[0]), max(a[1], b[1]))
+    return a if b is None else (min(a[0], b[0]), max(a[1], b[1]))
 
 
 def _bool_range(value: bool | None) -> Range | None:
@@ -82,37 +78,25 @@ def _compare_range(op: Op, a: Range, b: Range) -> Range:
             return _bool_range(result)  # type: ignore[return-value]
 
     if op == Op.EQ:
-        if a[1] < b[0] or b[1] < a[0]:
-            return (0, 0)
-        return (0, 1)
+        return (0, 0) if a[1] < b[0] or b[1] < a[0] else (0, 1)
     if op == Op.NE:
-        if a[1] < b[0] or b[1] < a[0]:
-            return (1, 1)
-        return (0, 1)
+        return (1, 1) if a[1] < b[0] or b[1] < a[0] else (0, 1)
     if op == Op.LT:
         if a[1] < b[0]:
             return (1, 1)
-        if a[0] >= b[1]:
-            return (0, 0)
-        return (0, 1)
+        return (0, 0) if a[0] >= b[1] else (0, 1)
     if op == Op.LE:
         if a[1] <= b[0]:
             return (1, 1)
-        if a[0] > b[1]:
-            return (0, 0)
-        return (0, 1)
+        return (0, 0) if a[0] > b[1] else (0, 1)
     if op == Op.GT:
         if a[0] > b[1]:
             return (1, 1)
-        if a[1] <= b[0]:
-            return (0, 0)
-        return (0, 1)
+        return (0, 0) if a[1] <= b[0] else (0, 1)
     if op == Op.GE:
         if a[0] >= b[1]:
             return (1, 1)
-        if a[1] < b[0]:
-            return (0, 0)
-        return (0, 1)
+        return (0, 0) if a[1] < b[0] else (0, 1)
     return (0, 1)
 
 
@@ -160,7 +144,7 @@ class RangeAnalysis:
         self.config = config or OptimizerConfig.from_env()
         self.fixed_ranges = fixed_ranges or {}
         self.ranges: dict[int, Range] = dict(param_ranges or {})
-        self.ranges.update(self.fixed_ranges)
+        self.ranges |= self.fixed_ranges
         self.visits: dict[int, int] = defaultdict(int)
         self.total_visits = 0
 
@@ -170,17 +154,15 @@ class RangeAnalysis:
         worklist: deque[BasicBlock] = deque([self.func.entry])
         queued: set[int] = {id(self.func.entry)}
 
-        while worklist:
-            if (
+        while worklist and not (
                 self.total_visits >= self.config.max_range_visits
                 or len(self.ranges) >= self.config.max_range_values
             ):
-                break
             block = worklist.popleft()
             queued.discard(id(block))
             self.total_visits += 1
             self.visits[id(block)] += 1
-
+        
             changed = False
             for inst in block.instructions:
                 result_range = self._infer_inst(inst)
@@ -199,7 +181,7 @@ class RangeAnalysis:
                         self.ranges[inst.result.id] = new
                         inst.result.value_range = new
                     changed = True
-
+        
             successors = self._feasible_successors(block)
             if changed or len(successors) < len(block.successors):
                 for succ in successors:
@@ -231,18 +213,14 @@ class RangeAnalysis:
         if op == Op.SELECT and len(inst.operands) >= 3:
             a = _rng(inst.operands[1], self.ranges)
             b = _rng(inst.operands[2], self.ranges)
-            if a is None or b is None:
-                return None
-            return _union(a, b)
+            return None if a is None or b is None else _union(a, b)
         if op == Op.NOT and inst.operands:
             r = _rng(inst.operands[0], self.ranges)
             if r is None:
                 return None
             if r == (0, 0):
                 return (1, 1)
-            if r == (1, 1):
-                return (0, 0)
-            return (0, 1)
+            return (0, 0) if r == (1, 1) else (0, 1)
         if op == Op.NEG and inst.operands:
             r = _rng(inst.operands[0], self.ranges)
             return (-r[1], -r[0]) if r else None
@@ -252,25 +230,19 @@ class RangeAnalysis:
                 return None
             if r[0] >= 0:
                 return r
-            if r[1] <= 0:
-                return (-r[1], -r[0])
-            return (0, max(-r[0], r[1]))
+            return (-r[1], -r[0]) if r[1] <= 0 else (0, max(-r[0], r[1]))
         if op == Op.TO_BOOL:
             return (0, 1)
         if op in (Op.EQ, Op.NE, Op.LT, Op.LE, Op.GT, Op.GE) and len(inst.operands) >= 2:
             a = _rng(inst.operands[0], self.ranges)
             b = _rng(inst.operands[1], self.ranges)
-            if a is None or b is None:
-                return (0, 1)
-            return _compare_range(op, a, b)
+            return (0, 1) if a is None or b is None else _compare_range(op, a, b)
         if op in (Op.ADD, Op.SUB, Op.MUL, Op.DIV, Op.MOD, Op.MIN, Op.MAX) and len(
             inst.operands
         ) >= 2:
             a = _rng(inst.operands[0], self.ranges)
             b = _rng(inst.operands[1], self.ranges)
-            if a is None or b is None:
-                return None
-            return _arith_range(op, a, b)
+            return None if a is None or b is None else _arith_range(op, a, b)
         if op in (Op.AND, Op.OR) and len(inst.operands) >= 2:
             a = _rng(inst.operands[0], self.ranges)
             b = _rng(inst.operands[1], self.ranges)
@@ -409,15 +381,14 @@ def infer_loop_ranges(func: Function) -> dict[int, Range]:
                         lo = max(lo, bound + 1)
                     elif inside_op == Op.GE:
                         lo = max(lo, bound)
-                else:
-                    if inside_op == Op.GT:
-                        lo = max(lo, bound + 1)
-                    elif inside_op == Op.GE:
-                        lo = max(lo, bound)
-                    elif inside_op == Op.LT:
-                        hi = bound - 1
-                    elif inside_op == Op.LE:
-                        hi = bound
+                elif inside_op == Op.GT:
+                    lo = max(lo, bound + 1)
+                elif inside_op == Op.GE:
+                    lo = max(lo, bound)
+                elif inside_op == Op.LT:
+                    hi = bound - 1
+                elif inside_op == Op.LE:
+                    hi = bound
                 if lo <= hi:
                     result[phi.result.id] = (lo, hi)
                 break

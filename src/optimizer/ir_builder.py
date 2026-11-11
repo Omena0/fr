@@ -442,7 +442,7 @@ class IRBuilder:
             return
 
         if op == "CONST_STR":
-            for a in (args if args else [""]):
+            for a in (args or [""]):
                 v = self._make_const(
                     IRType.STRING, _unescape_bytecode_string(a), block, source_line
                 )
@@ -1087,7 +1087,7 @@ class IRBuilder:
             # BRANCH does jz (jump when false). For JUMP_IF_TRUE we want to
             # jump when true, so negate the condition first.
             neg = _make_inst(Op.NOT, [cond], IRType.BOOL)
-            branch_cond = neg.result if neg.result else cond
+            branch_cond = neg.result or cond
             inst = Instruction(Op.BRANCH, [branch_cond], None, source_line)
             inst.imm_str = target_label
             block.append(inst)
@@ -1123,7 +1123,7 @@ class IRBuilder:
             for _ in range(n_fields):
                 field_vals.insert(0, _pop())
 
-            result_type = struct_type if struct_type else StructType(target_name)
+            result_type = struct_type or StructType(target_name)
             inst = _make_inst(
                 Op.ALLOC_STRUCT,
                 field_vals,

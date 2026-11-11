@@ -591,9 +591,7 @@ def _canonical_pointer_type(token: str) -> tuple[str, int] | None:
     while base.endswith("*"):
         depth += 1
         base = base[:-1]
-    if not base or base.endswith("*") or depth == 0:
-        return None
-    return base, depth
+    return None if not base or base.endswith("*") or depth == 0 else (base, depth)
 
 
 def _pointer_type_string(base: str, depth: int) -> str:
@@ -838,7 +836,7 @@ def _ast_to_dict(node):
             # Check if this function has varargs and pack them
             func_info = funcs[method_name]
             func_args = func_info.get("args")
-            if func_args and isinstance(func_args, list) and func_args:
+            if func_args and isinstance(func_args, list):
                 last_param_name, last_param_type = func_args[-1]
                 if (
                     last_param_type
@@ -875,7 +873,7 @@ def _ast_to_dict(node):
         if method_name in funcs:
             func_info = funcs[method_name]
             func_args = func_info.get("args")
-            if func_args and isinstance(func_args, list) and func_args:
+            if func_args and isinstance(func_args, list):
                 last_param_name, last_param_type = func_args[-1]
                 if (
                     last_param_type
@@ -1272,7 +1270,7 @@ def _rewrite_pointer_syntax(text: str) -> str:
             start = i + 1
             end = _find_pointer_operand_end(text, start)
             if end > start:
-                out.append("__addr__(" + text[start:end].strip() + ")")
+                out.append(f"__addr__({text[start:end].strip()})")
                 prev_sig = ")"
                 i = end
                 continue
@@ -1282,9 +1280,7 @@ def _rewrite_pointer_syntax(text: str) -> str:
                 start = i + 2
                 end = _find_pointer_operand_end(text, start)
                 if end > start:
-                    out.append(
-                        "__deref__(__deref__(" + text[start:end].strip() + "))"
-                    )
+                    out.append(f"__deref__(__deref__({text[start:end].strip()}))")
                     prev_sig = ")"
                     i = end
                     continue
@@ -1292,7 +1288,7 @@ def _rewrite_pointer_syntax(text: str) -> str:
                 start = i + 1
                 end = _find_pointer_operand_end(text, start)
                 if end > start:
-                    out.append("__deref__(" + text[start:end].strip() + ")")
+                    out.append(f"__deref__({text[start:end].strip()})")
                     prev_sig = ")"
                     i = end
                     continue
@@ -1333,7 +1329,7 @@ def parse_expr(text: str):
             # Convert Python's SyntaxError to expected format
             error_msg = str(e)
             if "unterminated string literal" in error_msg:
-                raise SyntaxError("Expected '\"'")
+                raise SyntaxError("Expected '\"'") from e
             # Re-raise other syntax errors as-is
             raise
 
@@ -1452,8 +1448,9 @@ def parse_func(
     # Check if this is a const function with non-evaluable builtins or bytecode blocks
     if "const" in mods:
         has_non_eval, builtin_name = _has_non_evaluable_builtins(scope)
-        has_non_eval = has_non_eval or _scope_has_non_evaluable_nodes(scope, {name})
-        if has_non_eval:
+        if has_non_eval := has_non_eval or _scope_has_non_evaluable_nodes(
+            scope, {name}
+        ):
             warning_detail = (
                 f"builtin '{builtin_name}()'"
                 if builtin_name
@@ -1811,9 +1808,7 @@ def _has_non_evaluable_builtins(scope: list) -> tuple[bool, str | None]:
 def _eval_cache_key(name: str, arg_values: list) -> tuple[str, tuple[Any, ...]]:
     def to_key(value: Any):
         if isinstance(value, dict):
-            if "value" in value:
-                return to_key(value["value"])
-            return repr(value)
+            return to_key(value["value"]) if "value" in value else repr(value)
         if isinstance(value, list):
             return tuple(to_key(v) for v in value)
         if isinstance(value, tuple):
@@ -2078,7 +2073,7 @@ def parse_func_call(stream: InputStream, name: str) -> dict:
     func_params = func.get("params")
 
     if func_args:  # Regular or builtin functions
-        if isinstance(func_args, list) and func_args:
+        if isinstance(func_args, list):
             # Regular functions: list of tuples
             last_param_name, last_param_type = func_args[-1]
             if (
@@ -3844,54 +3839,55 @@ def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
                     return {"type": "int", "value": value}
                 if isinstance(value, float):
                     return {"type": "float", "value": value}
-                if isinstance(value, str):
-                    return {"type": "string", "value": value}
-                return value
+                return {"type": "string", "value": value} if isinstance(value, str) else value
 
             def _replace_const_refs(
-                node: Any, const_map: dict[str, Any], skip_name: str | None = None
-            ) -> Any:
-                if isinstance(node, dict):
-                    # Never substitute inside address-of/dereference targets:
-                    # their identity is the whole point of a pointer.
-                    if node.get("type") in ("addr", "deref"):
-                        return node
-                    if node.get("type") == "ptr_assign":
-                        result = dict(node)
-                        result["value"] = _replace_const_refs(
-                            node.get("value"), const_map, skip_name
-                        )
-                        return result
-                    if set(node.keys()) == {"id"}:
-                        name = node.get("id")
-                        if (
-                            isinstance(name, str)
-                            and name != skip_name
-                            and name in const_map
-                            and name not in _address_taken_vars
-                        ):
-                            return copy.deepcopy(const_map[name])
+                            node: Any, const_map: dict[str, Any], skip_name: str | None = None
+                        ) -> Any:
+                if not isinstance(node, dict):
+                    return (
+                        [
+                            _replace_const_refs(item, const_map, skip_name)
+                            for item in node
+                        ]
+                        if isinstance(node, list)
+                        else node
+                    )
+                # Never substitute inside address-of/dereference targets:
+                # their identity is the whole point of a pointer.
+                if node.get("type") in ("addr", "deref"):
+                    return node
+                if node.get("type") == "ptr_assign":
+                    result = dict(node)
+                    result["value"] = _replace_const_refs(
+                        node.get("value"), const_map, skip_name
+                    )
+                    return result
+                if set(node.keys()) == {"id"}:
+                    name = node.get("id")
+                    if (
+                        isinstance(name, str)
+                        and name != skip_name
+                        and name in const_map
+                        and name not in _address_taken_vars
+                    ):
+                        return copy.deepcopy(const_map[name])
 
-                    new_node: dict[str, Any] = {}
-                    for key, value in node.items():
-                        if key == "func":
-                            if isinstance(value, dict) and set(value.keys()) == {"id"}:
-                                new_node[key] = value
-                            else:
-                                new_node[key] = _replace_const_refs(
-                                    value, const_map, skip_name
-                                )
-                            continue
-                        if key == "name" and node.get("type") == "call":
+                new_node: dict[str, Any] = {}
+                for key, value in node.items():
+                    if key == "func":
+                        if isinstance(value, dict) and set(value.keys()) == {"id"}:
                             new_node[key] = value
-                            continue
-                        new_node[key] = _replace_const_refs(value, const_map, skip_name)
-                    return new_node
-                if isinstance(node, list):
-                    return [
-                        _replace_const_refs(item, const_map, skip_name) for item in node
-                    ]
-                return node
+                        else:
+                            new_node[key] = _replace_const_refs(
+                                value, const_map, skip_name
+                            )
+                        continue
+                    if key == "name" and node.get("type") == "call":
+                        new_node[key] = value
+                        continue
+                    new_node[key] = _replace_const_refs(value, const_map, skip_name)
+                return new_node
 
             def _contains_call_nodes(node: Any) -> bool:
                 if isinstance(node, dict):
@@ -4116,7 +4112,7 @@ def parse(text: str | InputStream, level: int = 0, file: str = "") -> AstType:
                         if set(node.keys()) == {"id"}:
                             name = node.get("id")
                             if isinstance(name, str):
-                                bump(name, string_context if not in_function else False)
+                                bump(name, False if in_function else string_context)
                             return
 
                         if node.get("type") == "call":

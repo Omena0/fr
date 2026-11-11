@@ -5,7 +5,7 @@ struct User {
     int join_time
 }
 
-set clients = {}
+set clients = ()
 dict logins = {}
 
 void broadcast(str msg) {

@@ -2,6 +2,7 @@ use wasmtime::*;
 use std::env;
 use std::fs;
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio, Child};
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
     // Shared storage for lists and sets
     let lists: Arc<Mutex<Vec<Vec<i64>>>> = Arc::new(Mutex::new(Vec::new()));
     let sets: Arc<Mutex<Vec<HashSet<i64>>>> = Arc::new(Mutex::new(Vec::new()));
+    let dicts: Arc<Mutex<Vec<HashMap<String, i64>>>> = Arc::new(Mutex::new(Vec::new()));
 
     let print = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, ptr: i32, len: i32| {
         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
@@ -615,6 +617,144 @@ fn main() -> Result<()> {
         }
     });
 
+    // Dict functions (string keys)
+    let dicts_clone = dicts.clone();
+    let dict_new = Func::wrap(&mut store, move |_: Caller<'_, ()>| -> i32 {
+        let mut dicts_lock = dicts_clone.lock().unwrap();
+        dicts_lock.push(HashMap::new());
+        (dicts_lock.len() - 1) as i32
+    });
+
+    let dicts_clone = dicts.clone();
+    let dict_set_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>,
+        dict_id: i32, key_ptr: i32, key_len: i32, value: i64| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        let key_slice = &data[key_ptr as usize..(key_ptr + key_len) as usize];
+        let key = String::from_utf8_lossy(key_slice).to_string();
+        let mut dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get_mut(dict_id as usize) {
+            dict.insert(key, value);
+        }
+        dict_id
+    });
+
+    let dicts_clone = dicts.clone();
+    let dict_get_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>,
+        dict_id: i32, key_ptr: i32, key_len: i32| -> i64 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        let key_slice = &data[key_ptr as usize..(key_ptr + key_len) as usize];
+        let key = String::from_utf8_lossy(key_slice).to_string();
+        let dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get(dict_id as usize) {
+            dict.get(&key).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    });
+
+    let dicts_clone = dicts.clone();
+    let dict_contains_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>,
+        dict_id: i32, key_ptr: i32, key_len: i32| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        let key_slice = &data[key_ptr as usize..(key_ptr + key_len) as usize];
+        let key = String::from_utf8_lossy(key_slice).to_string();
+        let dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get(dict_id as usize) {
+            if dict.contains_key(&key) { 1 } else { 0 }
+        } else {
+            0
+        }
+    });
+
+    // Dict functions (int keys)
+    let dicts_clone = dicts.clone();
+    let string_offset_for_dict = string_offset.clone();
+    let dict_set_int = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>,
+        dict_id: i32, key: i64, value: i64| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let _data = mem.data(&caller);
+        let key_str = key.to_string();
+        let key_bytes = key_str.as_bytes();
+        let mut offset = string_offset_for_dict.lock().unwrap();
+        let ptr = *offset as i32;
+        *offset += key_bytes.len();
+        mem.write(&mut caller, ptr as usize, key_bytes).unwrap();
+        let mut dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get_mut(dict_id as usize) {
+            dict.insert(key_str, value);
+        }
+        dict_id
+    });
+
+    let dicts_clone = dicts.clone();
+    let dict_get_int = Func::wrap(&mut store, move |_: Caller<'_, ()>,
+        dict_id: i32, key: i64| -> i64 {
+        let dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get(dict_id as usize) {
+            dict.get(&key.to_string()).copied().unwrap_or(0)
+        } else {
+            0
+        }
+    });
+
+    let dicts_clone = dicts.clone();
+    let dict_contains_int = Func::wrap(&mut store, move |_: Caller<'_, ()>,
+        dict_id: i32, key: i64| -> i32 {
+        let dicts_lock = dicts_clone.lock().unwrap();
+        if let Some(dict) = dicts_lock.get(dict_id as usize) {
+            if dict.contains_key(&key.to_string()) { 1 } else { 0 }
+        } else {
+            0
+        }
+    });
+
+    let lists_for_listdir = lists.clone();
+    let offset_clone = string_offset.clone();
+    let file_listdir = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>,
+        path_ptr: i32, path_len: i32| -> i32 {
+        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+        let data = mem.data(&caller);
+        let path_slice = &data[path_ptr as usize..(path_ptr + path_len) as usize];
+        let path = String::from_utf8_lossy(path_slice).to_string();
+
+        let mut lists_lock = lists_for_listdir.lock().unwrap();
+        lists_lock.push(Vec::new());
+        let list_id = (lists_lock.len() - 1) as i32;
+
+        if let Ok(entries) = fs::read_dir(&path) {
+            let mut offset = offset_clone.lock().unwrap();
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy().to_string();
+                let bytes = name_str.as_bytes();
+                let ptr = *offset as i32;
+                let len = bytes.len() as i32;
+                *offset += bytes.len();
+                mem.write(&mut caller, ptr as usize, bytes).unwrap();
+                let packed: i64 = ((len as i64) << 32) | (ptr as i64);
+                if let Some(list_vec) = lists_lock.get_mut(list_id as usize) {
+                    list_vec.push(packed);
+                }
+            }
+        }
+
+        list_id
+    });
+
+    // Trig functions
+    let cos_f64 = Func::wrap(&mut store, |_: Caller<'_, ()>, value: f64| -> f64 {
+        value.cos()
+    });
+    let sin_f64 = Func::wrap(&mut store, |_: Caller<'_, ()>, value: f64| -> f64 {
+        value.sin()
+    });
+    let tan_f64 = Func::wrap(&mut store, |_: Caller<'_, ()>, value: f64| -> f64 {
+        value.tan()
+    });
+
     // Math functions
     let round_f64 = Func::wrap(&mut store, |_: Caller<'_, ()>, value: f64| -> f64 {
         value.round()
@@ -812,9 +952,20 @@ fn main() -> Result<()> {
     linker.define(&store, "env", "set_remove", set_remove)?;
     linker.define(&store, "env", "set_contains", set_contains)?;
     linker.define(&store, "env", "set_len", set_len)?;
+    linker.define(&store, "env", "dict_new", dict_new)?;
+    linker.define(&store, "env", "dict_set_str", dict_set_str)?;
+    linker.define(&store, "env", "dict_get_str", dict_get_str)?;
+    linker.define(&store, "env", "dict_contains_str", dict_contains_str)?;
+    linker.define(&store, "env", "dict_set_int", dict_set_int)?;
+    linker.define(&store, "env", "dict_get_int", dict_get_int)?;
+    linker.define(&store, "env", "dict_contains_int", dict_contains_int)?;
+    linker.define(&store, "env", "file_listdir", file_listdir)?;
     linker.define(&store, "env", "round_f64", round_f64)?;
     linker.define(&store, "env", "floor_f64", floor_f64)?;
     linker.define(&store, "env", "ceil_f64", ceil_f64)?;
+    linker.define(&store, "env", "cos", cos_f64)?;
+    linker.define(&store, "env", "sin", sin_f64)?;
+    linker.define(&store, "env", "tan", tan_f64)?;
     linker.define(&store, "env", "file_open", file_open)?;
     linker.define(&store, "env", "file_read", file_read)?;
     linker.define(&store, "env", "file_write", file_write)?;

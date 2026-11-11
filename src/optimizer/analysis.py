@@ -72,10 +72,7 @@ class DomTree:
                 for p in b.predecessors:
                     if p not in self.idom and p is not entry:
                         continue
-                    if new_idom is None:
-                        new_idom = p
-                    else:
-                        new_idom = self._intersect(new_idom, p, post_num)
+                    new_idom = p if new_idom is None else self._intersect(new_idom, p, post_num)
                 if self.idom.get(b) is not new_idom:
                     self.idom[b] = new_idom
                     changed = True
@@ -218,7 +215,6 @@ class LiveInterval:
 
 def compute_live_intervals(func: Function) -> list[LiveInterval]:
     """Compute live intervals by numbering all instructions sequentially."""
-    intervals: dict[int, LiveInterval] = {}  # value.id → interval
     call_points: list[int] = []  # instruction numbers of call instructions
     # Points where specific registers are implicitly clobbered
     # (rax, rdx by idiv; rcx by variable shift)
@@ -229,10 +225,9 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
     block_start: dict[str, int] = {}
     block_end: dict[str, int] = {}
 
-    # Initialize intervals for function parameters (defined at entry, start=0)
-    for p in func.params:
-        intervals[p.id] = LiveInterval(p, 0, 0)
-
+    intervals: dict[int, LiveInterval] = {
+        p.id: LiveInterval(p, 0, 0) for p in func.params
+    }
     # Number instructions and record def/use points
     for block in func.blocks:
         block_start[block.label] = inst_num
@@ -332,11 +327,6 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
         for cp, regs in clobber_points:
             if iv.start < cp and iv.end > cp:
                 iv.forbidden_regs |= regs
-            elif iv.start == cp:
-                # This is the instruction's own result — it will be moved
-                # from the implicit reg to dst, so no conflict
-                pass
-
     return sorted(intervals.values(), key=lambda iv: iv.start)
 
 
@@ -375,10 +365,11 @@ class LoopInfo:
         # Find back edges: edge (tail → header) where header dominates tail
         back_edges = []
         for block in self.func.blocks:
-            for succ in block.successors:
-                if self.dom_tree.dominates(succ, block):
-                    back_edges.append((block, succ))
-
+            back_edges.extend(
+                (block, succ)
+                for succ in block.successors
+                if self.dom_tree.dominates(succ, block)
+            )
         # Build natural loops from back edges
         header_loops: dict[BasicBlock, Loop] = {}
         for tail, header in back_edges:
@@ -396,10 +387,7 @@ class LoopInfo:
                 if b in loop.blocks:
                     continue
                 loop.blocks.add(b)
-                for p in b.predecessors:
-                    if p not in loop.blocks:
-                        worklist.append(p)
-
+                worklist.extend(p for p in b.predecessors if p not in loop.blocks)
         self.loops = list(header_loops.values())
 
         # Compute exits
@@ -410,7 +398,7 @@ class LoopInfo:
                         loop.exits.add(s)
 
         # Compute nesting depth
-        for i, outer in enumerate(self.loops):
+        for outer in self.loops:
             for inner in self.loops:
                 if inner is outer:
                     continue
@@ -474,11 +462,7 @@ def alias_query(a: Instruction, b: Instruction) -> int:
             # Check if same struct type (could alias via different instances)
             a_type = a_base.type
             b_type = b_base.type
-            if a_type != b_type:
-                return AliasResult.NO_ALIAS
-            # Same type but different base → may alias
-            return AliasResult.MAY_ALIAS
-
+            return AliasResult.NO_ALIAS if a_type != b_type else AliasResult.MAY_ALIAS
         # Same base struct, check field index
         if a.imm_int is not None and b.imm_int is not None:
             if a.imm_int != b.imm_int:

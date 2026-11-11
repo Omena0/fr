@@ -80,10 +80,9 @@ class PureInterpreter:
             raise SimulationError("recursion depth budget exhausted")
         if func.entry is None:
             raise SimulationError("function has no entry")
-        env: dict[int, object] = {}
-        for param, arg in zip(func.params, args):
-            env[param.id] = arg
-
+        env: dict[int, object] = {
+            param.id: arg for param, arg in zip(func.params, args)
+        }
         block = func.entry
         pred = None
         steps = 0
@@ -98,11 +97,15 @@ class PureInterpreter:
                 if inst.op == Op.PHI:
                     if inst.result is None:
                         continue
-                    chosen = None
-                    for i, operand in enumerate(inst.operands):
-                        if i < len(inst.target_blocks) and inst.target_blocks[i] is pred:
-                            chosen = operand
-                            break
+                    chosen = next(
+                        (
+                            operand
+                            for i, operand in enumerate(inst.operands)
+                            if i < len(inst.target_blocks)
+                            and inst.target_blocks[i] is pred
+                        ),
+                        None,
+                    )
                     if chosen is None and inst.operands:
                         chosen = inst.operands[0]
                     if chosen is None:
@@ -180,9 +183,7 @@ class PureInterpreter:
                 return float(a) - float(b)
             if op == Op.FMUL:
                 return float(a) * float(b)
-            if op == Op.FDIV:
-                return float(a) / float(b)
-            return -float(a)
+            return float(a) / float(b) if op == Op.FDIV else -float(a)
         if op in (Op.LT, Op.GT, Op.LE, Op.GE, Op.EQ, Op.NE):
             a, b = args[0], args[1]
             return {

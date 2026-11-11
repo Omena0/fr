@@ -146,9 +146,7 @@ class CodeGen:
                 continue
             self._emit_function(func)
 
-        # Emit entry point
-        entry = self.module.entry_func
-        if entry:
+        if entry := self.module.entry_func:
             asm_entry = self._asm_func_name(entry)
             self._emit("")
             self._emit(".global _start")
@@ -216,20 +214,21 @@ class CodeGen:
 
     def _find_block(self, func: Function, label: str) -> BasicBlock | None:
         """Find a basic block by label within a function."""
-        for b in func.blocks:
-            if b.label == label:
-                return b
-        return None
+        return next((b for b in func.blocks if b.label == label), None)
 
     def _get_fall_through_block(
         self, func: Function, block: BasicBlock
     ) -> BasicBlock | None:
         """Get the block that follows `block` in the function's block list."""
         blocks = func.blocks
-        for i, b in enumerate(blocks):
-            if b is block and i + 1 < len(blocks):
-                return blocks[i + 1]
-        return None
+        return next(
+            (
+                blocks[i + 1]
+                for i, b in enumerate(blocks)
+                if b is block and i + 1 < len(blocks)
+            ),
+            None,
+        )
 
     def _emit_phi_copies(
         self,
@@ -277,9 +276,7 @@ class CodeGen:
             return 1
         if typ == IRType.FLOAT64:
             return 2
-        if typ == IRType.BOOL:
-            return 3
-        return 0
+        return 3 if typ == IRType.BOOL else 0
 
     def _lookup_label(self, func: Function) -> str:
         safe = "".join(c if c.isalnum() else "_" for c in func.name)
@@ -390,14 +387,17 @@ class CodeGen:
             # The generated vector loop scans from index zero. Only accept a
             # loop whose phi starts at a literal zero.
             from optimizer.passes import _get_const_value
-            outside_init = None
-            for operand, pred in zip(
-                index_phi.defining_inst.operands,
-                index_phi.defining_inst.target_blocks,
-            ):
-                if pred not in loop.blocks:
-                    outside_init = operand
-                    break
+            outside_init = next(
+                (
+                    operand
+                    for operand, pred in zip(
+                        index_phi.defining_inst.operands,
+                        index_phi.defining_inst.target_blocks,
+                    )
+                    if pred not in loop.blocks
+                ),
+                None,
+            )
             if outside_init is None or _get_const_value(outside_init) != 0:
                 continue
             list_val = length_val.defining_inst.operands[0]
@@ -405,11 +405,14 @@ class CodeGen:
                 continue
             if not header.phi_nodes or len(header.phi_nodes) > 3:
                 continue
-            acc_phi = None
-            for phi in header.phi_nodes:
-                if phi.result is not None and phi.result is not index_phi:
-                    acc_phi = phi
-                    break
+            acc_phi = next(
+                (
+                    phi
+                    for phi in header.phi_nodes
+                    if phi.result is not None and phi.result is not index_phi
+                ),
+                None,
+            )
             if acc_phi is None or acc_phi.result is None:
                 continue
             if exit_block := term.target_blocks[1]:
@@ -528,7 +531,7 @@ class CodeGen:
         if kind == "sumsq_f":
             self._emit("    vmulpd ymm1, ymm1, ymm1")
         self._emit(
-            "    vpaddq ymm0, ymm0, ymm1" if not is_float else "    vaddpd ymm0, ymm0, ymm1"
+            "    vaddpd ymm0, ymm0, ymm1" if is_float else "    vpaddq ymm0, ymm0, ymm1"
         )
         self._emit("    add rax, 4")
         self._emit(f"    jmp {vec}")
@@ -579,16 +582,15 @@ class CodeGen:
             if acc_loc.startswith("xmm"):
                 self._emit(f"    movsd {acc_loc}, [rsp + 552]")
             elif acc_loc.startswith("["):
-                self._emit(f"    movsd xmm15, [rsp + 552]")
+                self._emit("    movsd xmm15, [rsp + 552]")
                 self._emit(f"    movsd {acc_loc}, xmm15")
             else:
                 self._emit(f"    movq {acc_loc}, [rsp + 552]")
+        elif acc_loc.startswith("["):
+            self._emit("    mov rdx, [rsp + 552]")
+            self._emit(f"    mov {acc_loc}, rdx")
         else:
-            if acc_loc.startswith("["):
-                self._emit(f"    mov rdx, [rsp + 552]")
-                self._emit(f"    mov {acc_loc}, rdx")
-            else:
-                self._emit(f"    mov {acc_loc}, [rsp + 552]")
+            self._emit(f"    mov {acc_loc}, [rsp + 552]")
         self._emit("    add rsp, 560")
         self._emit(f"    jmp .{asm_name}_{exit_block.label}")
 
@@ -728,12 +730,11 @@ class CodeGen:
         hold values that are live across the call and must be pushed/popped."""
         caller_saved_set = frozenset(CALLER_SAVED_GPRS)
 
-        # Build a mapping: value_id → assigned register (caller-saved GPR/XMM)
-        val_to_cs_reg: dict[int, str] = {}
-        for vid, reg in alloc.reg_map.items():
-            if reg in caller_saved_set or reg in CALLER_SAVED_XMM:
-                val_to_cs_reg[vid] = reg
-
+        val_to_cs_reg: dict[int, str] = {
+            vid: reg
+            for vid, reg in alloc.reg_map.items()
+            if reg in caller_saved_set or reg in CALLER_SAVED_XMM
+        }
         if not val_to_cs_reg:
             return
 

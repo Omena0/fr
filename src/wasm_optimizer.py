@@ -168,8 +168,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.add) -> (i64.const A+B)
     def fold_add_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a + b})"
 
     code = re.sub(
@@ -184,8 +184,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.sub) -> (i64.const A-B)
     def fold_sub_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a - b})"
 
     code = re.sub(
@@ -200,8 +200,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.mul) -> (i64.const A*B)
     def fold_mul_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a * b})"
 
     code = re.sub(
@@ -216,8 +216,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i32.const A) (i32.const B) (i32.add) -> (i32.const A+B)
     def fold_add_i32(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         # Handle 32-bit overflow
         result = (a + b) & 0xFFFFFFFF
         if result > 0x7FFFFFFF:
@@ -236,8 +236,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i32.const A) (i32.const B) (i32.sub) -> (i32.const A-B)
     def fold_sub_i32(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         result = (a - b) & 0xFFFFFFFF
         if result > 0x7FFFFFFF:
             result -= 0x100000000
@@ -255,8 +255,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i32.const A) (i32.const B) (i32.mul) -> (i32.const A*B)
     def fold_mul_i32(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         result = (a * b) & 0xFFFFFFFF
         if result > 0x7FFFFFFF:
             result -= 0x100000000
@@ -274,9 +274,9 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.div_s) -> (i64.const A/B)
     def fold_div_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
-        return match.group(0) if b == 0 else f"(i64.const {a // b})"
+        a = int(match[1])
+        b = int(match[2])
+        return match[0] if b == 0 else f"(i64.const {a // b})"
 
     code = re.sub(
         instr_pat("i64.const", r"(-?\d+)")
@@ -290,9 +290,9 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.rem_s) -> (i64.const A%B)
     def fold_rem_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
-        return match.group(0) if b == 0 else f"(i64.const {a % b})"
+        a = int(match[1])
+        b = int(match[2])
+        return match[0] if b == 0 else f"(i64.const {a % b})"
 
     code = re.sub(
         instr_pat("i64.const", r"(-?\d+)")
@@ -306,8 +306,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.and) -> (i64.const A&B)
     def fold_and_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a & b})"
 
     code = re.sub(
@@ -322,8 +322,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.or) -> (i64.const A|B)
     def fold_or_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a | b})"
 
     code = re.sub(
@@ -338,8 +338,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.xor) -> (i64.const A^B)
     def fold_xor_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a ^ b})"
 
     code = re.sub(
@@ -354,8 +354,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.shl) -> (i64.const A<<B)
     def fold_shl_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a << (b & 63)})"
 
     code = re.sub(
@@ -370,8 +370,8 @@ def fold_integer_constants(code: str) -> str:
 
     # Pattern: (i64.const A) (i64.const B) (i64.shr_s) -> (i64.const A>>B)
     def fold_shr_i64(match):
-        a = int(match.group(1))
-        b = int(match.group(2))
+        a = int(match[1])
+        b = int(match[2])
         return f"(i64.const {a >> (b & 63)})"
 
     code = re.sub(
@@ -392,8 +392,8 @@ def fold_float_constants(code: str) -> str:
 
     # Pattern: (f64.const A) (f64.const B) (f64.add) -> (f64.const A+B)
     def fold_add_f64(match):
-        a = float(match.group(1))
-        b = float(match.group(2))
+        a = float(match[1])
+        b = float(match[2])
         return f"(f64.const {a + b})"
 
     code = re.sub(
@@ -408,8 +408,8 @@ def fold_float_constants(code: str) -> str:
 
     # Pattern: (f64.const A) (f64.const B) (f64.sub) -> (f64.const A-B)
     def fold_sub_f64(match):
-        a = float(match.group(1))
-        b = float(match.group(2))
+        a = float(match[1])
+        b = float(match[2])
         return f"(f64.const {a - b})"
 
     code = re.sub(
@@ -424,8 +424,8 @@ def fold_float_constants(code: str) -> str:
 
     # Pattern: (f64.const A) (f64.const B) (f64.mul) -> (f64.const A*B)
     def fold_mul_f64(match):
-        a = float(match.group(1))
-        b = float(match.group(2))
+        a = float(match[1])
+        b = float(match[2])
         return f"(f64.const {a * b})"
 
     code = re.sub(
@@ -440,9 +440,9 @@ def fold_float_constants(code: str) -> str:
 
     # Pattern: (f64.const A) (f64.const B) (f64.div) -> (f64.const A/B)
     def fold_div_f64(match):
-        a = float(match.group(1))
-        b = float(match.group(2))
-        return match.group(0) if b == 0 else f"(f64.const {a / b})"
+        a = float(match[1])
+        b = float(match[2])
+        return match[0] if b == 0 else f"(f64.const {a / b})"
 
     code = re.sub(
         instr_pat("f64.const", r"(-?[\d.]+(?:e[+-]?\d+)?)")
@@ -638,16 +638,16 @@ def apply_strength_reduction(code: str) -> str:
 
     # Generic: x * (power of 2) -> x << k
     def _mul_shift_i64(m):
-        k = int(m.group(1))
+        k = int(m[1])
         if k > 0 and (k & (k - 1)) == 0:
             return f"(i64.const {k.bit_length()-1})\n(i64.shl)"
-        return m.group(0)
+        return m[0]
 
     def _mul_shift_i32(m):
-        k = int(m.group(1))
+        k = int(m[1])
         if k > 0 and (k & (k - 1)) == 0:
             return f"(i32.const {k.bit_length()-1})\n(i32.shl)"
-        return m.group(0)
+        return m[0]
 
     code = re.sub(
         instr_pat("i64.const", r"(\d+)") + SEP + instr_pat("i64.mul"),
@@ -695,16 +695,16 @@ def apply_strength_reduction(code: str) -> str:
 
     # Generic: x / (power of 2) -> x >> k (unsigned)
     def _div_shift_i64_u(m):
-        k = int(m.group(1))
+        k = int(m[1])
         if k > 0 and (k & (k - 1)) == 0:
             return f"(i64.const {k.bit_length()-1})\n(i64.shr_u)"
-        return m.group(0)
+        return m[0]
 
     def _div_shift_i32_u(m):
-        k = int(m.group(1))
+        k = int(m[1])
         if k > 0 and (k & (k - 1)) == 0:
             return f"(i32.const {k.bit_length()-1})\n(i32.shr_u)"
-        return m.group(0)
+        return m[0]
 
     code = re.sub(
         instr_pat("i64.const", r"(\d+)") + SEP + instr_pat("i64.div_u"),
@@ -756,16 +756,20 @@ def apply_strength_reduction(code: str) -> str:
 
     # Generic: x % (power of 2) -> x & (power-1) (unsigned)
     def _rem_mask_i64(m):
-        k = int(m.group(1))
-        if k > 0 and (k & (k - 1)) == 0:
-            return f"(i64.const {k-1})\n(i64.and)"
-        return m.group(0)
+        k = int(m[1])
+        return (
+            f"(i64.const {k - 1})\n(i64.and)"
+            if k > 0 and (k & (k - 1)) == 0
+            else m[0]
+        )
 
     def _rem_mask_i32(m):
-        k = int(m.group(1))
-        if k > 0 and (k & (k - 1)) == 0:
-            return f"(i32.const {k-1})\n(i32.and)"
-        return m.group(0)
+        k = int(m[1])
+        return (
+            f"(i32.const {k - 1})\n(i32.and)"
+            if k > 0 and (k & (k - 1)) == 0
+            else m[0]
+        )
 
     code = re.sub(
         instr_pat("i64.const", r"(\d+)") + SEP + instr_pat("i64.rem_u"),
@@ -1031,7 +1035,7 @@ def remove_unused_blocks(code: str) -> str:
         # String skipping
         if code[i] == '"':
             i += 1
-            while i < n and not (code[i] == '"' and code[i - 1] != "\\"):
+            while i < n and (code[i] != '"' or code[i - 1] == "\\"):
                 i += 1
             i += 1
             continue
@@ -1064,11 +1068,11 @@ def remove_unused_blocks(code: str) -> str:
 
         if code[i] == "(":
             if match := re.match(r"\((block|loop)(?:\s+(\$[\w\d_]+))?", code[i:]):
-                type_ = match.group(1)
-                name = match.group(2)
+                type_ = match[1]
+                name = match[2]
 
                 # Check for signature immediately following
-                header_end = i + len(match.group(0))
+                header_end = i + len(match[0])
 
                 # Look ahead for (result or (param
                 j = header_end
@@ -1182,16 +1186,15 @@ def remove_unused_locals(code: str) -> str:
                 # Find all declared locals
                 declared_locals = set()
                 for fl in func_lines:
-                    match = local_pattern.search(fl)
-                    if match:
-                        declared_locals.add(match.group(1))
+                    if match := local_pattern.search(fl):
+                        declared_locals.add(match[1])
 
                 # Find all used locals (local.get, local.set, local.tee)
                 used_locals = set()
                 usage_pattern = re.compile(r"local\.(get|set|tee) \$(\w+)")
                 for fl in func_lines:
                     for match in usage_pattern.finditer(fl):
-                        used_locals.add(match.group(2))
+                        used_locals.add(match[2])
 
                 # Filter out unused locals
                 unused = declared_locals - used_locals
@@ -1200,7 +1203,7 @@ def remove_unused_locals(code: str) -> str:
                 new_func_lines = []
                 for fl in func_lines:
                     match = local_pattern.search(fl)
-                    if match and match.group(1) in unused:
+                    if match and match[1] in unused:
                         continue  # Skip unused local declaration
                     new_func_lines.append(fl)
 
@@ -1228,9 +1231,8 @@ def remove_unused_imports(code: str) -> str:
     imported_funcs = {}  # name -> line index
 
     for i, line in enumerate(lines):
-        match = import_pattern.search(line)
-        if match:
-            imported_funcs[match.group(1)] = i
+        if match := import_pattern.search(line):
+            imported_funcs[match[1]] = i
 
     # Find all function calls in the code
     call_pattern = re.compile(r"call\s+\$(\w+)")
@@ -1242,7 +1244,7 @@ def remove_unused_imports(code: str) -> str:
             line = line[: line.index(";;")]
 
         for match in call_pattern.finditer(line):
-            called_funcs.add(match.group(1))
+            called_funcs.add(match[1])
 
     # Find unused imports
     unused_imports = set(imported_funcs.keys()) - called_funcs

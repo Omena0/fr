@@ -198,7 +198,7 @@ def run_single_ssa_test(test_path, runtime_obj_path):
             actual = result.stdout.strip()
 
             # Compare
-            expected_list = alternatives if alternatives else [expect]
+            expected_list = alternatives or [expect]
             if any(actual == e.strip() for e in expected_list):
                 return (test_path, "pass", None)
             else:
@@ -279,10 +279,8 @@ def main():
         futures = {
             pool.submit(run_single_ssa_test, t, runtime_obj): t for t in filtered
         }
-        done_count = 0
         total = len(futures)
-        for future in as_completed(futures):
-            done_count += 1
+        for done_count, future in enumerate(as_completed(futures), start=1):
             test_path, status, detail = future.result()
             results[status].append((test_path, detail))
             if done_count % 20 == 0 or done_count == total:
@@ -329,8 +327,7 @@ def main():
         ("error", "ERROR"),
         ("timeout", "TIMEOUT"),
     ]:
-        items = results[category]
-        if items:
+        if items := results[category]:
             print(f"\n--- {label} ({len(items)}) ---")
             for path, detail in sorted(items)[:30]:
                 rel = os.path.relpath(path, REPO_ROOT)
@@ -342,14 +339,12 @@ def main():
                 print(f"  ... and {len(items) - 30} more")
 
     return (
-        0
-        if not (
+        1 if (
             results["wrong"]
             or results["ssa_fail"]
             or results["link_fail"]
             or results["error"]
-        )
-        else 1
+        ) else 0
     )
 
 

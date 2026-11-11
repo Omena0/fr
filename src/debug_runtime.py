@@ -172,9 +172,7 @@ class DebugRuntime:
 
         while self.paused:
             try:
-                # Blocking read from stdin
-                line = sys.stdin.readline()
-                if line:
+                if line := sys.stdin.readline():
                     self.handle_command(line.strip())
                 else:
                     # EOF - debugger disconnected, just continue
@@ -287,28 +285,19 @@ def run_with_debug(ast: list, file: str = "<stdin>"):
     import select
 
     # Read initial setup commands (non-blocking with timeout)
-    while True:
-        # Check if there's input available (with 100ms timeout)
-        if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
-            line = sys.stdin.readline().strip()
-            if line:
-                # Process setup commands
-                if (
-                    line in ["stopOnEntry", "breakpoint:", "clearBreakpoints:"]
-                    or line.startswith("breakpoint:")
-                    or line.startswith("clearBreakpoints:")
-                ):
-                    debug_runtime.handle_command(line)
-                else:
-                    # Non-setup command, put it back somehow or just ignore for now
-                    # For now, we'll assume any other command means "start execution"
-                    break
-            else:
-                break
+    while sys.stdin in select.select([sys.stdin], [], [], 0.1)[0] and (
+        line := sys.stdin.readline().strip()
+    ):
+        if (
+            line in ["stopOnEntry", "breakpoint:", "clearBreakpoints:"]
+            or line.startswith("breakpoint:")
+            or line.startswith("clearBreakpoints:")
+        ):
+            debug_runtime.handle_command(line)
         else:
-            # No more input available, start execution
+            # Non-setup command, put it back somehow or just ignore for now
+            # For now, we'll assume any other command means "start execution"
             break
-
     # Inject debug hooks into the runtime
     # This is a simplified version - you'll need to integrate this with runtime.py
     try:

@@ -44,7 +44,6 @@ def minify(code: str) -> str:
 # All available runtime functions that can be imported from JS
 # Organized by category, excluding file I/O, sockets, and multiprocessing
 JS_RUNTIME_FUNCTIONS = {
-    # Console I/O
     "print": {
         "signature": "(ptr, len) => {}",
         "implementation": """(ptr, len) => {
@@ -61,7 +60,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32 i32)",
     },
-    # String operations
     "str_concat": {
         "signature": "(ptr1, len1, ptr2, len2) => [ptr, len]",
         "implementation": """(ptr1, len1, ptr2, len2) => {
@@ -102,17 +100,6 @@ JS_RUNTIME_FUNCTIONS = {
             return allocString(s);
         }""",
         "wasm_signature": "(param i64) (result i32 i32)",
-    },
-    "runtime_error": {
-        "signature": "(type_ptr, type_len, msg_ptr, msg_len, line) => {}",
-        "implementation": """(type_ptr, type_len, msg_ptr, msg_len, line) => {
-            const type = type_len > 0 ? readString(type_ptr, type_len) : "RuntimeError";
-            const msg = readString(msg_ptr, msg_len);
-            const error = new Error(`${type}: ${msg} (line ${line})`);
-            console.error(error);
-            throw error;
-        }""",
-        "wasm_signature": "(param i32 i32 i32 i32 i32)",
     },
     "f64_to_str": {
         "signature": "(value) => [ptr, len]",
@@ -227,7 +214,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32 i32 i32 i32) (result i32)",
     },
-    # Math functions
     "sqrt": {
         "signature": "(value) => number",
         "implementation": """(value) => Math.sqrt(value)""",
@@ -253,7 +239,6 @@ JS_RUNTIME_FUNCTIONS = {
         "implementation": """(value) => Math.ceil(value)""",
         "wasm_signature": "(param f64) (result f64)",
     },
-    # List operations
     "list_new": {
         "signature": "() => listId",
         "implementation": """() => {
@@ -321,15 +306,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32) (result i64)",
     },
-    "list_contains": {
-        "signature": "(listId, value) => i32",
-        "implementation": """(listId, value) => {
-            const list = lists.get(listId);
-            if (!list) return 0;
-            return list.includes(value) ? 1 : 0;
-        }""",
-        "wasm_signature": "(param i32 i64) (result i32)",
-    },
     "list_pop": {
         "signature": "(listId) => [listId, value]",
         "implementation": """(listId) => {
@@ -369,7 +345,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32 i64) (result i32)",
     },
-    # Set operations
     "set_new": {
         "signature": "() => setId",
         "implementation": """() => {
@@ -423,7 +398,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32) (result i32 i32)",
     },
-    # Error handling
     "runtime_error": {
         "signature": "(typePtr, typeLen, msgPtr, msgLen, lineNum, colNum) => {}",
         "implementation": """(typePtr, typeLen, msgPtr, msgLen, lineNum, colNum) => {
@@ -451,7 +425,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32)",
     },
-    # Sleep (blocking emulation)
     "sleep": {
         "signature": "(seconds) => {}",
         "implementation": """(seconds) => {
@@ -461,7 +434,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param f64)",
     },
-    # Process control stubs (not supported in browser)
     "fork": {
         "signature": "() => pid",
         "implementation": """() => {
@@ -476,7 +448,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i64) (result i64)",
     },
-    # File I/O stubs (not supported in browser, but satisfy imports)
     "file_open": {
         "signature": "(pathPtr, pathLen, modePtr, modeLen) => i32",
         "implementation": """(pathPtr, pathLen, modePtr, modeLen) => {
@@ -507,7 +478,6 @@ JS_RUNTIME_FUNCTIONS = {
         }""",
         "wasm_signature": "(param i32)",
     },
-    # String reference counting (no-ops in JS due to GC)
     "str_incref": {
         "signature": "(ptr, len) => {}",
         "implementation": """(ptr, len) => {}""",
@@ -1240,15 +1210,13 @@ def generate_js_glue(
     Returns:
         JavaScript module code as a string
     """
-    # Filter functions based on used_imports
-    # Only include functions that are actually imported by the WASM module
-    used_functions = {}
     all_available_functions = {**JS_RUNTIME_FUNCTIONS, **JS_WEB_FUNCTIONS}
 
-    for name in used_imports:
-        if name in all_available_functions:
-            used_functions[name] = all_available_functions[name]
-
+    used_functions = {
+        name: all_available_functions[name]
+        for name in used_imports
+        if name in all_available_functions
+    }
     # Check which categories are used
     uses_dom = any(f.get("category") == "dom" for f in used_functions.values())
     uses_timer = any(f.get("category") == "timer" for f in used_functions.values())
