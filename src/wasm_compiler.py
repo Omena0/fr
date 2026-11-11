@@ -3082,7 +3082,68 @@ class WasmCompiler:
 
         elif opcode == "CMP_EQ":
             # Equality comparison; use f64.eq when operands are floats
-            if len(self.type_stack) >= 2 and (
+            # Check if both operands are strings (ptr,len pairs)
+            is_str_cmp = (len(self.extended_type_stack) >= 2
+                and self.extended_type_stack[-1] == "str"
+                and self.extended_type_stack[-2] == "str")
+            if is_str_cmp:
+                # Stack: ptr1, len1, ptr2, len2 (all i32)
+                # Save all four values to distinct temps
+                self.emit("local.set $temp_i32_3", indent)  # len2
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_2", indent)  # ptr2
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_1", indent)  # len1
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_0", indent)  # ptr1
+                self.type_stack.pop()
+                # Pack string1: (len1<<32) | ptr1
+                self.emit("local.get $temp_i32_1", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.const 32", indent)
+                self.type_stack.append("i64")
+                self.emit("i64.shl", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                self.emit("local.get $temp_i32_0", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.or", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                # Pack string2: (len2<<32) | ptr2
+                self.emit("local.get $temp_i32_3", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.const 32", indent)
+                self.type_stack.append("i64")
+                self.emit("i64.shl", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                self.emit("local.get $temp_i32_2", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.or", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                # Stack: [packed1(i64), packed2(i64)]
+                self.emit("i64.eq", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i32")
+                self._last_i32_source = "bool"
+                # Skip post-processing below
+                _handled = True
+            elif len(self.type_stack) >= 2 and (
                 "f64" in (self.type_stack[-1], self.type_stack[-2])
             ):
                 # Convert operands to f64 if needed
@@ -3255,7 +3316,65 @@ class WasmCompiler:
             self.type_stack.append("i32")
 
         elif opcode == "CMP_NE":
-            if len(self.type_stack) >= 2 and (
+            # Check if both operands are strings (ptr,len pairs)
+            is_str_cmp = (len(self.extended_type_stack) >= 2
+                and self.extended_type_stack[-1] == "str"
+                and self.extended_type_stack[-2] == "str")
+            if is_str_cmp:
+                # Stack: ptr1, len1, ptr2, len2 (all i32)
+                self.emit("local.set $temp_i32_3", indent)  # len2
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_2", indent)  # ptr2
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_1", indent)  # len1
+                self.type_stack.pop()
+                self.emit("local.set $temp_i32_0", indent)  # ptr1
+                self.type_stack.pop()
+                # Pack string1: (len1<<32) | ptr1
+                self.emit("local.get $temp_i32_1", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.const 32", indent)
+                self.type_stack.append("i64")
+                self.emit("i64.shl", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                self.emit("local.get $temp_i32_0", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.or", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                # Pack string2: (len2<<32) | ptr2
+                self.emit("local.get $temp_i32_3", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.const 32", indent)
+                self.type_stack.append("i64")
+                self.emit("i64.shl", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                self.emit("local.get $temp_i32_2", indent)
+                self.type_stack.append("i32")
+                self.emit("i64.extend_i32_u", indent)
+                self.type_stack[-1] = "i64"
+                self.emit("i64.or", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i64")
+                # Stack: [packed1(i64), packed2(i64)]
+                self.emit("i64.ne", indent)
+                self.type_stack.pop()
+                self.type_stack.pop()
+                self.type_stack.append("i32")
+                self._last_i32_source = "bool"
+            elif len(self.type_stack) >= 2 and (
                 "f64" in (self.type_stack[-1], self.type_stack[-2])
             ):
                 if self.type_stack[-1] == "i64":

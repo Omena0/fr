@@ -444,6 +444,34 @@ def dce(func: Function) -> bool:
     return changed
 
 
+def copy_propagate(func: Function) -> bool:
+    """Replace uses of COPY instruction results with the source operand.
+
+    Eliminates redundant copy instructions so the register allocator sees
+    the source value directly instead of a separate live range, removing
+    the mov instructions that would otherwise be emitted for the copy.
+    """
+    changed = False
+    for block in func.blocks:
+        i = 0
+        while i < len(block.instructions):
+            inst = block.instructions[i]
+            if inst.op == Op.COPY and inst.result and inst.operands:
+                src = inst.operands[0]
+                dst = inst.result
+                # Replace all uses of dst with src
+                for user in list(dst.uses):
+                    user.replace_operand(dst, src)
+                inst.remove_from_uses()
+                block.instructions.pop(i)
+                changed = True
+            else:
+                i += 1
+    if changed:
+        rebuild_uses(func)
+    return changed
+
+
 def _is_dead(inst: Instruction) -> bool:
     """Is this instruction dead (unused result, no side effects)?"""
     if inst.has_side_effects:
@@ -1688,6 +1716,7 @@ def run_passes(
                 continue
 
             changed |= sccp(func)
+            changed |= copy_propagate(func)
             changed |= algebraic_simplify(func)
             changed |= simplify_branches(func)
             if level >= 2:

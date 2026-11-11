@@ -264,9 +264,15 @@ class CodeGen:
 
     # ── Function emission ───────────────────────────────────────
 
-    @staticmethod
-    def _managed_type(typ) -> bool:
-        return isinstance(typ, (StructType, ListType, SetType))
+    def _managed_type(self, typ) -> bool:
+        if isinstance(typ, (ListType, SetType)):
+            return True
+        if isinstance(typ, StructType):
+            # A struct is managed only if it contains at least one managed field.
+            # Structs with only primitive fields (float, int, bool) are unmanaged
+            # and can use the fast path (direct memory store).
+            return any(self._managed_type(ft) for ft in typ.field_types)
+        return False
 
     @staticmethod
     def _elem_code(typ) -> int:
@@ -688,7 +694,9 @@ class CodeGen:
 
     # ── Call-site analysis: caller-saved registers ────────────────
 
-    # Ops that emit runtime/library calls
+    # Ops that emit runtime/library calls.
+    # NOTE: LIST_GET, LIST_SET, STORE_FIELD, and SQRT are NOT here because
+    # they have inline fast paths that do not call anything.
     _CALL_OPS = frozenset(
         {
             Op.CALL,
@@ -698,15 +706,12 @@ class CodeGen:
             Op.PRINTLN,
             Op.INPUT,
             Op.ALLOC_LIST,
-            Op.LIST_GET,
-            Op.LIST_SET,
             Op.LIST_APPEND,
             Op.ALLOC_STRUCT,
             Op.ALLOCA,
             Op.LIST_ELEM_ADDR,
             Op.STR_CONCAT,
             Op.TO_STR,
-            Op.STORE_FIELD,
             Op.STORE_GLOBAL,
             Op.PTR_STORE,
             Op.SIN,
@@ -1347,22 +1352,35 @@ class CodeGen:
                 line = inst.source_line or 0
                 slow = self._new_label("list_get_slow")
                 done = self._new_label("list_get_done")
-                # Stage operands so loading scratch registers never clobbers
-                # a list/index that happened to live in r10/r11/rax.
-                self._emit("    sub rsp, 16")
-                if a.startswith("["):
-                    self._emit(f"    mov rax, {a}")
-                    self._emit("    mov [rsp], rax")
+                # Only stage operands to stack if the index (b) lives in a
+                # scratch register (r10/r11) that the fast path clobbers.
+                # If b is elsewhere, we can use r10/r11/rax directly without
+                # saving b first.
+                needs_staging = b in ("r10", "r11")
+                if needs_staging:
+                    self._emit("    sub rsp, 16")
+                    if a.startswith("["):
+                        self._emit(f"    mov rax, {a}")
+                        self._emit("    mov [rsp], rax")
+                    else:
+                        self._emit(f"    mov [rsp], {a}")
+                    if b.startswith("["):
+                        self._emit(f"    mov rax, {b}")
+                        self._emit("    mov [rsp + 8], rax")
+                    else:
+                        self._emit(f"    mov [rsp + 8], {b}")
+                # Load list pointer into r11
+                if needs_staging:
+                    self._emit("    mov r11, [rsp]")
                 else:
-                    self._emit(f"    mov [rsp], {a}")
-                if b.startswith("["):
-                    self._emit(f"    mov rax, {b}")
-                    self._emit("    mov [rsp + 8], rax")
-                else:
-                    self._emit(f"    mov [rsp + 8], {b}")
-                self._emit("    mov r11, [rsp]")
+                    self._emit(f"    mov r11, {a}")
+                # Load list length into r10
                 self._emit("    mov r10, [r11 + 8]")
-                self._emit("    mov rax, [rsp + 8]")
+                # Load index into rax
+                if needs_staging:
+                    self._emit("    mov rax, [rsp + 8]")
+                else:
+                    self._emit(f"    mov rax, {b}")
                 self._emit("    test rax, rax")
                 self._emit(f"    js {slow}")
                 self._emit("    cmp rax, r10")
@@ -1375,11 +1393,16 @@ class CodeGen:
                     self._emit(f"    mov {dst}, r10")
                 else:
                     self._emit(f"    mov {dst}, [r11 + rax * 8]")
-                self._emit("    add rsp, 16")
+                if needs_staging:
+                    self._emit("    add rsp, 16")
                 self._emit(f"    jmp {done}")
                 self._emit(f"{slow}:")
-                self._emit("    mov rdi, [rsp]")
-                self._emit("    mov rsi, [rsp + 8]")
+                if needs_staging:
+                    self._emit("    mov rdi, [rsp]")
+                    self._emit("    mov rsi, [rsp + 8]")
+                else:
+                    self._emit(f"    mov rdi, {a}")
+                    self._emit(f"    mov rsi, {b}")
                 self._emit(f"    mov rdx, {line}")
                 self._emit_call_aligned("runtime_list_get_int_at")
                 if dst.startswith("xmm"):
@@ -1388,7 +1411,8 @@ class CodeGen:
                     self._emit(f"    mov {dst}, rax")
                 elif dst != "rax":
                     self._emit(f"    mov {dst}, rax")
-                self._emit("    add rsp, 16")
+                if needs_staging:
+                    self._emit("    add rsp, 16")
                 self._emit(f"{done}:")
             return
 
@@ -1400,6 +1424,60 @@ class CodeGen:
             managed = len(inst.operands) > 2 and self._managed_type(
                 inst.operands[2].type
             )
+            if not managed:
+                # Fast path: inline bounds check and store.
+                # List layout: [0] = element array pointer, [8] = length.
+                slow = self._new_label("list_set_slow")
+                done = self._new_label("list_set_done")
+                # Stage operands so scratch registers never clobber live values.
+                self._emit("    sub rsp, 24")
+                if a.startswith("["):
+                    self._emit(f"    mov rax, {a}")
+                    self._emit("    mov [rsp + 0], rax")
+                else:
+                    self._emit(f"    mov [rsp + 0], {a}")
+                if b.startswith("["):
+                    self._emit(f"    mov rax, {b}")
+                    self._emit("    mov [rsp + 8], rax")
+                else:
+                    self._emit(f"    mov [rsp + 8], {b}")
+                if c.startswith("["):
+                    self._emit(f"    mov rax, {c}")
+                    self._emit("    mov [rsp + 16], rax")
+                elif c.startswith("xmm"):
+                    self._emit(f"    movq rax, {c}")
+                    self._emit("    mov [rsp + 16], rax")
+                else:
+                    self._emit(f"    mov [rsp + 16], {c}")
+                self._emit("    mov r11, [rsp + 0]")  # list pointer
+                self._emit("    mov r10, [rsp + 8]")  # index
+                self._emit("    mov rdx, [rsp + 16]") # value
+                # Bounds check
+                self._emit("    mov rax, [r11 + 8]")  # list length
+                self._emit("    test r10, r10")
+                self._emit(f"    js {slow}")
+                self._emit("    cmp r10, rax")
+                self._emit(f"    jae {slow}")
+                # Store
+                self._emit("    mov r11, [r11]")       # element array
+                self._emit(f"    mov [r11 + r10 * 8], rdx")
+                self._emit("    add rsp, 24")
+                self._emit(f"    jmp {done}")
+                self._emit(f"{slow}:")
+                self._emit("    mov rdi, [rsp + 0]")
+                self._emit("    mov rsi, [rsp + 8]")
+                if c.startswith("xmm"):
+                    self._emit(f"    movq rdx, {c}")
+                elif c.startswith("["):
+                    self._emit(f"    mov rax, {c}")
+                    self._emit("    mov rdx, rax")
+                else:
+                    self._emit(f"    mov rdx, {c}")
+                self._emit(f"    mov rcx, {line}")
+                self._emit_call_aligned("runtime_list_set_int_at")
+                self._emit("    add rsp, 24")
+                self._emit(f"{done}:")
+                return
             if a != "rdi":
                 self._emit(f"    mov rdi, {a}")
             if b != "rsi":
@@ -1880,6 +1958,8 @@ class CodeGen:
         a = self._loc(inst.operands[0], alloc)
         b = self._loc(inst.operands[1], alloc)
 
+        commutative = mnemonic in ("addsd", "mulsd")
+
         # Ensure operands are in XMM registers
         a_xmm = a if a.startswith("xmm") else "xmm14"
         b_xmm = b if b.startswith("xmm") else "xmm15"
@@ -1889,9 +1969,13 @@ class CodeGen:
         if not b.startswith("xmm"):
             self._emit(f"    movq {b_xmm}, {b}")
 
-        if dst.startswith("xmm"):
-            if dst != a_xmm:
-                self._emit(f"    movsd {dst}, {a_xmm}")
+        if dst == b_xmm and commutative:
+            # Result in b's register: b = b op a = a op b (commutative)
+            self._emit(f"    {mnemonic} {b_xmm}, {a_xmm}")
+        elif dst == a_xmm:
+            self._emit(f"    {mnemonic} {a_xmm}, {b_xmm}")
+        elif dst.startswith("xmm"):
+            self._emit(f"    movsd {dst}, {a_xmm}")
             self._emit(f"    {mnemonic} {dst}, {b_xmm}")
         else:
             self._emit(f"    movsd xmm14, {a_xmm}")
