@@ -118,6 +118,23 @@ class CodeGen:
         self._format_counter = 0
         self._format_labels: dict[str, str] = {}
 
+    def _is_float_reg(self, reg: str) -> bool:
+        """Check if a register name is an XMM or YMM register."""
+        return reg.startswith("xmm") or reg.startswith("ymm")
+
+    def _float_scratch(self, reg: str) -> str:
+        """Return an appropriate scratch register (xmm14/ymm14 or xmm15/ymm15)
+        matching the register class of the given register."""
+        if reg.startswith("ymm"):
+            return "ymm14"
+        return "xmm14"
+
+    def _float_scratch2(self, reg: str) -> str:
+        """Return a second scratch register matching the register class."""
+        if reg.startswith("ymm"):
+            return "ymm15"
+        return "xmm15"
+
     def _asm_func_name(self, name: str) -> str:
         """Return the assembly label for a user function.
 
@@ -506,7 +523,7 @@ class CodeGen:
 
         # Preserve the initial accumulator value.
         if is_float:
-            if acc_loc.startswith("xmm"):
+            if self._is_float_reg(acc_loc):
                 self._emit(f"    movsd [rsp + 544], {acc_loc}")
             else:
                 self._emit(f"    movq xmm15, {acc_loc}" if acc_loc.startswith("[") else f"    movq xmm15, {acc_loc}")
@@ -585,7 +602,7 @@ class CodeGen:
         self._emit("    mov rdx, [rsp + 536]")
         self._emit("    vzeroupper")
         if is_float:
-            if acc_loc.startswith("xmm"):
+            if self._is_float_reg(acc_loc):
                 self._emit(f"    movsd {acc_loc}, [rsp + 552]")
             elif acc_loc.startswith("["):
                 self._emit("    movsd xmm15, [rsp + 552]")
@@ -608,6 +625,46 @@ class CodeGen:
 
         self._caller_save_map: dict[int, list[str]] = {}
         self._compute_caller_saves(func, alloc)
+
+        # ── Direct field access analysis ──
+        # Find LIST_GET instructions whose result is only used by LOAD_FIELD
+        # with constant field indices. These can be emitted as direct pointer
+        # access instead of runtime calls.
+        self._direct_field_map: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+        # list_get_inst_id -> (elem_size, [(field_offset, load_inst_id), ...])
+        for block in func.blocks:
+            for inst in block.instructions:
+                if inst.op != Op.LIST_GET or not inst.result:
+                    continue
+                lst = inst.operands[0] if inst.operands else None
+                if not isinstance(lst, Value):
+                    continue
+                lst_type = lst.type
+                elem_size = None
+                struct_type = None
+                if isinstance(lst_type, ListType):
+                    elem_t = lst_type.elem_type
+                    if isinstance(elem_t, StructType):
+                        elem_size = elem_t.size
+                        struct_type = elem_t
+                if elem_size is None:
+                    continue
+                # Check all uses are LOAD_FIELD with constant field index
+                field_users = []
+                all_simple = True
+                for user in list(inst.result.uses):
+                    if user.op == Op.LOAD_FIELD and user.imm_int is not None:
+                        field_users.append((user.imm_int, user.result))
+                    else:
+                        all_simple = False
+                        break
+                if all_simple and field_users:
+                    self._direct_field_map[id(inst)] = (elem_size, field_users)
+
+        self._direct_array_ptr: str | None = None
+        self._direct_array_index: str | None = None
+        self._direct_elem_size: int = 0
+        self._emitted_load_fields: set[int] = set()
 
         callee_save_size = len(alloc.used_callee_saved) * 8
         needs_scope = self._func_needs_scope(func)
@@ -670,6 +727,48 @@ class CodeGen:
         if needs_scope:
             self._emit_call_aligned("runtime_scope_push")
 
+        # ── Load function parameters from ABI registers ──
+        # Parameters are assigned registers by the allocator (e.g., param 0 → r10),
+        # but their values arrive in ABI registers (e.g., rdi). Emit moves from
+        # ABI registers to assigned registers at function entry.
+        int_arg_idx = 0
+        float_arg_idx = 0
+        for param in func.params:
+            assigned_reg = alloc.reg_map.get(param.id)
+            if assigned_reg is None:
+                continue
+            if is_float_type(param.type):
+                if float_arg_idx < len(FLOAT_ARG_REGS):
+                    abi_reg = FLOAT_ARG_REGS[float_arg_idx]
+                    float_arg_idx += 1
+                else:
+                    continue  # Too many float args; shouldn't happen
+            else:
+                if int_arg_idx < len(ARG_REGS):
+                    abi_reg = ARG_REGS[int_arg_idx]
+                    int_arg_idx += 1
+                else:
+                    continue  # Too many int args; shouldn't happen
+            if assigned_reg != abi_reg:
+                if assigned_reg.startswith("xmm") or assigned_reg.startswith("ymm"):
+                    if abi_reg.startswith("xmm") or abi_reg.startswith("ymm"):
+                        self._emit(f"    movq {assigned_reg}, {abi_reg}")
+                    else:
+                        # Integer arg in float register - move via memory
+                        self._emit(f"    mov rax, {abi_reg}")
+                        self._emit(f"    movq {assigned_reg}, rax")
+                else:
+                    if abi_reg.startswith("xmm") or abi_reg.startswith("ymm"):
+                        # Float arg in integer register - move via memory
+                        self._emit(f"    movq rax, {abi_reg}")
+                        self._emit(f"    mov {assigned_reg}, rax")
+                    else:
+                        self._emit(f"    mov {assigned_reg}, {abi_reg}")
+        # Load parameter 0 into r10 at function entry
+        self._emit("    mov r10, rdi")
+        # Load parameter 0 into r10 at function entry (rdi holds arg 0, r10 is used at entry)
+        self._emit("    mov r10, rdi")
+
         lookup_ret = None
         if func.lookup_table and func.params:
             lookup_ret = self._emit_lookup_prelude(func, alloc)
@@ -695,8 +794,7 @@ class CodeGen:
     # ── Call-site analysis: caller-saved registers ────────────────
 
     # Ops that emit runtime/library calls.
-    # NOTE: LIST_GET, LIST_SET, STORE_FIELD, and SQRT are NOT here because
-    # they have inline fast paths that do not call anything.
+    # NOTE: PTR_STORE is NOT here - it's a simple memory store, not a call.
     _CALL_OPS = frozenset(
         {
             Op.CALL,
@@ -713,7 +811,6 @@ class CodeGen:
             Op.STR_CONCAT,
             Op.TO_STR,
             Op.STORE_GLOBAL,
-            Op.PTR_STORE,
             Op.SIN,
             Op.COS,
             Op.TAN,
@@ -799,8 +896,8 @@ class CodeGen:
                 self._get_caller_saves(inst) if inst.op in self._CALL_OPS else []
             )
             save_bytes = 0
-            gprs = [r for r in save_regs if not r.startswith("xmm")]
-            xmms = [r for r in save_regs if r.startswith("xmm")]
+            gprs = [r for r in save_regs if not self._is_float_reg(r)]
+            xmms = [r for r in save_regs if self._is_float_reg(r)]
             save_bytes = len(gprs) * 8 + len(xmms) * 8
             save_bytes = (save_bytes + 15) & ~15
             if save_bytes:
@@ -857,7 +954,7 @@ class CodeGen:
         if op == Op.CONST_FLOAT:
             dst = self._loc(inst.result, alloc)
             label = self._get_float_label(inst.imm_float)
-            if dst.startswith("xmm"):
+            if self._is_float_reg(dst):
                 self._emit(f"    movsd {dst}, [rip + {label}]")
             else:
                 # Float in GPR — move bits
@@ -968,12 +1065,12 @@ class CodeGen:
             if is_float_type(inst.result.type) or (
                 inst.operands and is_float_type(inst.operands[0].type)
             ):
-                a_xmm = a if a.startswith("xmm") else "xmm14"
-                if not a.startswith("xmm"):
+                a_xmm = a if self._is_float_reg(a) else "xmm14"
+                if not self._is_float_reg(a):
                     self._emit(f"    movq {a_xmm}, {a}")
                 self._emit("    xorpd xmm15, xmm15")
                 self._emit(f"    subsd xmm15, {a_xmm}")
-                if dst.startswith("xmm"):
+                if self._is_float_reg(dst):
                     self._emit(f"    movsd {dst}, xmm15")
                 else:
                     self._emit(f"    movq {dst}, xmm15")
@@ -1000,7 +1097,7 @@ class CodeGen:
                 b = self._loc(inst.operands[1], alloc)
                 skip_label = self._new_label("fdiv_ok")
                 zero_label = self._get_float_label(0.0)
-                if b.startswith("xmm"):
+                if self._is_float_reg(b):
                     self._emit(f"    ucomisd {b}, [rip + {zero_label}]")
                 else:
                     self._emit(f"    movq xmm14, {b}")
@@ -1025,6 +1122,50 @@ class CodeGen:
             self._emit(f"    mov r11, 0x8000000000000000")
             self._emit(f"    movq xmm15, r11")
             self._emit(f"    xorpd {dst}, xmm15")
+            return
+
+        # ── Packed (SIMD) float arithmetic ──
+        if op == Op.VFMOVUPD:
+            dst = self._loc(inst.result, alloc)
+            src = self._loc(inst.operands[0], alloc)
+            if src.startswith("["):
+                self._emit(f"    vmovupd {dst}, {src}")
+            else:
+                self._emit(f"    mov r11, {src}")
+                self._emit(f"    vmovupd {dst}, [r11]")
+            return
+        if op == Op.VFMMULPD:
+            dst = self._loc(inst.result, alloc)
+            a = self._loc(inst.operands[0], alloc)
+            b = self._loc(inst.operands[1], alloc)
+            if b.startswith("["):
+                self._emit(f"    vmulpd {dst}, {a}, {b}")
+            else:
+                self._emit(f"    vmulpd {dst}, {a}, {b}")
+            return
+        if op == Op.VFMADDPD:
+            dst = self._loc(inst.result, alloc)
+            a = self._loc(inst.operands[0], alloc)
+            b = self._loc(inst.operands[1], alloc)
+            if b.startswith("["):
+                self._emit(f"    vaddpd {dst}, {a}, {b}")
+            else:
+                self._emit(f"    vaddpd {dst}, {a}, {b}")
+            return
+        if op == Op.VFMSUBPD:
+            dst = self._loc(inst.result, alloc)
+            a = self._loc(inst.operands[0], alloc)
+            b = self._loc(inst.operands[1], alloc)
+            if b.startswith("["):
+                self._emit(f"    vsubpd {dst}, {a}, {b}")
+            else:
+                self._emit(f"    vsubpd {dst}, {a}, {b}")
+            return
+        if op == Op.VFHDADDPD:
+            dst = self._loc(inst.result, alloc)
+            a = self._loc(inst.operands[0], alloc)
+            b = self._loc(inst.operands[1], alloc)
+            self._emit(f"    vhaddpd {dst}, {a}, {b}")
             return
 
         # ── Shift / Bitwise ──
@@ -1082,14 +1223,14 @@ class CodeGen:
         if op == Op.INT_TO_FLOAT:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
-            if a.startswith("xmm"):
+            if self._is_float_reg(a):
                 # Already a float — just move
                 if dst != a:
-                    if dst.startswith("xmm"):
+                    if self._is_float_reg(dst):
                         self._emit(f"    movsd {dst}, {a}")
                     else:
                         self._emit(f"    movq {dst}, {a}")
-            elif dst.startswith("xmm"):
+            elif self._is_float_reg(dst):
                 self._emit(f"    cvtsi2sd {dst}, {a}")
             else:
                 self._emit(f"    cvtsi2sd xmm15, {a}")
@@ -1099,7 +1240,7 @@ class CodeGen:
         if op == Op.FLOAT_TO_INT:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
-            if a.startswith("xmm"):
+            if self._is_float_reg(a):
                 self._emit(f"    cvttsd2si {dst}, {a}")
             else:
                 self._emit(f"    movq xmm15, {a}")
@@ -1144,6 +1285,29 @@ class CodeGen:
             return
 
         if op == Op.LOAD_FIELD:
+            # If this LOAD_FIELD's source is a LIST_GET with direct field
+            # access, emit a direct load: movsd dst, [r11 + rax * scale + offset]
+            src_inst = inst.operands[0].defining_inst if inst.operands and isinstance(inst.operands[0], Value) else None
+            if src_inst and src_inst.op == Op.LIST_GET and id(src_inst) in self._direct_field_map:
+                elem_size, field_users = self._direct_field_map[id(src_inst)]
+                # Find our field offset
+                my_offset = None
+                for fo, lr in field_users:
+                    if lr is inst.result:
+                        my_offset = fo
+                        break
+                if my_offset is not None:
+                    dst = self._loc(inst.result, alloc)
+                    array_ptr = self._direct_array_ptr
+                    array_index = self._direct_array_index
+                    self._emit(
+                        f"    movsd {dst}, [{array_ptr} + {array_index} + {my_offset}]"
+                    )
+                    return
+            # If this LOAD_FIELD was already emitted as part of direct field
+            # access from LIST_GET, skip it.
+            if id(inst) in self._emitted_load_fields:
+                return
             dst = self._loc(inst.result, alloc)
             base = self._loc(inst.operands[0], alloc)
             offset = (inst.imm_int or 0) * 8
@@ -1152,7 +1316,7 @@ class CodeGen:
                 base_ref = "r11"
             else:
                 base_ref = base
-            if dst.startswith("xmm"):
+            if self._is_float_reg(dst):
                 if dst.startswith("["):
                     self._emit(f"    movsd xmm15, [{base_ref} + {offset}]")
                     self._emit(f"    movsd {dst}, xmm15")
@@ -1191,7 +1355,7 @@ class CodeGen:
                 base_ref = "r11"
             else:
                 base_ref = base
-            if val.startswith("xmm"):
+            if self._is_float_reg(val):
                 if val.startswith("["):
                     self._emit(f"    movsd xmm15, {val}")
                     self._emit(f"    movsd [{base_ref} + {offset}], xmm15")
@@ -1229,7 +1393,7 @@ class CodeGen:
                 ptr_ref = "r11"
             else:
                 ptr_ref = ptr
-            if dst.startswith("xmm"):
+            if self._is_float_reg(dst):
                 if dst.startswith("["):
                     self._emit(f"    movsd xmm15, [{ptr_ref}]")
                     self._emit(f"    movsd {dst}, xmm15")
@@ -1263,7 +1427,7 @@ class CodeGen:
                 ptr_ref = "r11"
             else:
                 ptr_ref = ptr
-            if val.startswith("xmm"):
+            if self._is_float_reg(val):
                 if val.startswith("["):
                     self._emit(f"    movsd xmm15, {val}")
                     self._emit(f"    movsd [{ptr_ref}], xmm15")
@@ -1311,7 +1475,7 @@ class CodeGen:
                 self._emit(f"    sub rsp, {aligned_size}")
                 for i, v in enumerate(inst.operands):
                     loc = self._loc(v, alloc)
-                    if loc.startswith("xmm"):
+                    if self._is_float_reg(loc):
                         self._emit(f"    movsd [rsp + {i * 8}], {loc}")
                     else:
                         self._emit(f"    mov [rsp + {i * 8}], {loc}")
@@ -1346,74 +1510,132 @@ class CodeGen:
             if list_type == IRType.STRING:
                 self._emit_runtime_call("runtime_str_get_char", inst, alloc, 2)
             else:
+                # Check if this LIST_GET is eligible for direct field access
+                direct_info = self._direct_field_map.get(id(inst))
                 dst = self._loc(inst.result, alloc) if inst.result else "rax"
-                a = self._loc(inst.operands[0], alloc)
-                b = self._loc(inst.operands[1], alloc)
-                line = inst.source_line or 0
-                slow = self._new_label("list_get_slow")
-                done = self._new_label("list_get_done")
-                # Only stage operands to stack if the index (b) lives in a
-                # scratch register (r10/r11) that the fast path clobbers.
-                # If b is elsewhere, we can use r10/r11/rax directly without
-                # saving b first.
-                needs_staging = b in ("r10", "r11")
-                if needs_staging:
-                    self._emit("    sub rsp, 16")
+                if direct_info:
+                    elem_size, field_users = direct_info
+                    a = self._loc(inst.operands[0], alloc)
+                    b = self._loc(inst.operands[1], alloc)
+                    line = inst.source_line or 0
+                    slow = self._new_label("list_get_slow")
+                    done = self._new_label("list_get_done")
+                    # Direct field access: bounds check once, then each
+                    # LOAD_FIELD emits its own direct load.
+                    # No stack staging needed.
+                    # Load list pointer into r11
                     if a.startswith("["):
                         self._emit(f"    mov rax, {a}")
-                        self._emit("    mov [rsp], rax")
+                        self._emit("    mov r11, rax")
                     else:
-                        self._emit(f"    mov [rsp], {a}")
+                        self._emit(f"    mov r11, {a}")
+                    # Load list length into r10
+                    self._emit("    mov r10, [r11 + 8]")
+                    # Load index into rax
                     if b.startswith("["):
                         self._emit(f"    mov rax, {b}")
-                        self._emit("    mov [rsp + 8], rax")
                     else:
-                        self._emit(f"    mov [rsp + 8], {b}")
-                # Load list pointer into r11
-                if needs_staging:
-                    self._emit("    mov r11, [rsp]")
-                else:
-                    self._emit(f"    mov r11, {a}")
-                # Load list length into r10
-                self._emit("    mov r10, [r11 + 8]")
-                # Load index into rax
-                if needs_staging:
-                    self._emit("    mov rax, [rsp + 8]")
-                else:
-                    self._emit(f"    mov rax, {b}")
-                self._emit("    test rax, rax")
-                self._emit(f"    js {slow}")
-                self._emit("    cmp rax, r10")
-                self._emit(f"    jae {slow}")
-                self._emit("    mov r11, [r11]")
-                if dst.startswith("xmm"):
-                    self._emit(f"    movq {dst}, [r11 + rax * 8]")
-                elif dst.startswith("["):
-                    self._emit(f"    mov r10, [r11 + rax * 8]")
-                    self._emit(f"    mov {dst}, r10")
-                else:
-                    self._emit(f"    mov {dst}, [r11 + rax * 8]")
-                if needs_staging:
-                    self._emit("    add rsp, 16")
-                self._emit(f"    jmp {done}")
-                self._emit(f"{slow}:")
-                if needs_staging:
-                    self._emit("    mov rdi, [rsp]")
-                    self._emit("    mov rsi, [rsp + 8]")
-                else:
+                        self._emit(f"    mov rax, {b}")
+                    self._emit("    test rax, rax")
+                    self._emit(f"    js {slow}")
+                    self._emit("    cmp rax, r10")
+                    self._emit(f"    jae {slow}")
+                    # Load array pointer into r11
+                    self._emit("    mov r11, [r11]")
+                    # Pre-multiply index by element size (scale must be 1,2,4,8)
+                    self._emit(f"    imul rax, rax, {elem_size}")
+                    # Load the element: dst = [array + index * elem_size]
+                    self._emit(f"    mov {dst}, [r11 + rax]")
+                    # Save for subsequent LOAD_FIELD instructions
+                    self._direct_array_ptr = "r11"
+                    self._direct_array_index = "rax"
+                    self._direct_elem_size = elem_size
+                    self._emit(f"    jmp {done}")
+                    self._emit(f"{slow}:")
                     self._emit(f"    mov rdi, {a}")
                     self._emit(f"    mov rsi, {b}")
-                self._emit(f"    mov rdx, {line}")
-                self._emit_call_aligned("runtime_list_get_int_at")
-                if dst.startswith("xmm"):
-                    self._emit(f"    movq {dst}, rax")
-                elif dst.startswith("["):
+                    self._emit(f"    mov rdx, {line}")
+                    self._emit_call_aligned("runtime_list_get_int_at")
+                    # Slow path: runtime returns struct pointer in rax.
+                    # Move to LIST_GET's dst; LOAD_FIELDs will handle it normally.
                     self._emit(f"    mov {dst}, rax")
-                elif dst != "rax":
-                    self._emit(f"    mov {dst}, rax")
-                if needs_staging:
-                    self._emit("    add rsp, 16")
-                self._emit(f"{done}:")
+                    self._emit(f"{done}:")
+                    return
+                else:
+                    a = self._loc(inst.operands[0], alloc)
+                    b = self._loc(inst.operands[1], alloc)
+                    line = inst.source_line or 0
+                    slow = self._new_label("list_get_slow")
+                    done = self._new_label("list_get_done")
+                    # Only stage operands to stack if the index (b) lives in a
+                    # scratch register (r10/r11) that the fast path clobbers.
+                    needs_staging = b in ("r10", "r11")
+                    if needs_staging:
+                        self._emit("    sub rsp, 16")
+                        if a.startswith("["):
+                            self._emit(f"    mov rax, {a}")
+                            self._emit("    mov [rsp], rax")
+                        else:
+                            self._emit(f"    mov [rsp], {a}")
+                        if b.startswith("["):
+                            self._emit(f"    mov rax, {b}")
+                            self._emit("    mov [rsp + 8], rax")
+                        else:
+                            self._emit(f"    mov [rsp + 8], {b}")
+                    # Load list pointer into r11
+                    if needs_staging:
+                        self._emit("    mov r11, [rsp]")
+                    else:
+                        self._emit(f"    mov r11, {a}")
+                    # Load list length into r10
+                    self._emit("    mov r10, [r11 + 8]")
+                    # Load index into rax
+                    if needs_staging:
+                        self._emit("    mov rax, [rsp + 8]")
+                    else:
+                        self._emit(f"    mov rax, {b}")
+                    self._emit("    test rax, rax")
+                    self._emit(f"    js {slow}")
+                    self._emit("    cmp rax, r10")
+                    self._emit(f"    jae {slow}")
+                    # Load array pointer into r11
+                    self._emit("    mov r11, [r11]")
+                    # Pre-multiply index by element size (scale must be 1,2,4,8)
+                    self._emit(f"    imul rax, rax, {elem_size}")
+                    # Load the element: dst = [array + index * elem_size]
+                    self._emit(f"    mov {dst}, [r11 + rax]")
+                    # Pre-multiply index by element size (scale must be 1,2,4,8)
+                    self._emit(f"    imul rax, rax, {elem_size}")
+                    # Load the element: dst = [array + index * elem_size]
+                    self._emit(f"    mov {dst}, [r11 + rax]")
+                    if self._is_float_reg(dst):
+                        self._emit(f"    movq {dst}, [r11 + rax * 8]")
+                    elif dst.startswith("["):
+                        self._emit(f"    mov r10, [r11 + rax * 8]")
+                        self._emit(f"    mov {dst}, r10")
+                    else:
+                        self._emit(f"    mov {dst}, [r11 + rax * 8]")
+                    if needs_staging:
+                        self._emit("    add rsp, 16")
+                    self._emit(f"    jmp {done}")
+                    self._emit(f"{slow}:")
+                    if needs_staging:
+                        self._emit("    mov rdi, [rsp]")
+                        self._emit("    mov rsi, [rsp + 8]")
+                    else:
+                        self._emit(f"    mov rdi, {a}")
+                        self._emit(f"    mov rsi, {b}")
+                    self._emit(f"    mov rdx, {line}")
+                    self._emit_call_aligned("runtime_list_get_int_at")
+                    if self._is_float_reg(dst):
+                        self._emit(f"    movq {dst}, rax")
+                    elif dst.startswith("["):
+                        self._emit(f"    mov {dst}, rax")
+                    elif dst != "rax":
+                        self._emit(f"    mov {dst}, rax")
+                    if needs_staging:
+                        self._emit("    add rsp, 16")
+                    self._emit(f"{done}:")
             return
 
         if op == Op.LIST_SET:
@@ -1427,31 +1649,59 @@ class CodeGen:
             if not managed:
                 # Fast path: inline bounds check and store.
                 # List layout: [0] = element array pointer, [8] = length.
+                # Scratch registers: r11 (list ptr), r10 (length),
+                # rax (index), rdx (value). Clobbered in order:
+                #   r11 <- a, r10 <- len, rax <- b, rdx <- c
+                # Only save an operand if it lives in a register that gets
+                # clobbered before we read it: b in {r10, r11}, c in {r10, r11, rax}.
                 slow = self._new_label("list_set_slow")
                 done = self._new_label("list_set_done")
-                # Stage operands so scratch registers never clobber live values.
-                self._emit("    sub rsp, 24")
+                save_b = b in ("r10", "r11")
+                save_c = c in ("r10", "r11", "rax")
+                needs_staging = save_b or save_c
+
+                if needs_staging:
+                    self._emit("    sub rsp, 16")
+                    off = 0
+                    if save_b:
+                        self._emit(f"    mov [rsp + {off}], {b}")
+                        off += 8
+                    if save_c:
+                        if self._is_float_reg(c):
+                            self._emit(f"    movq [rsp + {off}], {c}")
+                        else:
+                            self._emit(f"    mov [rsp + {off}], {c}")
+                        off += 8
+
+                # Load list pointer into r11
                 if a.startswith("["):
                     self._emit(f"    mov rax, {a}")
-                    self._emit("    mov [rsp + 0], rax")
+                    self._emit("    mov r11, rax")
                 else:
-                    self._emit(f"    mov [rsp + 0], {a}")
+                    self._emit(f"    mov r11, {a}")
+                # Load list length into r10
+                self._emit("    mov r10, [r11 + 8]")
+                # Load index into rax
                 if b.startswith("["):
                     self._emit(f"    mov rax, {b}")
-                    self._emit("    mov [rsp + 8], rax")
+                elif save_b:
+                    self._emit(f"    mov rax, [rsp]")
                 else:
-                    self._emit(f"    mov [rsp + 8], {b}")
+                    self._emit(f"    mov rax, {b}")
+                # Load value into rdx
                 if c.startswith("["):
                     self._emit(f"    mov rax, {c}")
-                    self._emit("    mov [rsp + 16], rax")
-                elif c.startswith("xmm"):
-                    self._emit(f"    movq rax, {c}")
-                    self._emit("    mov [rsp + 16], rax")
+                    self._emit("    movq rdx, rax")
+                elif self._is_float_reg(c):
+                    if save_c:
+                        self._emit(f"    movq rdx, [rsp + {8 if save_b else 0}]")
+                    else:
+                        self._emit(f"    movq rdx, {c}")
                 else:
-                    self._emit(f"    mov [rsp + 16], {c}")
-                self._emit("    mov r11, [rsp + 0]")  # list pointer
-                self._emit("    mov r10, [rsp + 8]")  # index
-                self._emit("    mov rdx, [rsp + 16]") # value
+                    if save_c:
+                        self._emit(f"    mov rdx, [rsp + {8 if save_b else 0}]")
+                    else:
+                        self._emit(f"    mov rdx, {c}")
                 # Bounds check
                 self._emit("    mov rax, [r11 + 8]")  # list length
                 self._emit("    test r10, r10")
@@ -1461,12 +1711,13 @@ class CodeGen:
                 # Store
                 self._emit("    mov r11, [r11]")       # element array
                 self._emit(f"    mov [r11 + r10 * 8], rdx")
-                self._emit("    add rsp, 24")
+                if needs_staging:
+                    self._emit("    add rsp, 16")
                 self._emit(f"    jmp {done}")
                 self._emit(f"{slow}:")
-                self._emit("    mov rdi, [rsp + 0]")
-                self._emit("    mov rsi, [rsp + 8]")
-                if c.startswith("xmm"):
+                self._emit(f"    mov rdi, {a}")
+                self._emit(f"    mov rsi, {b}")
+                if self._is_float_reg(c):
                     self._emit(f"    movq rdx, {c}")
                 elif c.startswith("["):
                     self._emit(f"    mov rax, {c}")
@@ -1475,7 +1726,6 @@ class CodeGen:
                     self._emit(f"    mov rdx, {c}")
                 self._emit(f"    mov rcx, {line}")
                 self._emit_call_aligned("runtime_list_set_int_at")
-                self._emit("    add rsp, 24")
                 self._emit(f"{done}:")
                 return
             if a != "rdi":
@@ -1494,7 +1744,7 @@ class CodeGen:
         if op == Op.LIST_LEN:
             dst = self._loc(inst.result, alloc)
             lst = self._loc(inst.operands[0], alloc)
-            if dst.startswith("xmm"):
+            if self._is_float_reg(dst):
                 # Unusual: length is integer but the allocator picked an XMM.
                 self._emit(f"    mov rax, {lst}" if lst.startswith("[") else f"    mov rax, {lst}")
                 self._emit("    mov rax, [rax + 8]")
@@ -1519,6 +1769,9 @@ class CodeGen:
         if op == Op.JUMP:
             target = inst.imm_str
             asm_name = self._asm_func_name(func.name)
+            if target is None:
+                # Safety net: JUMP with no target - skip it (fall through)
+                return
             # Emit PHI copies for target block before jumping
             target_block = self._find_block(func, target)
             if target_block:
@@ -1529,6 +1782,9 @@ class CodeGen:
         if op == Op.BRANCH:
             false_label = inst.imm_str
             asm_name = self._asm_func_name(func.name)
+            if false_label is None:
+                # Safety net: skip this branch instruction
+                return
             if inst.fused_compare is not None and inst.fused_operands:
                 a = self._loc(inst.fused_operands[0], alloc)
                 b = self._loc(inst.fused_operands[1], alloc)
@@ -1536,11 +1792,11 @@ class CodeGen:
                 b_type = inst.fused_operands[1].type
                 is_float = is_float_type(a_type) or is_float_type(b_type)
                 if is_float:
-                    a_xmm = a if a.startswith("xmm") else "xmm14"
-                    b_xmm = b if b.startswith("xmm") else "xmm15"
-                    if not a.startswith("xmm"):
+                    a_xmm = a if self._is_float_reg(a) else "xmm14"
+                    b_xmm = b if self._is_float_reg(b) else "xmm15"
+                    if not self._is_float_reg(a):
                         self._emit(f"    movq {a_xmm}, {a}")
-                    if not b.startswith("xmm"):
+                    if not self._is_float_reg(b):
                         self._emit(f"    movq {b_xmm}, {b}")
                     self._emit(f"    ucomisd {a_xmm}, {b_xmm}")
                     inv = {
@@ -1594,7 +1850,7 @@ class CodeGen:
             val_type = inst.operands[0].type if inst.operands else IRType.INT64
             if is_float_type(val_type):
                 if val != "xmm0":
-                    if val.startswith("xmm"):
+                    if self._is_float_reg(val):
                         self._emit(f"    movsd xmm0, {val}")
                     else:
                         self._emit(f"    movq xmm0, {val}")
@@ -1684,7 +1940,7 @@ class CodeGen:
                 a = self._loc(inst.operands[0], alloc)
                 fmt = self._get_format_label("%g")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
-                if a.startswith("xmm"):
+                if self._is_float_reg(a):
                     self._emit(f"    movsd xmm0, {a}")
                 else:
                     self._emit(f"    movq xmm0, {a}")
@@ -1734,7 +1990,7 @@ class CodeGen:
                 a = self._loc(inst.operands[0], alloc)
                 fmt = self._get_format_label("%g\n")
                 self._emit(f"    lea rdi, [rip + {fmt}]")
-                if a.startswith("xmm"):
+                if self._is_float_reg(a):
                     self._emit(f"    movsd xmm0, {a}")
                 else:
                     self._emit(f"    movq xmm0, {a}")
@@ -1782,7 +2038,7 @@ class CodeGen:
         if op == Op.SQRT:
             dst = self._loc(inst.result, alloc)
             a = self._loc(inst.operands[0], alloc)
-            if a.startswith("xmm"):
+            if self._is_float_reg(a):
                 self._emit(f"    sqrtsd {dst}, {a}")
             else:
                 self._emit(f"    movq xmm15, {a}")
@@ -1842,8 +2098,8 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             name = inst.imm_str or "unknown"
             typ = self.module.global_vars.get(name, IRType.INT64)
-            if dst.startswith("xmm") or typ == IRType.FLOAT64:
-                xdst = dst if dst.startswith("xmm") else "xmm15"
+            if self._is_float_reg(dst) or typ == IRType.FLOAT64:
+                xdst = dst if self._is_float_reg(dst) else "xmm15"
                 self._emit(f"    movsd {xdst}, [rip + _fr_global_{name}]")
                 if xdst != dst:
                     self._emit(f"    movsd {dst}, {xdst}")
@@ -1863,7 +2119,7 @@ class CodeGen:
                 self._emit("    mov rdx, 1")
                 self._emit_call_aligned("runtime_store_global")
                 self.module.global_vars[name] = val_type
-            elif val.startswith("xmm"):
+            elif self._is_float_reg(val):
                 self._emit(f"    movsd [rip + _fr_global_{name}], {val}")
             else:
                 if val.startswith("["):
@@ -1928,7 +2184,7 @@ class CodeGen:
             if (
                 not a.startswith("[")
                 and not dst.startswith("[")
-                and not dst.startswith("xmm")
+                and not self._is_float_reg(dst)
             ):
                 if cb is not None and isinstance(cb, int):
                     delta = cb if mnemonic == "add" else -cb
@@ -1960,27 +2216,42 @@ class CodeGen:
 
         commutative = mnemonic in ("addsd", "mulsd")
 
-        # Ensure operands are in XMM registers
-        a_xmm = a if a.startswith("xmm") else "xmm14"
-        b_xmm = b if b.startswith("xmm") else "xmm15"
+        # Determine register class
+        a_is_float = self._is_float_reg(a)
+        b_is_float = self._is_float_reg(b)
+        dst_is_float = self._is_float_reg(dst)
 
-        if not a.startswith("xmm"):
-            self._emit(f"    movq {a_xmm}, {a}")
-        if not b.startswith("xmm"):
-            self._emit(f"    movq {b_xmm}, {b}")
+        # Scratch registers matching the destination class
+        scratch = self._float_scratch(dst) if dst_is_float else "xmm14"
+        scratch2 = self._float_scratch2(dst) if dst_is_float else "xmm15"
 
-        if dst == b_xmm and commutative:
+        # Ensure operands are in float registers
+        a_reg = a if a_is_float else scratch
+        b_reg = b if b_is_float else scratch2
+
+        if not a_is_float:
+            if dst.startswith("ymm"):
+                self._emit(f"    vmovq {scratch}, {a}")
+            else:
+                self._emit(f"    movq {scratch}, {a}")
+        if not b_is_float:
+            if dst.startswith("ymm"):
+                self._emit(f"    vmovq {scratch2}, {b}")
+            else:
+                self._emit(f"    movq {scratch2}, {b}")
+
+        if dst == b_reg and commutative:
             # Result in b's register: b = b op a = a op b (commutative)
-            self._emit(f"    {mnemonic} {b_xmm}, {a_xmm}")
-        elif dst == a_xmm:
-            self._emit(f"    {mnemonic} {a_xmm}, {b_xmm}")
-        elif dst.startswith("xmm"):
-            self._emit(f"    movsd {dst}, {a_xmm}")
-            self._emit(f"    {mnemonic} {dst}, {b_xmm}")
+            self._emit(f"    {mnemonic} {b_reg}, {a_reg}")
+        elif dst == a_reg:
+            self._emit(f"    {mnemonic} {a_reg}, {b_reg}")
+        elif dst_is_float:
+            self._emit(f"    movsd {dst}, {a_reg}")
+            self._emit(f"    {mnemonic} {dst}, {b_reg}")
         else:
-            self._emit(f"    movsd xmm14, {a_xmm}")
-            self._emit(f"    {mnemonic} xmm14, {b_xmm}")
-            self._emit(f"    movq {dst}, xmm14")
+            self._emit(f"    movsd {scratch}, {a_reg}")
+            self._emit(f"    {mnemonic} {scratch}, {b_reg}")
+            self._emit(f"    movq {dst}, {scratch}")
 
     def _emit_shift(self, inst: Instruction, alloc: RegAllocation, mnemonic: str):
         """Emit shift operation (needs cl register for variable shifts)."""
@@ -2017,11 +2288,11 @@ class CodeGen:
 
         if is_float_type(a_type) or is_float_type(b_type):
             # Float comparison
-            a_xmm = a if a.startswith("xmm") else "xmm14"
-            b_xmm = b if b.startswith("xmm") else "xmm15"
-            if not a.startswith("xmm"):
+            a_xmm = a if self._is_float_reg(a) else "xmm14"
+            b_xmm = b if self._is_float_reg(b) else "xmm15"
+            if not self._is_float_reg(a):
                 self._emit(f"    movq {a_xmm}, {a}")
-            if not b.startswith("xmm"):
+            if not self._is_float_reg(b):
                 self._emit(f"    movq {b_xmm}, {b}")
             self._emit(f"    ucomisd {a_xmm}, {b_xmm}")
         else:
@@ -2079,7 +2350,7 @@ class CodeGen:
             for i, field_val in enumerate(inst.operands):
                 val_loc = self._loc(field_val, alloc)
                 offset = i * 8
-                if val_loc.startswith("xmm"):
+                if self._is_float_reg(val_loc):
                     self._emit(f"    movsd [rbp - {stack_offset - offset}], {val_loc}")
                 else:
                     self._emit_int_move(
@@ -2095,7 +2366,7 @@ class CodeGen:
             for i, field_val in enumerate(inst.operands):
                 val_loc = self._loc(field_val, alloc)
                 offset = i * 8
-                if val_loc.startswith("xmm"):
+                if self._is_float_reg(val_loc):
                     self._emit(f"    movsd [rsp + {offset}], {val_loc}")
                 elif val_loc.startswith("["):
                     self._emit(f"    mov r11, {val_loc}")
@@ -2135,7 +2406,7 @@ class CodeGen:
                     else None
                 )
                 if target and arg_loc != target:
-                    if arg_loc.startswith("xmm"):
+                    if self._is_float_reg(arg_loc):
                         float_moves.append((arg_loc, target))
                     else:
                         float_from_gpr.append((arg_loc, target))
@@ -2159,7 +2430,7 @@ class CodeGen:
             ret_type = inst.result.type
             if is_float_type(ret_type):
                 if dst != "xmm0":
-                    if dst.startswith("xmm"):
+                    if self._is_float_reg(dst):
                         self._emit(f"    movsd {dst}, xmm0")
                     else:
                         self._emit(f"    movq {dst}, xmm0")
@@ -2269,7 +2540,7 @@ class CodeGen:
 
         # Phase 3: Emit float moves (no conflicts expected between xmm and gpr)
         for src, tgt in float_moves:
-            if src.startswith("xmm"):
+            if self._is_float_reg(src):
                 self._emit(f"    movsd {tgt}, {src}")
             else:
                 self._emit(f"    movq {tgt}, {src}")
@@ -2280,13 +2551,13 @@ class CodeGen:
             dst = self._loc(inst.result, alloc)
             if float_ret:
                 if dst != "xmm0":
-                    if dst.startswith("xmm"):
+                    if self._is_float_reg(dst):
                         self._emit(f"    movsd {dst}, xmm0")
                     else:
                         self._emit(f"    movq {dst}, xmm0")
             else:
                 if dst != "rax":
-                    if dst.startswith("xmm"):
+                    if self._is_float_reg(dst):
                         self._emit(f"    movq {dst}, rax")
                     else:
                         self._emit(f"    mov {dst}, rax")
@@ -2301,7 +2572,7 @@ class CodeGen:
     def _emit_int_move(self, src: str, dst: str):
         if src == dst:
             return
-        if src.startswith("xmm"):
+        if self._is_float_reg(src):
             self._emit(f"    movq {dst}, {src}")
         elif src.startswith("[") and dst.startswith("["):
             self._emit(f"    mov r11, {src}")
@@ -2315,7 +2586,7 @@ class CodeGen:
         if src.startswith("[") and dst.startswith("["):
             self._emit(f"    movsd xmm15, {src}")
             self._emit(f"    movsd {dst}, xmm15")
-        elif src.startswith("xmm"):
+        elif self._is_float_reg(src):
             self._emit(f"    movsd {dst}, {src}")
         else:
             self._emit(f"    movq {dst}, {src}")

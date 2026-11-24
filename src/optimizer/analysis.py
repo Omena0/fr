@@ -287,8 +287,9 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
 
     # Fix for loops: extend intervals across back edges.
     # A back edge is a (tail → header) edge where header is numbered before tail.
-    # Values live at the header that are defined before the header must stay live
-    # through the entire loop (to the end of the tail block).
+    # Only phi operands coming FROM the back-edge block need their intervals
+    # extended to the tail end. Other values live at the header are already
+    # handled by the phi operand extension below.
     for block in func.blocks:
         for succ in block.successors:
             if (
@@ -298,8 +299,15 @@ def compute_live_intervals(func: Function) -> list[LiveInterval]:
                 # Back edge: block → succ (succ is the loop header)
                 tail_end = block_end[block.label]
                 header_start = block_start[succ.label]
+                # Collect phi operand IDs that come from this back-edge block
+                back_edge_operand_ids: set[int] = set()
+                for phi in succ.phi_nodes:
+                    for operand, pred_block in zip(phi.operands, phi.target_blocks):
+                        if pred_block is block and isinstance(operand, Value):
+                            back_edge_operand_ids.add(operand.id)
+                # Only extend intervals for back-edge phi operands
                 for iv in intervals.values():
-                    if iv.start <= header_start and iv.end > header_start:
+                    if iv.value.id in back_edge_operand_ids:
                         iv.end = max(iv.end, tail_end)
 
     # PHI operands are logically used at the end of their predecessor block
@@ -421,7 +429,9 @@ class LoopInfo:
         loop = self.get_loop_for_block(inst.block)
         if loop is None:
             return False
-        if inst.has_side_effects:
+        # LOAD_FIELD is a pure memory read — treat as potentially invariant
+        # even though it has side_effects set (conservative GC flag).
+        if inst.has_side_effects and inst.op != Op.LOAD_FIELD:
             return False
         for v in inst.operands:
             if isinstance(v, Value) and v.defining_inst is not None:

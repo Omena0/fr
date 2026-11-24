@@ -400,8 +400,19 @@ class IRBuilder:
                 return inst.result or ptr
             val = var_versions.get(idx)
             if val is None:
-                typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
-                val = self._make_const(typ, 0, block, source_line)
+                # Check if this is a function parameter - if so, return a Value
+                # with the parameter's ID so the register allocator assigns it
+                # to the ABI register (e.g., rdi for the first int arg)
+                param_val = None
+                for param in func.params:
+                    if param.arg_index == idx:
+                        param_val = param
+                        break
+                if param_val is not None:
+                    val = Value(param.id, param.type, f"param_{idx}")
+                else:
+                    typ = self._local_types.get(func.name, {}).get(idx, IRType.INT64)
+                    val = self._make_const(typ, 0, block, source_line)
                 var_versions[idx] = val
             return val
 

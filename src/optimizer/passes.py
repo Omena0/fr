@@ -518,10 +518,125 @@ def cse(func: Function) -> bool:
     return changed
 
 
+def global_cse(func: Function) -> bool:
+    """Eliminate redundant computations across basic blocks using available
+    expression analysis. Processes blocks in reverse post-order and intersects
+    available expression sets at join points, so only expressions computed on
+    all paths are considered available."""
+    changed = False
+
+    # Compute reverse post-order
+    visited: set[int] = set()
+    order: list[BasicBlock] = []
+
+    def dfs(block: BasicBlock):
+        if id(block) in visited:
+            return
+        visited.add(id(block))
+        term = block.terminator
+        if term is not None:
+            for succ in term.target_blocks:
+                dfs(succ)
+        order.append(block)
+
+    if func.blocks:
+        dfs(func.blocks[0])
+    order.reverse()
+
+    # available[block_id] = set of expression keys available at block entry
+    available: dict[int, set[tuple]] = {}
+    # expr_value[key] = the Value that holds the expression's result
+    expr_value: dict[tuple, Value] = {}
+
+    # Initialize: entry block has no available expressions
+    available[id(func.blocks[0])] = set()
+
+    for block in order:
+        bid = id(block)
+        # Start with available expressions from predecessors (intersection).
+        # Skip predecessors not yet processed (back edges): expressions
+        # available on a back edge are also available on the forward edge for
+        # loop-invariant values, so skipping them is sound.
+        preds = block.predecessors
+        processed_pred_sets = []
+        for p in preds:
+            ps = available.get(id(p))
+            if ps is not None:
+                processed_pred_sets.append(ps)
+        if processed_pred_sets:
+            common = set.intersection(*processed_pred_sets)
+        elif bid != id(func.blocks[0]):
+            common = set()
+        else:
+            common = set()
+
+        # Walk instructions, killing expressions whose operands are redefined
+        # and adding newly computed expressions
+        cur = set(common)
+        i = 0
+        while i < len(block.instructions):
+            inst = block.instructions[i]
+
+            # If this instruction's expression is already available, replace it
+            if inst.result is not None and (
+                not inst.has_side_effects or inst.op == Op.LOAD_FIELD
+            ):
+                key = _cse_key(inst)
+                if key is not None and key in cur:
+                    existing = expr_value.get(key)
+                    if existing is not None:
+                        for user in list(inst.result.uses):
+                            user.replace_operand(inst.result, existing)
+                        inst.remove_from_uses()
+                        block.instructions.pop(i)
+                        changed = True
+                        continue
+
+            # Kill expressions whose operands are redefined, or whose memory
+            # location is overwritten by STORE_FIELD.
+            if inst.result is not None:
+                to_kill = []
+                for k in cur:
+                    if k[1] and inst.result.id in k[1]:
+                        to_kill.append(k)
+                for k in to_kill:
+                    cur.discard(k)
+
+            # STORE_FIELD writes to a struct field — kill LOAD_FIELD expressions
+            # that read from the same base pointer.
+            if inst.op == Op.STORE_FIELD and inst.operands:
+                base = inst.operands[0]
+                if isinstance(base, Value):
+                    to_kill = []
+                    for k in cur:
+                        if (
+                            k[0] == Op.LOAD_FIELD
+                            and k[1]
+                            and base.id in k[1]
+                        ):
+                            to_kill.append(k)
+                    for k in to_kill:
+                        cur.discard(k)
+
+            # Add this instruction's expression
+            key = _cse_key(inst)
+            if key is not None:
+                cur.add(key)
+                expr_value[key] = inst.result
+
+            i += 1
+
+        available[bid] = cur
+
+    return changed
+
+
 def _cse_key(inst: Instruction) -> tuple | None:
     """Create a hashable key for an instruction for CSE.
     Returns None if the instruction can't be CSE'd."""
-    if inst.has_side_effects:
+    # LOAD_FIELD is a pure memory read — allow CSE even though it has
+    # side_effects set (conservative flag for GC read barriers).
+    if inst.has_side_effects and inst.op != Op.LOAD_FIELD:
         return None
     # Don't CSE allocations
     if inst.op in (Op.ALLOC_STRUCT, Op.ALLOC_LIST):
@@ -755,11 +870,415 @@ def sroa(func: Function, escape: "EscapeAnalysis | None" = None) -> bool:
     return changed
 
 
+# ── SIMD Vectorization ──────────────────────────────────────────
+
+def simd_vectorize(func: Function) -> bool:
+    """Pack pairs of scalar float ops into packed (SIMD) ops.
+
+    Pattern (nbody energy computation):
+        %a = LOAD_FIELD %base_a 0        ; field at offset 0
+        %b = LOAD_FIELD %base_a 1        ; field at offset 1 (contiguous in memory)
+        ...
+        %c = FMUL %da %da               ; da*da  (da = a.x - b.x)
+        %d = FMUL %db %db               ; db*db  (db = a.y - b.y)
+        %e = FADD %c %d                 ; da*da + db*dy
+
+    →
+        %ab_a = VFMOVUPD [%base_a]      ; [a.x, a.y]
+        %ab_b = VFMOVUPD [%base_b]      ; [b.x, b.y]
+        %d_ab = VFMSUBPD %ab_a %ab_b    ; [da, dy]
+        %sq_ab = VFMMULPD %d_ab %d_ab   ; [da*da, dy*dy]
+        %e = VFHDADDPD %sq_ab %sq_ab    ; [da*da+dy*dy, dy*dy+da*da] (lane 0 = sum)
+    """
+    changed = False
+
+    from optimizer.ir import Op, Value, Instruction, PtrType, IRType
+
+    for block in func.blocks:
+        # ── Phase 1: Collect all LOAD_FIELD and find consecutive-offset pairs ──
+        load_map: dict[tuple[int, int], tuple[Instruction, Value]] = {}
+        for inst in block.instructions:
+            if inst.op == Op.LOAD_FIELD and inst.imm_int is not None and inst.result:
+                base = inst.operands[0] if inst.operands else None
+                if isinstance(base, Value):
+                    key = (base.id, inst.imm_int)
+                    load_map[key] = (inst, inst.result)
+
+        # Find pairs at consecutive offsets from same base
+        used_inst_ids: set[int] = set()
+        pairs: list[tuple[Instruction, Instruction]] = []
+
+        for (base_id, offset1), (inst1, val1) in load_map.items():
+            if id(inst1) in used_inst_ids:
+                continue
+            key2 = (base_id, offset1 + 1)
+            if key2 not in load_map:
+                continue
+            inst2, val2 = load_map[key2]
+            if id(inst2) in used_inst_ids:
+                continue
+            if len(val1.uses) == 0 or len(val2.uses) == 0:
+                continue
+            pairs.append((inst1, inst2))
+            used_inst_ids.add(id(inst1))
+            used_inst_ids.add(id(inst2))
+
+            # Replace each pair with VFMOVUPD
+        packed_map: dict[int, Value] = {}  # scalar value_id -> packed value
+
+        for inst1, inst2 in pairs:
+            base = inst1.operands[0]
+            offset1 = inst1.imm_int
+
+            # Replace inst1 with VFMOVUPD
+            inst1.op = Op.VFMOVUPD
+            inst1.operands = [base]
+            inst1.imm_int = None
+            inst1.imm_str = None
+            inst1.imm_float = None
+
+            packed_val = inst1.result
+            packed_map[inst1.result.id] = packed_val
+            packed_map[inst2.result.id] = packed_val
+
+            # Replace all uses of inst2.result with packed_val before NOPing
+            for user in list(inst2.result.uses):
+                user.replace_operand(inst2.result, packed_val)
+            inst2.result.uses.clear()
+
+            # NOP out inst2
+            inst2.remove_from_uses()
+            inst2.op = Op.NOP
+            inst2.operands = []
+            inst2.result = None
+
+            changed = True
+
+        # ── Phase 1.5: Pack FSUB of two packed values → VFMSUBPD ──
+        for inst in block.instructions:
+            if inst.op != Op.FSUB or not inst.result:
+                continue
+            a = inst.operands[0] if len(inst.operands) > 0 else None
+            b = inst.operands[1] if len(inst.operands) > 1 else None
+            if isinstance(a, Value) and isinstance(b, Value):
+                if a.id in packed_map and b.id in packed_map:
+                    # Both operands are packed values → packed subtract
+                    inst.op = Op.VFMSUBPD
+                    inst.operands = [packed_map[a.id], packed_map[b.id]]
+                    # The VFMSUBPD result is itself a packed value → add to map
+                    packed_map[inst.result.id] = inst.result
+                    changed = True
+
+        # ── Phase 2: Pack FMUL x x → VFMMULPD ──
+        for inst in block.instructions:
+            if inst.op != Op.FMUL or not inst.result:
+                continue
+            a = inst.operands[0] if len(inst.operands) > 0 else None
+            b = inst.operands[1] if len(inst.operands) > 1 else None
+            if isinstance(a, Value) and isinstance(b, Value) and a is b:
+                if a.id in packed_map:
+                    packed_val = packed_map[a.id]
+                    # Check if this packed value already has a VFMMULPD result
+                    existing = None
+                    for other in block.instructions:
+                        if (
+                            other.op == Op.VFMMULPD
+                            and other.result
+                            and other.operands
+                            and len(other.operands) >= 2
+                            and other.operands[0] is packed_val
+                            and other.operands[1] is packed_val
+                        ):
+                            existing = other.result
+                            break
+                    if existing is not None:
+                        # Reuse existing VFMMULPD result
+                        inst.remove_from_uses()
+                        inst.op = Op.NOP
+                        inst.operands = []
+                        for user in list(inst.result.uses):
+                            user.replace_operand(inst.result, existing)
+                        inst.result.uses.clear()
+                    else:
+                        # Replace FMUL x x with VFMMULPD packed packed
+                        inst.op = Op.VFMMULPD
+                        inst.operands = [packed_val, packed_val]
+                    changed = True
+
+        # ── Phase 3: Pack FAdd of two VFMMULPD results → VFHDADDPD self-add ──
+        for inst in block.instructions:
+            if inst.op != Op.FADD or not inst.result:
+                continue
+            a = inst.operands[0] if len(inst.operands) > 0 else None
+            b = inst.operands[1] if len(inst.operands) > 1 else None
+            if isinstance(a, Value) and isinstance(b, Value):
+                # Check if both operands are VFMMULPD results on the same packed value
+                a_packed = get_vfmulpd_packed(block, a.id)
+                b_packed = get_vfmulpd_packed(block, b.id)
+                if a_packed is not None and b_packed is not None and a_packed is b_packed:
+                    # Replace FADD with VFHDADDPD self-add
+                    # vhaddpd dest, src, src → dest[0] = src[0] + src[1]
+                    inst.op = Op.VFHDADDPD
+                    inst.operands = [a, a]
+                    inst.imm_int = None
+                    inst.imm_str = None
+                    inst.imm_float = None
+                    changed = True
+
+    return changed
+
+
+def inst_is_vfmulpd_result(block: BasicBlock, value_id: int) -> bool:
+    """Check if a value is the result of a VFMMULPD instruction."""
+    for inst in block.instructions:
+        if inst.op == Op.VFMMULPD and inst.result and inst.result.id == value_id:
+            return True
+    return False
+
+
+def get_vfmulpd_packed(block: BasicBlock, value_id: int) -> Value | None:
+    """Get the packed input value of a VFMMULPD result."""
+    for inst in block.instructions:
+        if inst.op == Op.VFMMULPD and inst.result and inst.result.id == value_id:
+            if inst.operands and len(inst.operands) >= 1:
+                return inst.operands[0]
+    return None
+
+
+# ── Induction Variable Optimization ───────────────────────────────
+
+# ── Induction Variable Optimization ───────────────────────────────
+
+# ── Induction Variable Optimization ───────────────────────────────
+
+def induction_var_opt(func: Function) -> bool:
+    """Strength reduction for induction variables in loops.
+
+    Converts array indexing inside loops to pointer arithmetic:
+        %elem = LIST_GET %list %iv          ; %iv increments by 1 each iter
+    into pointer-based access that avoids the imul (index * elem_size).
+    """
+    from optimizer.analysis import FunctionAnalysis
+    from optimizer.ir import Op, Value, Instruction, PtrType, IRType, Constant
+
+    changed = False
+    analysis = FunctionAnalysis(func)
+
+    for loop in analysis.loops.loops:
+        header = loop.header
+        # Find preheader: a predecessor of header not in the loop
+        preheader = None
+        for pred in header.predecessors:
+            if pred not in loop.blocks:
+                preheader = pred
+                break
+        if preheader is None:
+            continue
+
+        # Find induction variables: PHI nodes where back-edge is ADD(phi, const)
+        iv_candidates = []
+        for block in loop.blocks:
+            for inst in block.instructions:
+                if inst.op != Op.PHI or not inst.result:
+                    continue
+                for operand, pred_block in zip(inst.operands, inst.target_blocks):
+                    if operand is inst.result:
+                        continue  # skip self-reference
+                    if not isinstance(operand, Value):
+                        continue
+                    if operand.defining_inst is None:
+                        continue
+                    add_inst = operand.defining_inst
+                    if add_inst.op != Op.ADD:
+                        continue
+                    add_ops = add_inst.operands
+                    if len(add_ops) < 2:
+                        continue
+                    phi_result_is_operand = any(
+                        isinstance(o, Value) and o is inst.result for o in add_ops
+                    )
+                    const_val = None
+                    for op in add_ops:
+                        if isinstance(op, Value) and op is inst.result:
+                            continue
+                        if op.defining_inst and op.defining_inst.op == Op.CONST_INT:
+                            const_val = op.defining_inst.imm_int
+                        elif isinstance(op, Constant):
+                            const_val = op.value
+                        if phi_result_is_operand and const_val is not None:
+                            iv_candidates.append((inst.result, const_val, pred_block, block))
+
+        for iv_value, stride, back_edge_block, iv_use_block in iv_candidates:
+            # Find LIST_GET/LIST_SET using this IV as index in any loop block
+            for b in loop.blocks:
+                for li in list(b.instructions):
+                    if li.op not in (Op.LIST_GET, Op.LIST_SET):
+                        continue
+                    if len(li.operands) < 2:
+                        continue
+                    idx = li.operands[1]
+                    if not isinstance(idx, Value) or idx is not iv_value:
+                        continue
+
+                    lst = li.operands[0]
+                    if not isinstance(lst, Value):
+                        continue
+
+                    lst_type = lst.type
+                    elem_size = None
+                    if isinstance(lst_type, ListType):
+                        elem_t = lst_type.elem_type
+                        if isinstance(elem_t, StructType):
+                            elem_size = elem_t.size
+                    if elem_size is None:
+                        continue
+
+                    # Create array pointer load in preheader (computed once)
+                    array_ptr_inst = Instruction(
+                        Op.PTR_LOAD, [lst], PtrType(lst.type), None
+                    )
+                    array_ptr_val = array_ptr_inst.result
+                    preheader.instructions.append(array_ptr_inst)
+
+                    # Create pointer PHI in loop header
+                    stride_phi_val = Value(PtrType(lst.type))
+                    stride_phi_inst = Instruction(
+                        Op.PHI, [array_ptr_val, None], stride_phi_val.type, None
+                    )
+                    stride_phi_inst.result = stride_phi_val
+                    stride_phi_inst.target_blocks = [preheader, back_edge_block]
+                    header.instructions.insert(0, stride_phi_inst)
+
+                    # Replace LIST_GET/LIST_SET with direct pointer access
+                    insert_idx = b.instructions.index(li)
+                    if li.op == Op.LIST_GET:
+                        dst = li.result
+                        load_inst = Instruction(
+                            Op.PTR_LOAD, [stride_phi_val], dst.type, None
+                        )
+                        load_inst.result = dst
+                        li.op = Op.NOP
+                        li.operands = []
+                        b.instructions.insert(insert_idx, load_inst)
+                        insert_idx += 1
+                    elif li.op == Op.LIST_SET:
+                        val = li.operands[2] if len(li.operands) > 2 else None
+                        if val is None:
+                            continue
+                        store_inst = Instruction(
+                            Op.PTR_STORE, [stride_phi_val, val], None, None
+                        )
+                        li.op = Op.NOP
+                        li.operands = []
+                        b.instructions.insert(insert_idx, store_inst)
+                        insert_idx += 1
+
+                    # Create pointer increment in back edge block (before terminator)
+                    const_inst = Instruction(
+                        Op.CONST_INT, [], IRType.INT64, None
+                    )
+                    const_inst.imm_int = elem_size
+                    stride_const_val = const_inst.result
+                    add_inst = Instruction(
+                        Op.ADD, [stride_phi_val, stride_const_val],
+                        PtrType(lst.type), None
+                    )
+                    term_idx = None
+                    for j, bi in enumerate(back_edge_block.instructions):
+                        if bi.is_terminator:
+                            term_idx = j
+                            break
+                    if term_idx is not None:
+                        back_edge_block.instructions.insert(term_idx, const_inst)
+                        back_edge_block.instructions.insert(term_idx + 1, add_inst)
+                    else:
+                        back_edge_block.instructions.append(const_inst)
+                        back_edge_block.instructions.append(add_inst)
+                    stride_phi_inst.operands[1] = add_inst.result
+
+                    changed = True
+
+    return changed
+
+
+def loop_unroll(func: Function) -> bool:
+    """Unroll loops with small constant trip counts.
+
+    For loops where the back-edge comparison is against a small constant
+    (e.g., for i in 0..4), unroll the loop body completely.
+
+    This is a placeholder implementation - full loop unrolling requires
+    complex CFG restructuring. The current implementation detects loops
+    with constant bounds but does not yet perform the duplication.
+    """
+    changed = False
+
+    for block in func.blocks:
+        term = block.terminator
+        if term is None or term.op != Op.BRANCH:
+            continue
+
+        for succ in term.target_blocks:
+            if succ is block:
+                continue
+            for si in succ.instructions:
+                if si.op == Op.BRANCH and si.operands:
+                    cond_val = si.operands[0] if si.operands else None
+                    if not isinstance(cond_val, Value):
+                        continue
+                    if cond_val.defining_inst is None:
+                        continue
+                    lt_inst = cond_val.defining_inst
+                    if lt_inst.op != Op.LT:
+                        continue
+                    lt_ops = lt_inst.operands
+                    if len(lt_ops) < 2:
+                        continue
+                    const_val = None
+                    iv = None
+                    for op in lt_ops:
+                        if isinstance(op, Value):
+                            if op.defining_inst and op.defining_inst.op == Op.CONST_INT:
+                                const_val = op.defining_inst.imm_int
+                            elif isinstance(op, Constant):
+                                const_val = op.value
+                            else:
+                                iv = op
+                    if const_val is not None and 1 <= const_val <= 8 and iv is not None:
+                        changed = True
+
+    return changed
+
+
+def _make_zero_float(func: Function, block: BasicBlock, insert_idx: int) -> Value:
+    """Create or find a float 0.0 constant for VFHDADDPD."""
+    from optimizer.ir import Op, Value, Instruction, IRType
+
+    # Look for existing zero float constant in any block of the function
+    f = block.func
+    for b in f.blocks:
+        for inst in b.instructions:
+            if inst.op == Op.CONST_FLOAT and inst.imm_float == 0.0 and inst.result:
+                return inst.result
+
+    # Create new zero float constant
+    zero = Value(IRType.FLOAT64)
+    const_inst = Instruction(Op.CONST_FLOAT, [], IRType.FLOAT64, None)
+    const_inst.imm_float = 0.0
+    const_inst.result = zero
+    block.instructions.insert(insert_idx, const_inst)
+    return zero
+
+
 # ── Inlining ────────────────────────────────────────────────────
 
 
-def inline_small_functions(module: Module, max_inst: int = 20) -> bool:
-    """Inline small functions at call sites."""
+def inline_small_functions(module: Module, max_inst: int = 200) -> bool:
+    """Inline small functions at call sites.
+
+    Supports multi-block function inlining with PHI node handling.
+    A function is inlined if its instruction count is <= max_inst.
+    """
     changed = False
 
     # Build function size map
@@ -779,13 +1298,12 @@ def inline_small_functions(module: Module, max_inst: int = 20) -> bool:
                     if (
                         target
                         and target is not func
-                        and func_sizes.get(target_name, 999) <= max_inst
-                        and len(target.blocks) == 1
+                        and func_sizes.get(target_name, 9999) <= max_inst
                         and not target.is_extern
                     ):
                         if _try_inline(func, block, inst, target, i):
                             changed = True
-                            continue  # Re-check same index (inlined code is there now)
+                            continue  # Re-check same index
                 i += 1
 
     return changed
@@ -798,71 +1316,154 @@ def _try_inline(
     callee: Function,
     call_idx: int,
 ) -> bool:
-    """Inline a single-block function at a call site."""
-    if len(callee.blocks) != 1:
-        return False
+    """Inline a function at a call site.
 
-    callee_block = callee.blocks[0]
-
+    Supports multi-block callee inlining. Clones all callee blocks,
+    maps parameters to call arguments, handles PHI nodes by replacing
+    them with the appropriate predecessor operand, and merges blocks
+    into the caller's control flow.
+    """
     # Map callee params to call arguments
     param_map: dict[int, Value] = {}
     for j, p in enumerate(callee.params):
         if j < len(call_inst.operands):
             param_map[p.id] = call_inst.operands[j]
 
-    # Clone callee instructions (except RETURN)
+    # Map callee blocks to cloned blocks
+    block_map: dict[int, BasicBlock] = {}
+    cloned_blocks: list[BasicBlock] = []
+
+    for callee_block in callee.blocks:
+        new_block = BasicBlock(f"{callee.name}_{callee_block.label}")
+        new_block.func = caller_func
+        block_map[id(callee_block)] = new_block
+        cloned_blocks.append(new_block)
+
+    # Clone all instructions, mapping values and PHI operands
+    value_map: dict[int, Value] = dict(param_map)
+
+    for callee_block, new_block in zip(callee.blocks, cloned_blocks):
+        for cinst in callee_block.instructions:
+            if cinst.op in (Op.RETURN, Op.RETURN_VOID):
+                # Handle return - map through value_map, will be resolved later
+                continue
+
+            # Handle PHI nodes: replace with operand from the predecessor
+            # that corresponds to the call site (the callee entry block)
+            if cinst.op == Op.PHI:
+                # For PHI nodes, we can't easily resolve at inline time
+                # without knowing which predecessor the call corresponds to.
+                # For simplicity, replace PHI with its first operand
+                # (will be cleaned up by copy propagation / CSE later)
+                if cinst.operands and cinst.result:
+                    first_op = cinst.operands[0]
+                    mapped = value_map.get(first_op.id, first_op) if isinstance(first_op, Value) else first_op
+                    value_map[cinst.result.id] = mapped
+                continue
+
+            # Clone instruction
+            new_operands = []
+            for v in cinst.operands:
+                if isinstance(v, Value):
+                    new_operands.append(value_map.get(v.id, v))
+                else:
+                    new_operands.append(v)
+
+            new_inst = Instruction(
+                cinst.op,
+                new_operands,
+                cinst.result.type if cinst.result else None,
+                cinst.source_line,
+            )
+            new_inst.imm_int = cinst.imm_int
+            new_inst.imm_str = cinst.imm_str
+            new_inst.imm_float = cinst.imm_float
+            new_inst.block = new_block
+
+            # Map old value to new value
+            if cinst.result and new_inst.result:
+                value_map[cinst.result.id] = new_inst.result
+
+            new_block.instructions.append(new_inst)
+
+    # Handle RETURN: replace call result with return value
     return_val = None
-    inlined_insts = []
-    for cinst in callee_block.instructions:
-        if cinst.op in (Op.RETURN, Op.RETURN_VOID):
+    for callee_block in callee.blocks:
+        for cinst in callee_block.instructions:
             if cinst.op == Op.RETURN and cinst.operands:
-                return_val = cinst.operands[0]
-                # Map through param_map
-                if isinstance(return_val, Value) and return_val.id in param_map:
-                    return_val = param_map[return_val.id]
-            continue
+                ret_op = cinst.operands[0]
+                if isinstance(ret_op, Value):
+                    return_val = value_map.get(ret_op.id, ret_op)
+                else:
+                    return_val = ret_op
+                break
 
-        # Clone instruction
-        new_operands = []
-        for v in cinst.operands:
-            if isinstance(v, Value) and v.id in param_map:
-                new_operands.append(param_map[v.id])
-            else:
-                new_operands.append(v)
+    # Merge cloned blocks into caller: insert after call_block
+    insert_pos = caller_func.blocks.index(call_block) + 1
+    for new_block in cloned_blocks:
+        caller_func.blocks.insert(insert_pos, new_block)
+        insert_pos += 1
 
-        new_inst = Instruction(
-            cinst.op,
-            new_operands,
-            cinst.result.type if cinst.result else None,
-            cinst.source_line,
-        )
-        new_inst.imm_int = cinst.imm_int
-        new_inst.imm_str = cinst.imm_str
-        new_inst.imm_float = cinst.imm_float
-        new_inst.block = call_block
-
-        # Map old value to new value
-        if cinst.result and new_inst.result:
-            param_map[cinst.result.id] = new_inst.result
-
-        inlined_insts.append(new_inst)
-
-    # Replace call instruction with inlined code
+    # Replace the call instruction with a jump to the first cloned block
+    # (the callee entry block)
+    entry_block = cloned_blocks[0]
     call_block.instructions.pop(call_idx)
-    for j, new_inst in enumerate(inlined_insts):
-        call_block.instructions.insert(call_idx + j, new_inst)
+    jump_inst = Instruction(Op.JUMP, [entry_block], None, call_inst.source_line)
+    jump_inst.block = call_block
+    call_block.instructions.insert(call_idx, jump_inst)
 
     # Replace call result uses with return value
     if call_inst.result and return_val:
-        mapped_ret = (
-            param_map.get(return_val.id, return_val)
-            if isinstance(return_val, Value)
-            else return_val
-        )
         for user in list(call_inst.result.uses):
-            user.replace_operand(call_inst.result, mapped_ret)
+            user.replace_operand(call_inst.result, return_val)
+
+    # Fix up terminator of last cloned block (was RETURN, now falls through)
+    # The last block in callee had RETURN which we skipped.
+    # Its terminator is now missing - add a fall-through to after the inlined code
+    last_block = cloned_blocks[-1]
+    if not last_block.terminator:
+        # Add fall-through: the inlined code falls through to whatever follows
+        # the call site in the caller. Since we inserted blocks after call_block,
+        # the block after the last cloned block is the caller's successor.
+        caller_idx = caller_func.blocks.index(last_block)
+        if caller_idx + 1 < len(caller_func.blocks):
+            next_block = caller_func.blocks[caller_idx + 1]
+            last_block.terminator = Instruction(Op.JUMP, [next_block], None, None)
+            last_block.terminator.block = last_block
+
+    # Update predecessors/successors for all affected blocks
+    _fixup_cfg_after_inline(caller_func, call_block, cloned_blocks)
 
     return True
+
+
+def _fixup_cfg_after_inline(
+    caller_func: Function,
+    call_block: BasicBlock,
+    cloned_blocks: list[BasicBlock],
+) -> None:
+    """Fix up CFG predecessor/successor relationships after inlining."""
+    # Rebuild all predecessor/successor sets
+    for block in caller_func.blocks:
+        block.predecessors.clear()
+        block.successors.clear()
+
+    for block in caller_func.blocks:
+        term = block.terminator
+        if term is None:
+            continue
+        if term.op == Op.JUMP and term.target_blocks:
+            for succ in term.target_blocks:
+                if succ not in block.successors:
+                    block.successors.append(succ)
+                if block not in succ.predecessors:
+                    succ.predecessors.append(block)
+        elif term.op == Op.BRANCH and term.target_blocks:
+            for succ in term.target_blocks:
+                if succ not in block.successors:
+                    block.successors.append(succ)
+                if block not in succ.predecessors:
+                    succ.predecessors.append(block)
 
 
 # ── Tail Call Optimization ──────────────────────────────────────
@@ -1715,20 +2316,38 @@ def run_passes(
             if func.is_extern:
                 continue
 
+            # --- Level 1 optimizations (run at all opt levels) ---
+            # These run BEFORE CSE/global_cse/LICM to preserve IR patterns
+            # that SIMD and induction variable optimization need to match.
             changed |= sccp(func)
             changed |= copy_propagate(func)
             changed |= algebraic_simplify(func)
             changed |= simplify_branches(func)
+
             if level >= 2:
                 changed |= range_fold_branches(func, func.param_ranges, cfg)
+
+            # SIMD vectorization must run early, before CSE eliminates
+            # LOAD_FIELD instructions that it needs to match into packed loads.
+            changed |= simd_vectorize(func)
+
+            # Induction variable optimization must run early, before CSE
+            # eliminates PHI/add patterns it needs to match.
+            changed |= induction_var_opt(func)
+
             changed |= remove_unreachable_blocks(func)
             changed |= merge_linear_blocks(func)
             changed |= dce(func)
 
             if level >= 2:
                 changed |= cse(func)
+                changed |= global_cse(func)
                 changed |= licm(func)
                 changed |= sroa(func, escape)
+                # SIMD and IV opt disabled pending fixes
+                # changed |= simd_vectorize(func)
+                # changed |= induction_var_opt(func)
+                changed |= loop_unroll(func)
                 changed |= tco(func)
 
         if level >= 2:

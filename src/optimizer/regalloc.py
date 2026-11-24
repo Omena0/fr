@@ -43,6 +43,8 @@ RETURN_REG = "rax"
 
 # Float registers
 ALL_XMMS = [f"xmm{i}" for i in range(16)]
+ALL_YMMS = [f"ymm{i}" for i in range(16)]
+ALL_FLOAT_REGS = ALL_XMMS + ALL_YMMS
 FLOAT_ARG_REGS = [f"xmm{i}" for i in range(8)]  # xmm0-xmm7 for float args
 FLOAT_RETURN_REG = "xmm0"
 
@@ -103,10 +105,13 @@ class LinearScanAllocator:
         self._next_spill_offset = 0  # Start at 0; only grow if we actually spill
         self._active: list[LiveInterval] = []  # Currently active intervals
         self._free_gprs: list[str] = list(reversed(ALL_GPRS))
-        self._free_xmms: list[str] = list(reversed(ALL_XMMS))
+        self._free_xmms: list[str] = list(reversed(ALL_XMMS + ALL_YMMS))
         # value_id -> [src value_ids] (ordered list of coalesce candidates)
         self._coalesce_map: dict[int, list[int]] = {}
+        # value_id -> number of uses (for spill cost)
+        self._use_count: dict[int, int] = {}
         self._build_coalesce_map(func)
+        self._build_use_count(func)
 
     def _build_coalesce_map(self, func: Function) -> None:
         """Map copy-dst value IDs to their source value IDs for coalescing.
@@ -124,6 +129,14 @@ class LinearScanAllocator:
         Coalescing eliminates the mov instruction that would otherwise be
         emitted between the source and destination.
         """
+        # Count uses of each value
+        use_count: dict[int, int] = {}
+        for block in func.blocks:
+            for inst in block.instructions:
+                for v in inst.operands:
+                    if isinstance(v, Value):
+                        use_count[v.id] = use_count.get(v.id, 0) + 1
+
         # Build fall-through successor map: block -> block that falls into it
         fall_through_into: dict[int, BasicBlock] = {}
         for i, block in enumerate(func.blocks):
@@ -174,19 +187,70 @@ class LinearScanAllocator:
                     if candidates:
                         self._coalesce_map[dst.id] = candidates
 
-                # PHI node: coalesce result with fall-through operand
+                # PHI node: coalesce with operands that have a single use (just the phi).
+                # Two directions:
+                #   phi -> operand: when operand is allocated before phi (defined earlier)
+                #   operand -> phi: when operand is allocated after phi (defined later, e.g. back edge)
+                # This eliminates phi copies on both entry and back edges.
                 if inst.op == Op.PHI:
-                    ft_block = fall_through_into.get(id(block))
-                    if ft_block is not None and inst.target_blocks:
-                        for operand, pred_block in zip(inst.operands, inst.target_blocks):
-                            if pred_block is ft_block and isinstance(operand, Value):
-                                self._coalesce_map[dst.id] = [operand.id]
-                                break
+                    for operand, pred_block in zip(inst.operands, inst.target_blocks):
+                        if not isinstance(operand, Value):
+                            continue
+                        if use_count.get(operand.id, 0) != 1:
+                            continue
+                        operand_block = (
+                            operand.defining_inst.block if operand.defining_inst else None
+                        )
+                        if operand_block is block:
+                            # Self-reference (phi = phi ...) - skip
+                            continue
+                        # Forward: phi -> operand (operand allocated before phi)
+                        if dst.id not in self._coalesce_map:
+                            self._coalesce_map[dst.id] = []
+                        if operand.id not in self._coalesce_map[dst.id]:
+                            self._coalesce_map[dst.id].append(operand.id)
+                        # Backward: operand -> phi (operand allocated after phi)
+                        if operand.id not in self._coalesce_map:
+                            self._coalesce_map[operand.id] = []
+                        if dst.id not in self._coalesce_map[operand.id]:
+                            self._coalesce_map[operand.id].append(dst.id)
+
+                    # Fallback: coalesce with fall-through operand (even if multi-use)
+                    if dst.id not in self._coalesce_map:
+                        ft_block = fall_through_into.get(id(block))
+                        if ft_block is not None and inst.target_blocks:
+                            for operand, pred_block in zip(inst.operands, inst.target_blocks):
+                                if pred_block is ft_block and isinstance(operand, Value):
+                                    self._coalesce_map[dst.id] = [operand.id]
+                                    break
                     # Fallback: coalesce with first operand
                     if dst.id not in self._coalesce_map and inst.operands:
                         first = inst.operands[0]
                         if isinstance(first, Value):
                             self._coalesce_map[dst.id] = [first.id]
+
+    def _build_use_count(self, func: Function) -> None:
+        """Count uses of each value for spill cost estimation."""
+        for block in func.blocks:
+            for inst in block.instructions:
+                for v in inst.operands:
+                    if isinstance(v, Value):
+                        self._use_count[v.id] = self._use_count.get(v.id, 0) + 1
+
+    def _spill_cost(self, iv: LiveInterval) -> float:
+        """Estimate the cost of spilling an interval.
+
+        Lower cost = better to spill. Factors:
+        - Fewer uses = cheaper to spill (fewer reloads needed)
+        - Shorter live range = cheaper to spill
+        - Doesn't cross calls = cheaper to spill (no save/restore needed)
+        """
+        uses = self._use_count.get(iv.value.id, 1)
+        live_range = max(1, iv.end - iv.start)
+        call_penalty = 2.0 if iv.crosses_call else 1.0
+        # Cost = uses × live_range × call_penalty
+        # Higher cost = worse to spill
+        return uses * live_range * call_penalty
 
     def allocate(self) -> RegAllocation:
         """Run the register allocator."""
@@ -247,14 +311,26 @@ class LinearScanAllocator:
             else:
                 forbidden = interval.forbidden_regs
                 pref_reg = self._resolve_coalesce_reg(interval.value.id, interval.start)
-                if interval.crosses_call and (
-                    reg := self._pick_callee_saved_gpr(forbidden, pref_reg)
-                ):
-                    self._assign(interval, reg)
-                elif reg := self._pick_free_gpr(forbidden, pref_reg):
-                    self._assign(interval, reg)
+                if interval.crosses_call:
+                    # Intervals crossing calls: prefer callee-saved (survive calls),
+                    # fall back to caller-saved
+                    reg = self._pick_callee_saved_gpr(forbidden, pref_reg)
+                    if reg is None:
+                        reg = self._pick_caller_saved_gpr(forbidden, pref_reg)
+                    if reg is not None:
+                        self._assign(interval, reg)
+                    else:
+                        self._spill_at_interval(interval, is_float=False)
                 else:
-                    self._spill_at_interval(interval, is_float=False)
+                    # Non-crossing intervals: prefer caller-saved (no save/restore),
+                    # fall back to callee-saved
+                    reg = self._pick_caller_saved_gpr(forbidden, pref_reg)
+                    if reg is None:
+                        reg = self._pick_callee_saved_gpr(forbidden, pref_reg)
+                    if reg is not None:
+                        self._assign(interval, reg)
+                    else:
+                        self._spill_at_interval(interval, is_float=False)
         # Track which callee-saved registers are used
         for reg in self.result.reg_map.values():
             if reg in CALLEE_SAVED_GPRS and reg not in self.result.used_callee_saved:
@@ -262,6 +338,11 @@ class LinearScanAllocator:
 
         # Compute final frame size (aligned to 16 bytes)
         self.result.frame_size = (self._next_spill_offset + 15) & ~15
+
+        # Ensure all values have a register or spill slot
+        for interval in self.result.intervals:
+            if interval.value.id not in self.result.reg_map and interval.value.id not in self.result.spill_map:
+                self._spill(interval.value)
 
         return self.result
 
@@ -274,6 +355,24 @@ class LinearScanAllocator:
                 return prefer
         for i, reg in enumerate(self._free_gprs):
             if reg in CALLEE_SAVED_GPRS and reg not in forbidden:
+                self._free_gprs.pop(i)
+                return reg
+        return None
+
+    def _pick_caller_saved_gpr(self, forbidden: set[str] = frozenset(),
+                               prefer: str | None = None) -> str | None:
+        """Pick a free caller-saved GPR not in forbidden set, or None.
+
+        Caller-saved registers are cheaper: they don't need save/restore
+        across function calls, so prefer them for intervals that don't
+        cross calls.
+        """
+        if prefer and prefer in CALLER_SAVED_GPRS and prefer not in forbidden:
+            if prefer in self._free_gprs:
+                self._free_gprs.remove(prefer)
+                return prefer
+        for i, reg in enumerate(self._free_gprs):
+            if reg in CALLER_SAVED_GPRS and reg not in forbidden:
                 self._free_gprs.pop(i)
                 return reg
         return None
@@ -351,7 +450,7 @@ class LinearScanAllocator:
         for interval in self._active:
             if interval.end <= current_point:
                 if reg := interval.reg:
-                    if reg.startswith("xmm"):
+                    if reg.startswith("xmm") or reg.startswith("ymm"):
                         self._free_xmms.append(reg)
                     else:
                         self._free_gprs.append(reg)
@@ -373,8 +472,14 @@ class LinearScanAllocator:
         self._next_spill_offset += 8
 
     def _spill_at_interval(self, interval: LiveInterval, is_float: bool):
-        """Spill either the current interval or the one ending latest."""
-        # Find the active interval ending latest
+        """Spill either the current interval or the active interval with
+        the lowest spill cost.
+
+        Uses spill cost (fewer uses × shorter live range × no call crossing)
+        to pick the cheapest victim, rather than always spilling the
+        longest-lived interval.
+        """
+        # Find active intervals with registers of the right class
         if is_float:
             candidates = [
                 iv for iv in self._active if iv.reg and iv.reg.startswith("xmm")
@@ -385,13 +490,15 @@ class LinearScanAllocator:
             ]
 
         if candidates:
-            spill_candidate = max(candidates, key=lambda iv: iv.end)
+            # Pick the candidate with the lowest spill cost
+            spill_candidate = min(candidates, key=lambda iv: self._spill_cost(iv))
+
+            # Only spill if it's beneficial (candidate lives longer than current)
             if spill_candidate.end > interval.end:
-                # Spill the longest-lived active interval, use its register for current
                 reg = spill_candidate.reg
                 self._active.remove(spill_candidate)
                 self._spill(spill_candidate.value)
-                # Remove from reg_map
+                # Remove from reg_map (fully spilled)
                 if spill_candidate.value.id in self.result.reg_map:
                     del self.result.reg_map[spill_candidate.value.id]
                 self._assign(interval, reg)
@@ -400,8 +507,42 @@ class LinearScanAllocator:
         # Spill the current interval
         self._spill(interval.value)
 
+        # Ensure all values have a register or spill slot
+        for interval in self.result.intervals:
+            if interval.value.id not in self.result.reg_map and interval.value.id not in self.result.spill_map:
+                self._spill(interval.value)
+
+        return self.result
 
 def allocate_registers(func: Function) -> RegAllocation:
     """Run register allocation on a function."""
     allocator = LinearScanAllocator(func)
-    return allocator.allocate()
+    result = allocator.allocate()
+
+    # Safety net: ensure every value referenced by any instruction has a
+    # register or spill slot. This catches values created by optimization
+    # passes that may have been inserted after live interval computation.
+    all_vids = set()
+    for block in func.blocks:
+        for inst in block.instructions:
+            if inst.result:
+                all_vids.add(inst.result.id)
+            for op in inst.operands:
+                if hasattr(op, 'id'):
+                    all_vids.add(op.id)
+    for vid in all_vids:
+        if vid not in result.reg_map and vid not in result.spill_map:
+            # Find the value object to spill
+            for block in func.blocks:
+                for inst in block.instructions:
+                    if inst.result and inst.result.id == vid:
+                        result.spill_map[vid] = allocator._next_spill_offset
+                        allocator._next_spill_offset += 8
+                        break
+                    for op in inst.operands:
+                        if hasattr(op, 'id') and op.id == vid:
+                            result.spill_map[vid] = allocator._next_spill_offset
+                            allocator._next_spill_offset += 8
+                            break
+
+    return result

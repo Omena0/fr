@@ -613,6 +613,18 @@ def native_cmd(args):
             c_import_files = []
             link_libs = []
 
+            # Extract C imports and link flags from bytecode metadata
+            for line in bytecode.split("\n"):
+                if line.startswith("# C import:"):
+                    c_file = line.split(":", 1)[1].strip()
+                    if c_file not in c_import_files:
+                        c_import_files.append(c_file)
+                elif line.startswith("# Link:"):
+                    flags = line.split(":", 1)[1].strip().split()
+                    for flag in flags:
+                        if flag and flag not in link_libs:
+                            link_libs.append(flag)
+
             for c_file in c_import_files:
                 # Skip header files - they're for parsing only
                 if c_file.endswith(".h"):

@@ -102,6 +102,13 @@ class Op(Enum):
     FDIV = auto()
     FNEG = auto()
 
+    # Packed (SIMD) float arithmetic (AVX/SSE2)
+    VFMOVUPD = auto()   # load packed doubles from memory
+    VFMMULPD = auto()   # packed multiply
+    VFMADDPD = auto()   # packed add
+    VFMSUBPD = auto()   # packed subtract
+    VFHDADDPD = auto()  # horizontal add
+
     # Comparison
     LT = auto()
     GT = auto()
@@ -329,10 +336,15 @@ class Instruction:
 
     def replace_operand(self, old: Value, new: Value):
         """Replace all uses of old with new in this instruction."""
+        found = False
         for i, op in enumerate(self.operands):
             if op is old:
                 self.operands[i] = new
+                found = True
+        if found:
+            if self in old.uses:
                 old.uses.remove(self)
+            if self not in new.uses:
                 new.uses.append(self)
 
     def remove_from_uses(self):

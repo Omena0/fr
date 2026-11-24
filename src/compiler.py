@@ -2575,6 +2575,14 @@ class BytecodeCompiler:
                 var_id = self.get_var_id(arg_name)
                 self.emit(f"  .arg {arg_name} {mapped_type}")
 
+        # Emit LOAD for each parameter to load from ABI register into local variable
+        # at function entry. This ensures parameter values are available in registers
+        # from the start of the function body.
+        for arg_idx, arg in enumerate(args):
+            if isinstance(arg, (tuple, list)) and len(arg) == 2:
+                self.emit(f"  LOAD {arg_idx}")
+                self.emit(f"  STORE {arg_idx}")
+
         # Collect local variables (scan the function body)
         locals_found = set()
         for stmt in scope:
