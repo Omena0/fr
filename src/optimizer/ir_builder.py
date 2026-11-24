@@ -81,10 +81,7 @@ def _parse_line(line: str) -> tuple[str, list[str]]:
     else:
         parts = line.split()
 
-    if not parts:
-        return ("", [])
-
-    return (parts[0], parts[1:])
+    return ("", []) if not parts else (parts[0], parts[1:])
 
 
 class IRBuilder:
@@ -131,9 +128,7 @@ class IRBuilder:
                 field_names = args[3 : 3 + nfields]
                 type_strs = args[3 + nfields : 3 + 2 * nfields]
                 field_types = []
-                for ts in type_strs:
-                    field_types.append(_TYPE_MAP.get(ts, IRType.INT64))
-
+                field_types.extend(_TYPE_MAP.get(ts, IRType.INT64) for ts in type_strs)
                 st = StructType(
                     name=f"__struct_{sid}",
                     field_names=field_names,
@@ -161,7 +156,7 @@ class IRBuilder:
                 self.module.source_file = line.strip()[9:].strip()
 
         # Add any unnamed structs
-        for sid, st in self._struct_id_map.items():
+        for st in self._struct_id_map.values():
             if st.name not in self.module.struct_types:
                 self.module.add_struct(st)
 
@@ -318,15 +313,9 @@ class IRBuilder:
 
         self._block_maps[func.name] = block_map
 
-        # Variable versions: track current SSA value for each local variable index
-        # This is pre-SSA: we'll insert phi nodes later
-        var_versions: dict[int, Value] = {}
         self._boxed_locals: dict[int, Value] = {}
 
-        # Initialize params
-        for p in func.params:
-            var_versions[p.index] = p
-
+        var_versions: dict[int, Value] = {p.index: p for p in func.params}
         # Per-block entry and exit variable states (for PHI construction)
         block_entry_vars: dict[str, dict[int, Value]] = {}
         block_exit_vars: dict[str, dict[int, Value]] = {}
